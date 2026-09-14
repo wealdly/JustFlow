@@ -10,8 +10,8 @@ struct HotkeySpec { UINT mods = 0; UINT vk = 0; };
 struct Config
 {
     // [capture]
-    std::wstring window_class = L"GxWindowClass";
-    std::wstring window_title = L"World of Warcraft";
+    std::wstring window_class = L"";      // profiles name the game; the binary carries no game-specific strings
+    std::wstring window_title = L"";
     bool cursor = false, border = false;
     bool dda = true;                       // capture.mode: dda (monitor refresh rate) | wgc (60 Hz ceiling)
     // [nr]
