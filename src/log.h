@@ -4,6 +4,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>
+#include <share.h>
 
 inline FILE*& LogFile() { static FILE* f = nullptr; return f; }
 inline std::mutex& LogMutex() { static std::mutex m; return m; }
@@ -12,7 +13,7 @@ inline void LogInit(const wchar_t* path)
 {
     std::lock_guard<std::mutex> lk(LogMutex());
     if (LogFile()) { fclose(LogFile()); LogFile() = nullptr; }
-    if (path && *path) _wfopen_s(&LogFile(), path, L"w");
+    if (path && *path) LogFile() = _wfsopen(path, L"w", _SH_DENYWR);   // readable while we run
 }
 
 inline void Log(const char* fmt, ...)

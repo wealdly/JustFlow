@@ -325,7 +325,7 @@ int main(int argc, char** argv)
 
         bool reset = true;
         LONGLONG last_sysrel = 0;
-        UINT frames = 0, skips = 0; int follow_tick = 0;
+        UINT frames = 0, skips = 0, rate_drops = 0; int follow_tick = 0; double last_processed_ms = 0;
         double win_t0 = NowMs();
         std::vector<double> cpu_ms, lat_ms;
         for (;;)
@@ -362,6 +362,10 @@ int main(int argc, char** argv)
             }
             if (CaptureIsFloat(cap)) { Log("[main] FP16 (HDR) capture is not supported in phase 1 - exiting"); quit = true; rc = 2; break; }
             const double t0 = NowMs();
+            // max_fps: a GPU-bound game (Dawnwalker with 3X FG presents ~135 fps) would otherwise get a
+            // full pipeline pass per presented frame and lose the GPU time. Drop frames above the cap.
+            if (cfg.max_fps > 0 && t0 - last_processed_ms < 1000.0 / cfg.max_fps) { ++rate_drops; continue; }
+            last_processed_ms = t0;
             if (last_sysrel && sysrel - last_sysrel > 2500000) reset = true;   // > 250 ms gap
             last_sysrel = sysrel;
             if (!PipelineFrame(p, CaptureTexture(cap), CaptureFence(cap), fv, reset)) { Log("[main] frame failed - exiting"); GpuLogDeviceRemoved(g, "frame"); quit = true; rc = 3; break; }
@@ -379,9 +383,9 @@ int main(int argc, char** argv)
                 StageStats cpu{ cpu_ms }, lat{ lat_ms };
                 double gpu = 0;
                 for (int s = 0; s < PS_COUNT; ++s) if (s != PS_OFA && p->st[s].med() > 0) gpu += p->st[s].med();
-                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f static_skips=%u latency_ms(cap->present)=%.1f",
-                    frames * 1000.0 / (NowMs() - win_t0), p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), skips, lat.med());
-                frames = 0; skips = 0; win_t0 = NowMs(); cpu_ms.clear(); lat_ms.clear();
+                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f static_skips=%u rate_drops=%u latency_ms(cap->present)=%.1f",
+                    frames * 1000.0 / (NowMs() - win_t0), p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), skips, rate_drops, lat.med());
+                frames = 0; skips = 0; rate_drops = 0; win_t0 = NowMs(); cpu_ms.clear(); lat_ms.clear();
                 for (auto& s : p->st) s.v.clear();
             }
         }

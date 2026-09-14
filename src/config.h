@@ -23,6 +23,7 @@ struct Config
     float residual_strength = 1.0f;
     int   warmup = 8;
     int   rebuild_debounce_frames = 30;
+    int   max_fps = 0;                     // 0 = process every captured frame; else cap the pipeline rate
     // [ofa]
     UINT  ofa_w = 960, ofa_h = 540;
     int   ofa_grid = 0;

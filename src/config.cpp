@@ -56,6 +56,7 @@ bool ConfigLoad(const wchar_t* path, Config& c)
     c.residual_strength = F(path, L"nr", L"residual_strength", c.residual_strength);
     c.warmup = I(path, L"nr", L"warmup", c.warmup);
     c.rebuild_debounce_frames = I(path, L"nr", L"rebuild_debounce_frames", c.rebuild_debounce_frames);
+    c.max_fps = I(path, L"nr", L"max_fps", c.max_fps);
 
     const std::wstring in = S(path, L"ofa", L"input", L"960x540");
     if (swscanf_s(in.c_str(), L"%ux%u", &c.ofa_w, &c.ofa_h) != 2) { c.ofa_w = 960; c.ofa_h = 540; }
