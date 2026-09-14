@@ -49,7 +49,7 @@ add_custom_command(TARGET nrfilter_spike POST_BUILD
 if(EXISTS ${CMAKE_SOURCE_DIR}/src/main.cpp AND EXISTS ${CMAKE_SOURCE_DIR}/src/compose.cpp)
 add_executable(nrfilter
     src/main.cpp src/d3d.cpp src/capture.cpp src/present.cpp src/ngx_nr.cpp
-    src/nvofa.cpp src/compose.cpp src/bench.cpp src/config.cpp)
+    src/nvofa.cpp src/compose.cpp src/bench.cpp src/config.cpp src/fg.cpp)
 add_dependencies(nrfilter shaders nvngx_dll_nrfilter)
 target_include_directories(nrfilter PRIVATE src ${CMAKE_BINARY_DIR}/gen third_party/ngx/include third_party/nvofa "${CPPWINRT_INC}")
 target_link_directories(nrfilter PRIVATE third_party/ngx/lib)

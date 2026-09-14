@@ -13,6 +13,7 @@ struct Config
     std::wstring window_class = L"GxWindowClass";
     std::wstring window_title = L"World of Warcraft";
     bool cursor = false, border = false;
+    bool dda = true;                       // capture.mode: dda (monitor refresh rate) | wgc (60 Hz ceiling)
     // [nr]
     bool  nr_enabled = true;
     UINT  work_w = 0, work_h = 0;          // 0 = auto (from spike results / default 2560x1440)
@@ -34,11 +35,14 @@ struct Config
     int   feather = 12;
     int   nrects = 0;
     UiRect rects[16] = {};
+    // [fg]
+    bool  fg_enabled = false;
+    int   fg_multiplier = 2;               // presented frames per rendered frame, 2..4
     // [overlay]
     bool  exclude_from_capture = false;
     int   reassert_topmost_every = 300;
     // [hotkeys]
-    HotkeySpec hk_toggle, hk_wipe, hk_reload, hk_quit;
+    HotkeySpec hk_toggle, hk_wipe, hk_reload, hk_quit, hk_fg;
     // [log]
     std::wstring log_file = L"nrfilter.log";
     int   stats_every = 180;

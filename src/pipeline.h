@@ -5,6 +5,7 @@
 #include "d3d.h"
 #include "config.h"
 #include "compose.h"
+#include "fg.h"
 #include "ngx_nr.h"
 #include "nvofa.h"
 #include "present.h"
@@ -34,6 +35,7 @@ struct Pipeline
     Nr*      nr = nullptr;
     Ofa*     ofa = nullptr;
     Overlay* ov = nullptr;
+    Fg*      fg = nullptr;        // frame generation presenter; exists while cfg.fg_enabled and it works
     ID3D12Resource *color4k = nullptr, *gray = nullptr, *out4k = nullptr;   // rest: NPSR, UAV, UAV
     ID3D12Resource *nr_in = nullptr, *nr_out = nullptr, *mv = nullptr;     // rest: NPSR, UAV, NPSR
     // NR feature lifecycle

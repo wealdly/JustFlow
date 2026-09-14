@@ -3,6 +3,9 @@
 // the D3D12 queue waits on. No CPU wait on the GPU anywhere in here.
 #include "capture.h"
 #include "log.h"
+#include <dwmapi.h>
+#include <algorithm>
+#pragma comment(lib, "dwmapi.lib")
 #include <unknwn.h>
 #include <inspectable.h>
 #include <d3d11_4.h>
@@ -48,6 +51,11 @@ struct Capture
     volatile LONG closed = 0;
     bool is_float = false, format_logged = false;
     UINT pend_w = 0, pend_h = 0; ULONGLONG pend_since = 0;   // size-change deadband
+    // Desktop Duplication path (delivers at the monitor refresh; WGC window capture tops out at 60 Hz)
+    IDXGIOutputDuplication* dup = nullptr;
+    bool  dup_frame_held = false;        // released right before the next acquire (the copy has long executed)
+    RECT  out_rect = {};                 // monitor rect in desktop coords
+    RECT  win_rect = {};                 // captured region (window bounds clamped to the monitor)
 };
 
 #define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
@@ -63,6 +71,7 @@ static void CaptureFree(Capture* c)
     }
     catch (winrt::hresult_error const&) {}
     c->session = nullptr; c->pool = nullptr; c->item = nullptr; c->device = nullptr;
+    if (c->dup) { if (c->dup_frame_held) c->dup->ReleaseFrame(); c->dup->Release(); c->dup = nullptr; }
     for (int i = 0; i < 2; ++i) { REL(c->shared12[i]); REL(c->shared11[i]); }
     REL(c->fence11); REL(c->fence12); REL(c->ctx4); REL(c->ctx); REL(c->dev);
     if (c->frame_event) { CloseHandle(c->frame_event); c->frame_event = nullptr; }
@@ -105,7 +114,89 @@ done:
     return ok;
 }
 
-Capture* CaptureOpen(Gpu& g, HWND target, bool show_cursor, bool show_border)
+// Window bounds clamped to the monitor that holds the window. Borderless fullscreen = the monitor.
+static bool WindowRegion(HWND target, const RECT& out, RECT& region)
+{
+    RECT r = {};
+    if (FAILED(DwmGetWindowAttribute(target, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof r))) GetWindowRect(target, &r);
+    region.left = std::max(r.left, out.left); region.top = std::max(r.top, out.top);
+    region.right = std::min(r.right, out.right); region.bottom = std::min(r.bottom, out.bottom);
+    return region.right > region.left && region.bottom > region.top;
+}
+
+static bool OpenDda(Gpu& g, Capture* c)
+{
+    const HMONITOR mon = MonitorFromWindow(c->target, MONITOR_DEFAULTTONEAREST);
+    IDXGIOutput* out = nullptr;
+    for (UINT i = 0; g.adapter->EnumOutputs(i, &out) != DXGI_ERROR_NOT_FOUND; ++i)
+    {
+        DXGI_OUTPUT_DESC d = {}; out->GetDesc(&d);
+        if (d.Monitor == mon) { c->out_rect = d.DesktopCoordinates; break; }
+        out->Release(); out = nullptr;
+    }
+    if (!out) { Log("[cap] DDA: the window's monitor is not on the NGX adapter"); return false; }
+    IDXGIOutput1* out1 = nullptr;
+    out->QueryInterface(__uuidof(IDXGIOutput1), (void**)&out1);
+    out->Release();
+    if (!out1) { Log("[cap] DDA: IDXGIOutput1 unavailable"); return false; }
+    const HRESULT hr = out1->DuplicateOutput(c->dev, &c->dup);
+    out1->Release();
+    if (FAILED(hr)) { Log("[cap] DDA: DuplicateOutput failed 0x%08X - falling back to window capture", (unsigned)hr); return false; }
+    if (!WindowRegion(c->target, c->out_rect, c->win_rect)) { Log("[cap] DDA: window has no visible region"); c->dup->Release(); c->dup = nullptr; return false; }
+    c->w = (UINT)(c->win_rect.right - c->win_rect.left); c->h = (UINT)(c->win_rect.bottom - c->win_rect.top);
+    DXGI_OUTDUPL_DESC dd = {}; c->dup->GetDesc(&dd);
+    Log("[cap] DDA: monitor %ldx%ld @ %u/%u Hz, format %u, region %ux%u at %ld,%ld",
+        c->out_rect.right - c->out_rect.left, c->out_rect.bottom - c->out_rect.top,
+        dd.ModeDesc.RefreshRate.Numerator, dd.ModeDesc.RefreshRate.Denominator, (unsigned)dd.ModeDesc.Format,
+        c->w, c->h, c->win_rect.left - c->out_rect.left, c->win_rect.top - c->out_rect.top);
+    c->is_float = dd.ModeDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+    c->format_logged = true;
+    return true;
+}
+
+static bool AcquireDda(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG& sys_rel_100ns)
+{
+    if (c->dup_frame_held) { c->dup->ReleaseFrame(); c->dup_frame_held = false; }
+    DXGI_OUTDUPL_FRAME_INFO info = {}; IDXGIResource* res = nullptr;
+    const HRESULT hr = c->dup->AcquireNextFrame(wait_ms, &info, &res);
+    if (hr == DXGI_ERROR_WAIT_TIMEOUT) return false;
+    if (FAILED(hr)) { Log("[cap] DDA: AcquireNextFrame 0x%08X - capture lost (mode change / access lost)", (unsigned)hr); InterlockedExchange(&c->closed, 1); return false; }
+    c->dup_frame_held = true;
+    if (info.LastPresentTime.QuadPart == 0) { res->Release(); return false; }   // only the cursor / metadata moved
+    RECT region;
+    if (WindowRegion(c->target, c->out_rect, region))
+    {
+        const UINT nw = (UINT)(region.right - region.left), nh = (UINT)(region.bottom - region.top);
+        if (nw != c->w || nh != c->h)
+        {
+            if (nw != c->pend_w || nh != c->pend_h) { c->pend_w = nw; c->pend_h = nh; c->pend_since = GetTickCount64(); }
+            res->Release(); return false;
+        }
+        c->pend_w = c->pend_h = 0;
+        c->win_rect = region;
+    }
+    ID3D11Texture2D* tex = nullptr;
+    res->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&tex);
+    res->Release();
+    if (!tex) return false;
+    const int idx = (int)((c->fence_value + 1) & 1);
+    if (!c->is_float)
+    {
+        D3D11_BOX box = { (UINT)(c->win_rect.left - c->out_rect.left), (UINT)(c->win_rect.top - c->out_rect.top), 0,
+                          (UINT)(c->win_rect.right - c->out_rect.left), (UINT)(c->win_rect.bottom - c->out_rect.top), 1 };
+        c->ctx->CopySubresourceRegion(c->shared11[idx], 0, 0, 0, 0, tex, 0, &box);
+    }
+    tex->Release();
+    ++c->fence_value;
+    c->ctx4->Signal(c->fence11, c->fence_value);
+    c->ctx->Flush();
+    c->cur = idx;
+    fence_value = c->fence_value;
+    sys_rel_100ns = info.LastPresentTime.QuadPart;   // QPC ticks
+    return true;
+}
+
+Capture* CaptureOpen(Gpu& g, HWND target, bool show_cursor, bool show_border, bool prefer_dda)
 {
     static bool apartment = false;
     if (!apartment)
@@ -126,6 +217,12 @@ Capture* CaptureOpen(Gpu& g, HWND target, bool show_cursor, bool show_border)
     if (FAILED(c->ctx->QueryInterface(__uuidof(ID3D11DeviceContext4), (void**)&c->ctx4))) { Log("[cap] ID3D11DeviceContext4 unavailable"); CaptureFree(c); return nullptr; }
     Log("[cap] D3D11 device on adapter %d (luid %08X:%08X)", g.adapter_index, (unsigned)g.luid.HighPart, (unsigned)g.luid.LowPart);
 
+    if (prefer_dda && OpenDda(g, c))
+    {
+        if (!CreateBridge(g, c)) { CaptureFree(c); return nullptr; }
+        Log("[cap] capturing window %p via Desktop Duplication, region %ux%u", (void*)target, c->w, c->h);
+        return c;
+    }
     try
     {
         if (!wgc::GraphicsCaptureSession::IsSupported()) { Log("[cap] Windows Graphics Capture not supported"); CaptureFree(c); return nullptr; }
@@ -165,7 +262,7 @@ Capture* CaptureOpen(Gpu& g, HWND target, bool show_cursor, bool show_border)
         CaptureFree(c);
         return nullptr;
     }
-    Log("[cap] capturing window %p at %ux%u", (void*)target, c->w, c->h);
+    Log("[cap] capturing window %p at %ux%u via Windows.Graphics.Capture (60 Hz ceiling)", (void*)target, c->w, c->h);
     return c;
 }
 
@@ -179,6 +276,7 @@ void CaptureClose(Capture* c)
 bool CaptureAcquire(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG& sys_rel_100ns)
 {
     if (!c || CaptureLost(c)) return false;
+    if (c->dup) return AcquireDda(c, wait_ms, fence_value, sys_rel_100ns);
     WaitForSingleObject(c->frame_event, wait_ms);   // the pool decides; a stale event just costs a TryGetNextFrame
     try
     {
@@ -242,6 +340,7 @@ ID3D12Fence*    CaptureFence(Capture* c)   { return c->fence12; }
 UINT            CaptureWidth(Capture* c)   { return c->w; }
 UINT            CaptureHeight(Capture* c)  { return c->h; }
 bool            CaptureIsFloat(Capture* c) { return c->is_float; }
+bool            CaptureIsDda(Capture* c)   { return c && c->dup != nullptr; }
 
 bool CaptureSizeChanged(Capture* c, UINT& new_w, UINT& new_h)
 {

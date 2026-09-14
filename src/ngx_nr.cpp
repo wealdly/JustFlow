@@ -184,7 +184,9 @@ bool NrCreate(Nr* n, ID3D12GraphicsCommandList* cl, const NrConfig& cfg)
     SetTuning(n, cfg.tuning);
     NVSDK_NGX_Handle* h = nullptr; DWORD code = 0;
     NVSDK_NGX_Result r = (NVSDK_NGX_Result)0x7FFFFFFF;
+    NgxMutex().lock();   // no lock_guard: __try forbids unwindable objects in this frame
     __try { r = n->create(cl, NVSDK_NGX_Feature_Reserved18, n->params, &h); } __except (EXCEPTION_EXECUTE_HANDLER) { code = GetExceptionCode(); }
+    NgxMutex().unlock();
     if (code) { n->last_error = "CreateFeature raised an exception"; Log("[ngx] CreateFeature raised 0x%08X", code); return false; }
     if (NVSDK_NGX_FAILED(r) || !h) { n->last_error = NgxResultName(r); Log("[ngx] CreateFeature(18) %ux%u style %c -> 0x%08X (%s)", cfg.work_w, cfg.work_h, cfg.create_style == NrCreateA ? 'A' : 'B', r, NgxResultName(r)); return false; }
     n->feature = h; n->live = cfg; n->submitted = false;
@@ -210,7 +212,9 @@ unsigned NrEvaluate(Nr* n, ID3D12GraphicsCommandList* cl, ID3D12Resource* color,
     SetTuning(n, n->live.tuning);
     SetF(n, "DLSS.Pre.Exposure", 1.0f); SetF(n, "DLSS.Exposure.Scale", exposure_scale);
     DWORD code = 0; NVSDK_NGX_Result r = (NVSDK_NGX_Result)0x7FFFFFFF;
+    NgxMutex().lock();
     __try { r = n->evaluate(cl, n->feature, n->params, nullptr); } __except (EXCEPTION_EXECUTE_HANDLER) { code = GetExceptionCode(); }
+    NgxMutex().unlock();
     if (code) { n->last_error = "EvaluateFeature raised an exception"; Log("[ngx] evaluate raised 0x%08X", code); n->g->failed = true; return 0xBAD00000; }
     if (NVSDK_NGX_FAILED(r)) { n->last_error = NgxResultName(r); }
     return (unsigned)r;

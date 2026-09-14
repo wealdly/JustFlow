@@ -3,7 +3,12 @@
 // handle, and a retire ring for replaced features (each ~420 MB; freed ~32 evaluates later).
 #pragma once
 #include "d3d.h"
+#include <mutex>
 #include <string>
+
+// Serialises NGX entry points (NR on the main thread, DLSS-G on the FG presenter thread): the
+// runtime's thread-safety across features is undocumented and each call only records commands.
+inline std::mutex& NgxMutex() { static std::mutex m; return m; }
 
 enum NrCreateStyle { NrCreateA = 0 /* NeuralScreen set */, NrCreateB = 1 /* fork set: plain Width/Height */ };
 enum NrParamBlock  { NrBlockAllocate = 1, NrBlockCapability = 2, NrBlockOwn = 3 };

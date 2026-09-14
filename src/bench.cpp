@@ -141,6 +141,7 @@ int RunBench(int argc, char** argv)
     const double wall = NowMs() - t0;
     GpuWaitIdle(g);
     PipelineReadStamps(p);
+    if (p->fg) { UINT out = 0, drops = 0; FgStats(p->fg, out, drops); Log("[fg] bench: %u frames presented (%.1f fps), %u dropped", out, out * 1000.0 / wall, drops); }
 
     printf("\n%-16s %10s %10s %8s\n", "stage", "median ms", "p95 ms", "samples");
     FILE* csv = nullptr; _wfopen_s(&csv, (dir + L"\\bench.csv").c_str(), L"w");

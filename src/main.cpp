@@ -81,9 +81,10 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
     if (p->gw != cfg.ofa_w || p->gh != cfg.ofa_h) Log("[main] ofa input %ux%u adjusted to %ux%u (block %ux%u)", cfg.ofa_w, cfg.ofa_h, p->gw, p->gh, bx, by);
     if (with_overlay)
     {
-        const HotkeyDef keys[4] = { { 1, cfg.hk_toggle.mods, cfg.hk_toggle.vk }, { 2, cfg.hk_wipe.mods, cfg.hk_wipe.vk },
-                                    { 3, cfg.hk_reload.mods, cfg.hk_reload.vk }, { 4, cfg.hk_quit.mods, cfg.hk_quit.vk } };
-        p->ov = OverlayCreate(g, target, w, h, keys, 4, cfg.exclude_from_capture);
+        const HotkeyDef keys[5] = { { 1, cfg.hk_toggle.mods, cfg.hk_toggle.vk }, { 2, cfg.hk_wipe.mods, cfg.hk_wipe.vk },
+                                    { 3, cfg.hk_reload.mods, cfg.hk_reload.vk }, { 4, cfg.hk_quit.mods, cfg.hk_quit.vk },
+                                    { 5, cfg.hk_fg.mods, cfg.hk_fg.vk } };
+        p->ov = OverlayCreate(g, target, w, h, keys, 5, cfg.exclude_from_capture);
         if (!p->ov) { PipelineDestroy(p); return nullptr; }
     }
     p->sh = ShadersCreate(g);
@@ -104,6 +105,7 @@ void PipelineDestroy(Pipeline* p)
 {
     if (!p) return;
     GpuWaitIdle(*p->g);
+    if (p->fg) FgDestroy(p->fg);
     REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->nr_in); REL(p->nr_out); REL(p->mv);
     if (p->ofa) OfaDestroy(p->ofa);
     if (p->nr) NrShutdown(p->nr);
@@ -112,9 +114,12 @@ void PipelineDestroy(Pipeline* p)
     delete p;
 }
 
+static void DropFg(Pipeline* p) { if (p->fg) { FgDestroy(p->fg); p->fg = nullptr; } }
+
 bool PipelineResize(Pipeline* p, UINT w, UINT h)
 {
     GpuWaitIdle(*p->g);
+    DropFg(p);   // sized to the output; recreated on the next frame
     REL(p->color4k); REL(p->gray); REL(p->out4k);
     p->w = w; p->h = h;
     p->force_reset = true;
@@ -125,6 +130,7 @@ bool PipelineResize(Pipeline* p, UINT w, UINT h)
 void PipelineReload(Pipeline* p, const Config& c)
 {
     const bool rebuild = ConfigNeedsRebuild(p->cfg, c);
+    if (c.fg_multiplier != p->cfg.fg_multiplier) DropFg(p);
     p->cfg = c;
     if (rebuild && p->nr)
     {
@@ -154,8 +160,15 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (p->force_reset) { reset = true; p->force_reset = false; }
     if (p->rebuild_countdown > 0 && --p->rebuild_countdown == 0)
     {
-        if (p->ww != c.work_w || p->wh != c.work_h) { GpuWaitIdle(g); REL(p->nr_in); REL(p->nr_out); REL(p->mv); if (!AllocWork(p)) return false; }
+        if (p->ww != c.work_w || p->wh != c.work_h) { GpuWaitIdle(g); DropFg(p); REL(p->nr_in); REL(p->nr_out); REL(p->mv); if (!AllocWork(p)) return false; }
         p->create_pending = true; reset = true;
+    }
+    // FG lifecycle follows cfg.fg_enabled (ini, F8). A presenter failure turns the flag off; F8 retries.
+    if (p->fg && (!c.fg_enabled || FgFailed(p->fg))) { if (FgFailed(p->fg)) p->cfg.fg_enabled = false; DropFg(p); }
+    if (p->ov && c.fg_enabled && !p->fg)
+    {
+        p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, c.fg_multiplier);
+        if (!p->fg) p->cfg.fg_enabled = false;
     }
     auto stamp = [&](int i) { if (c.gpu_timestamps) GpuStamp(g, cl, i); };
 
@@ -242,19 +255,26 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     CsCompose(g, p->sh, cl, p->color4k, p->nr_in, p->nr_out, p->ww, p->wh, p->out4k, p->w, p->h, cp);
     stamp(7);
     GpuBarrier(cl, p->nr_out, NPSR, UAV);
+    bool fg_recorded = false;
     if (p->ov)
     {
-        ID3D12Resource* bb = OverlayBackbuffer(p->ov);
-        GpuBarrier(cl, bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
         GpuBarrier(cl, p->out4k, UAV, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        cl->CopyResource(bb, p->out4k);
+        if (p->fg) fg_recorded = FgRecord(p->fg, cl, p->out4k, p->mv);   // the presenter thread presents
+        else
+        {
+            ID3D12Resource* bb = OverlayBackbuffer(p->ov);
+            GpuBarrier(cl, bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
+            cl->CopyResource(bb, p->out4k);
+            GpuBarrier(cl, bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+        }
         GpuBarrier(cl, p->out4k, D3D12_RESOURCE_STATE_COPY_SOURCE, UAV);
-        GpuBarrier(cl, bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
     }
-    if (!GpuEnd(g)) return false;
+    const UINT64 f2 = GpuEnd(g);
+    if (!f2) return false;
     PipelineReadStamps(p);
     tw = NowMs();
-    if (p->ov && !OverlayPresent(p->ov)) { GpuLogDeviceRemoved(g, "present"); return false; }
+    if (p->fg) { if (fg_recorded) FgSubmit(p->fg, f2, reset); }
+    else if (p->ov && !OverlayPresent(p->ov)) { GpuLogDeviceRemoved(g, "present"); return false; }
     p->cpu_wait[3].add(NowMs() - tw);
     if (evaluated) NrRetireTick(p->nr);
     p->last_evaluated = evaluated;
@@ -322,7 +342,9 @@ int main(int argc, char** argv)
             Sleep(1000);
         }
         Log("[main] target window %p", (void*)target);
-        Capture* cap = CaptureOpen(g, target, cfg.cursor, cfg.border);
+        Capture* cap = CaptureOpen(g, target, cfg.cursor, cfg.border, cfg.dda);
+        // Desktop Duplication sees the whole monitor, our overlay included: exclusion is mandatory there.
+        if (cap && CaptureIsDda(cap)) cfg.exclude_from_capture = true;
         if (!cap) { Sleep(1000); continue; }
         Pipeline* p = PipelineCreate(g, cfg, CaptureWidth(cap), CaptureHeight(cap), true, target);
         if (!p) { CaptureClose(cap); rc = 1; break; }
@@ -337,6 +359,7 @@ int main(int argc, char** argv)
             if (OverlayHotkey(p->ov, 4)) { Log("[main] quit hotkey"); quit = true; break; }
             if (OverlayHotkey(p->ov, 1)) { p->bypass = !p->bypass; if (!p->bypass) p->force_reset = true; Log("[main] bypass %s", p->bypass ? "on" : "off"); }
             if (OverlayHotkey(p->ov, 2)) { p->wipe = (p->wipe + 1) % 3; p->wipe_t0 = NowMs(); Log("[main] wipe %d", p->wipe); }
+            if (OverlayHotkey(p->ov, 5)) { p->cfg.fg_enabled = !p->cfg.fg_enabled; Log("[main] fg %s", p->cfg.fg_enabled ? "on" : "off"); }
             if (OverlayHotkey(p->ov, 3))
             {
                 Config nc; ConfigLoad(ini_path.c_str(), nc);
@@ -351,7 +374,7 @@ int main(int argc, char** argv)
                 Log("[main] window settled at %ux%u - recreating capture", nw, nh);
                 GpuWaitIdle(g);
                 CaptureClose(cap);
-                cap = CaptureOpen(g, target, cfg.cursor, cfg.border);
+                cap = CaptureOpen(g, target, cfg.cursor, cfg.border, cfg.dda);
                 if (!cap || !PipelineResize(p, CaptureWidth(cap), CaptureHeight(cap))) { Log("[main] recreate failed"); break; }
                 reset = true; last_sysrel = 0;
                 continue;
@@ -387,8 +410,11 @@ int main(int argc, char** argv)
                 StageStats cpu{ cpu_ms }, lat{ lat_ms };
                 double gpu = 0;
                 for (int s = 0; s < PS_COUNT; ++s) if (s != PS_OFA && p->st[s].med() > 0) gpu += p->st[s].med();
-                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f static_skips=%u rate_drops=%u latency_ms(cap->present)=%.1f",
-                    frames * 1000.0 / (NowMs() - win_t0), p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), skips, rate_drops, lat.med());
+                UINT fg_out = 0, fg_drops = 0;
+                if (p->fg) FgStats(p->fg, fg_out, fg_drops);
+                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f static_skips=%u rate_drops=%u latency_ms(cap->present)=%.1f fg_out_fps=%.1f fg_drops=%u",
+                    frames * 1000.0 / (NowMs() - win_t0), p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), skips, rate_drops, lat.med(),
+                    fg_out * 1000.0 / (NowMs() - win_t0), fg_drops);
                 Log("[stats] gpu: swz=%.2f gray+ds=%.2f expand=%.2f eval=%.2f compose=%.2f | cpu waits: begin1=%.1f ofa=%.1f begin2=%.1f present=%.1f",
                     p->st[PS_SWIZZLE].med(), p->st[PS_GRAYDS].med(), p->st[PS_EXPAND].med(), p->st[PS_EVAL].med(), p->st[PS_COMPOSE].med(),
                     p->cpu_wait[0].med(), p->cpu_wait[1].med(), p->cpu_wait[2].med(), p->cpu_wait[3].med());

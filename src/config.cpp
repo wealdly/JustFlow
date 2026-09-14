@@ -37,6 +37,7 @@ bool ConfigLoad(const wchar_t* path, Config& c)
     c.window_class = S(path, L"capture", L"window_class", c.window_class);
     c.window_title = S(path, L"capture", L"window_title", c.window_title);
     c.cursor = B(path, L"capture", L"cursor", c.cursor);
+    c.dda = S(path, L"capture", L"mode", L"dda") != L"wgc";
     c.border = B(path, L"capture", L"border", c.border);
 
     c.nr_enabled = B(path, L"nr", L"enabled", c.nr_enabled);
@@ -76,6 +77,9 @@ bool ConfigLoad(const wchar_t* path, Config& c)
         if (swscanf_s(r.c_str(), L"%d,%d,%d,%d", &rc.x0, &rc.y0, &rc.x1, &rc.y1) == 4) c.rects[c.nrects++] = rc;
     }
 
+    c.fg_enabled = B(path, L"fg", L"enabled", c.fg_enabled);
+    c.fg_multiplier = I(path, L"fg", L"multiplier", c.fg_multiplier);
+
     c.exclude_from_capture = B(path, L"overlay", L"exclude_from_capture", c.exclude_from_capture);
     c.reassert_topmost_every = I(path, L"overlay", L"reassert_topmost_every", c.reassert_topmost_every);
 
@@ -83,6 +87,7 @@ bool ConfigLoad(const wchar_t* path, Config& c)
     c.hk_wipe = ParseHotkey(S(path, L"hotkeys", L"wipe", L"F10"), VK_F10);
     c.hk_reload = ParseHotkey(S(path, L"hotkeys", L"reload", L"F11"), VK_F11);
     c.hk_quit = ParseHotkey(S(path, L"hotkeys", L"quit", L"Ctrl+F12"), VK_F12);
+    c.hk_fg = ParseHotkey(S(path, L"hotkeys", L"fg", L"F8"), VK_F8);
 
     c.log_file = S(path, L"log", L"file", c.log_file);
     c.stats_every = I(path, L"log", L"stats_every", c.stats_every);
