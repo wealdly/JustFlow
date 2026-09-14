@@ -57,6 +57,7 @@ struct Capture
     bool  dup_frame_held = false;        // released right before the next acquire (the copy has long executed)
     RECT  out_rect = {};                 // monitor rect in desktop coords
     RECT  win_rect = {};                 // captured region (window bounds clamped to the monitor)
+    UINT  accum_last = 0; UINT64 accum_sum = 0, accum_n = 0;   // DDA AccumulatedFrames telemetry
 };
 
 #define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
@@ -163,6 +164,7 @@ static bool AcquireDda(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG&
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) return false;
     if (FAILED(hr)) { Log("[cap] DDA: AcquireNextFrame 0x%08X - capture lost (mode change / access lost)", (unsigned)hr); InterlockedExchange(&c->closed, 1); return false; }
     c->dup_frame_held = true;
+    c->accum_last = info.AccumulatedFrames; c->accum_sum += info.AccumulatedFrames; ++c->accum_n;
     if (info.LastPresentTime.QuadPart == 0) { res->Release(); return false; }   // only the cursor / metadata moved
     RECT region;
     if (WindowRegion(c->target, c->out_rect, region))
@@ -339,6 +341,9 @@ bool CaptureAcquire(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG& sy
 ID3D12Resource* CaptureTexture(Capture* c) { return c->shared12[c->cur]; }
 ID3D12Fence*    CaptureFence(Capture* c)   { return c->fence12; }
 UINT            CaptureWidth(Capture* c)   { return c->w; }
+// Mean DXGI AccumulatedFrames per acquired DDA frame since the last call (1.0 = every composed frame
+// reached us; 3.0 = the compositor produced three per acquire, i.e. we are slow; 0 = not DDA).
+double CaptureAccumMean(Capture* c) { if (!c || !c->dup || !c->accum_n) return 0; double m = (double)c->accum_sum / (double)c->accum_n; c->accum_sum = 0; c->accum_n = 0; return m; }
 UINT            CaptureHeight(Capture* c)  { return c->h; }
 bool            CaptureIsFloat(Capture* c) { return c->is_float; }
 bool            CaptureIsDda(Capture* c)   { return c && c->dup != nullptr; }

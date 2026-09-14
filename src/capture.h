@@ -24,6 +24,7 @@ bool CaptureAcquire(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG& sy
 ID3D12Resource* CaptureTexture(Capture* c);
 ID3D12Fence*    CaptureFence(Capture* c);
 UINT            CaptureWidth(Capture* c);
+double          CaptureAccumMean(Capture* c);   // DDA: mean AccumulatedFrames per acquire since the last call (0 = n/a)
 UINT            CaptureHeight(Capture* c);
 // True once the captured item size differed from the open size for >= 250 ms (deadband). The
 // caller then closes and reopens. new_w/new_h carry the settled size.
