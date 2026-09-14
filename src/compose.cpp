@@ -14,13 +14,13 @@
 struct Shaders
 {
     ComputePso swizzle, gray, downscale, expand, compose, residual, compose_residual;
-    // UI rects for compose: 64x1 R32_SINT texture, refilled from a per-slot upload buffer inside
-    // CsCompose (recorded into the caller's list; nothing blocks).
+    // UI rects for compose: 256x1 R32_SINT texture (64 rects x 4), refilled from a per-slot upload
+    // buffer inside CsCompose (recorded into the caller's list; nothing blocks).
     ID3D12Resource* rect_tex = nullptr;
     ID3D12Resource* rect_up[Gpu::kFrames] = {};
 };
 
-static const UINT kRectBytes = 256;   // 64 ints, also the D3D12 row pitch alignment
+static const UINT kMaxRects = 64, kRectInts = kMaxRects * 4, kRectBytes = kRectInts * 4;   // 1024 B, a multiple of the 256 B row pitch alignment
 
 Shaders* ShadersCreate(Gpu& g)
 {
@@ -30,10 +30,10 @@ Shaders* ShadersCreate(Gpu& g)
     ok &= GpuMakeCompute(g, g_cs_gray,      sizeof g_cs_gray,      1, 1, 6,  s->gray,      L"cs_gray");
     ok &= GpuMakeCompute(g, g_cs_downscale, sizeof g_cs_downscale, 1, 1, 4,  s->downscale, L"cs_downscale");
     ok &= GpuMakeCompute(g, g_cs_expand,    sizeof g_cs_expand,    2, 1, 11, s->expand,    L"cs_expand");
-    ok &= GpuMakeCompute(g, g_cs_compose,   sizeof g_cs_compose,   4, 1, 9,  s->compose,   L"cs_compose");
+    ok &= GpuMakeCompute(g, g_cs_compose,   sizeof g_cs_compose,   4, 1, 11, s->compose,   L"cs_compose");
     ok &= GpuMakeCompute(g, g_cs_residual,  sizeof g_cs_residual,  2, 1, 2,  s->residual,  L"cs_residual");
-    ok &= GpuMakeCompute(g, g_cs_compose_residual, sizeof g_cs_compose_residual, 4, 1, 10, s->compose_residual, L"cs_compose_residual");
-    s->rect_tex = GpuMakeTex(g, 64, 1, DXGI_FORMAT_R32_SINT, D3D12_RESOURCE_FLAG_NONE,
+    ok &= GpuMakeCompute(g, g_cs_compose_residual, sizeof g_cs_compose_residual, 4, 1, 12, s->compose_residual, L"cs_compose_residual");
+    s->rect_tex = GpuMakeTex(g, kRectInts, 1, DXGI_FORMAT_R32_SINT, D3D12_RESOURCE_FLAG_NONE,
                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"ui_rects");
     ok &= s->rect_tex != nullptr;
     for (int i = 0; i < Gpu::kFrames; ++i)
@@ -93,8 +93,8 @@ void CsExpand(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource*
 // Main-queue lists only (uses g.slot); both compose variants run there.
 static UINT UploadRects(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, const ComposeParams& p)
 {
-    // ponytail: rects re-uploaded every frame (256 B copy, ~free); no change tracking.
-    const int n = p.nrects < 0 ? 0 : p.nrects > 16 ? 16 : p.nrects;
+    // ponytail: rects re-uploaded every frame (1 KB copy, ~free); no change tracking.
+    const int n = p.nrects < 0 ? 0 : p.nrects > (int)kMaxRects ? (int)kMaxRects : p.nrects;
     ID3D12Resource* up = s->rect_up[g.slot];
     void* mem = nullptr;
     if (SUCCEEDED(up->Map(0, nullptr, &mem)))
@@ -107,7 +107,7 @@ static UINT UploadRects(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, const
     D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
     src.pResource = up; src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R32_SINT;
-    src.PlacedFootprint.Footprint.Width = 64; src.PlacedFootprint.Footprint.Height = 1; src.PlacedFootprint.Footprint.Depth = 1;
+    src.PlacedFootprint.Footprint.Width = kRectInts; src.PlacedFootprint.Footprint.Height = 1; src.PlacedFootprint.Footprint.Depth = 1;
     src.PlacedFootprint.Footprint.RowPitch = kRectBytes;
     dst.pResource = s->rect_tex; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
@@ -119,8 +119,8 @@ void CsCompose(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource
                UINT ww, UINT wh, ID3D12Resource* out, UINT w, UINT h, const ComposeParams& p)
 {
     const UINT n = UploadRects(g, s, cl, p);
-    struct { float strength; UINT wipe_mode; float wipe_x; int feather; UINT nrects, w, h, ww, wh; } c =
-        { p.residual_strength, (UINT)p.wipe_mode, p.wipe_x, p.feather, n, w, h, ww, wh };
+    struct { float strength; UINT wipe_mode; float wipe_x; int feather; UINT nrects, w, h, ww, wh, strip_w, strip_h; } c =
+        { p.residual_strength, (UINT)p.wipe_mode, p.wipe_x, p.feather, n, w, h, ww, wh, (UINT)p.strip_w, (UINT)p.strip_h };
     const GpuView srv[4] = { { native, DXGI_FORMAT_R8G8B8A8_UNORM }, { nr_in, DXGI_FORMAT_R8G8B8A8_UNORM },
                              { nr_out, DXGI_FORMAT_R8G8B8A8_UNORM }, { s->rect_tex, DXGI_FORMAT_R32_SINT } };
     const GpuView uav = { out, DXGI_FORMAT_R8G8B8A8_UNORM };
@@ -141,8 +141,8 @@ void CsComposeResidual(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12
                        ID3D12Resource* mv, ID3D12Resource* out, UINT w, UINT h, const ComposeParams& p)
 {
     const UINT n = UploadRects(g, s, cl, p);
-    struct { float strength; UINT wipe_mode; float wipe_x; int feather; UINT nrects, w, h, ww, wh; float warp; } c =
-        { p.residual_strength, (UINT)p.wipe_mode, p.wipe_x, p.feather, n, w, h, ww, wh, p.warp };
+    struct { float strength; UINT wipe_mode; float wipe_x; int feather; UINT nrects, w, h, ww, wh; float warp; UINT strip_w, strip_h; } c =
+        { p.residual_strength, (UINT)p.wipe_mode, p.wipe_x, p.feather, n, w, h, ww, wh, p.warp, (UINT)p.strip_w, (UINT)p.strip_h };
     const GpuView srv[4] = { { native, DXGI_FORMAT_R8G8B8A8_UNORM }, { residual, DXGI_FORMAT_R16G16B16A16_FLOAT },
                              { mv, DXGI_FORMAT_R16G16_FLOAT }, { s->rect_tex, DXGI_FORMAT_R32_SINT } };
     const GpuView uav = { out, DXGI_FORMAT_R8G8B8A8_UNORM };

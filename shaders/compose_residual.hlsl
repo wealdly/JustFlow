@@ -17,25 +17,28 @@ cbuffer C : register(b0)
     uint  nrects;
     uint  w, h, ww, wh;
     float warp;
+    uint  strip_w, strip_h;   // addon mask strip, see compose.hlsl
 };
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= w || id.y >= h) return;
-    const float3 nat = native[id.xy].rgb;
+    uint2 q = id.xy;   // the pixel composed: itself, or the one strip_h rows below inside the strip
+    if (id.y < strip_h && id.x < strip_w) q.y = min(id.y + strip_h, h - 1);
+    const float3 nat = native[q].rgb;
     float3 res = nat;
     if (wipe_mode != 2)
     {
-        const float2 uv = (float2(id.xy) + 0.5) / float2(w, h);
+        const float2 uv = (float2(q) + 0.5) / float2(w, h);
         const float2 suv = uv + mv.SampleLevel(samp, uv, 0) / float2(ww, wh) * warp;
         float3 r = residual.SampleLevel(samp, suv, 0).rgb;
         if (any(suv < 0) || any(suv > 1)) r = 0;
         res = saturate(nat + r * strength);
 
-        const float2 p = float2(id.xy);
+        const float2 p = float2(q);
         const float f = max(feather, 1);
-        [loop] for (uint i = 0; i < min(nrects, 16u); ++i)
+        [loop] for (uint i = 0; i < min(nrects, 64u); ++i)
         {
             const float x0 = rects[uint2(i * 4 + 0, 0)], y0 = rects[uint2(i * 4 + 1, 0)];
             const float x1 = rects[uint2(i * 4 + 2, 0)], y1 = rects[uint2(i * 4 + 3, 0)];

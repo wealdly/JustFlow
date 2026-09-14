@@ -2,7 +2,9 @@
 //   res = native + (nr_out^ - nr_in^) * strength      (^ = bilinear to w x h; sRGB space as-is,
 //   like NeuralScreen kResidualHlsl)
 // then UI rects (blend back to native inside, feathered outside), then the wipe.
-// Rects live in a 64x1 R32_SINT texture (x0,y0,x1,y1 per rect): root constants cap at 64 DWORDs.
+// Rects live in a 256x1 R32_SINT texture (x0,y0,x1,y1 per rect, up to 64): root constants cap at 64 DWORDs.
+// Addon mask strip (strip_w x strip_h at the top-left, 0 = off): those output pixels take the
+// composed value of the pixel strip_h rows below, so the strip never shows.
 Texture2D<float4>   native : register(t0);
 Texture2D<float4>   nr_in  : register(t1);
 Texture2D<float4>   nr_out : register(t2);
@@ -17,24 +19,27 @@ cbuffer C : register(b0)
     int   feather;
     uint  nrects;
     uint  w, h, ww, wh;
+    uint  strip_w, strip_h;
 };
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= w || id.y >= h) return;
-    const float3 nat = native[id.xy].rgb;
+    uint2 q = id.xy;   // the pixel composed: itself, or the one strip_h rows below inside the strip
+    if (id.y < strip_h && id.x < strip_w) q.y = min(id.y + strip_h, h - 1);
+    const float3 nat = native[q].rgb;
     float3 res = nat;
     if (wipe_mode != 2)
     {
-        const float2 uv = (float2(id.xy) + 0.5) / float2(w, h);
+        const float2 uv = (float2(q) + 0.5) / float2(w, h);
         const float3 a = nr_in.SampleLevel(samp, uv, 0).rgb;
         const float3 b = nr_out.SampleLevel(samp, uv, 0).rgb;
         res = saturate(nat + (b - a) * strength);
 
-        const float2 p = float2(id.xy);
+        const float2 p = float2(q);
         const float f = max(feather, 1);
-        [loop] for (uint i = 0; i < min(nrects, 16u); ++i)
+        [loop] for (uint i = 0; i < min(nrects, 64u); ++i)
         {
             const float x0 = rects[uint2(i * 4 + 0, 0)], y0 = rects[uint2(i * 4 + 1, 0)];
             const float x1 = rects[uint2(i * 4 + 2, 0)], y1 = rects[uint2(i * 4 + 3, 0)];

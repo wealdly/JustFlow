@@ -64,6 +64,16 @@ struct Pipeline
     int        ofa_cur = 0;       // per-frame OFA input ping-pong (slots 0/1); 2/3 are the model track's held grays
     UINT       frame_index = 0;   // frames fed (main thread)
 
+    // ---- addon UI mask ([ui] mask=1): the JustFlow addon draws a 4 px strip of 4x4 cells at the
+    // top-left of the game frame (addon\JustFlow\JustFlow.lua). List 1 copies that region of color4k
+    // into a READBACK ring; a retired slot is decoded on the CPU after the next submission.
+    ID3D12Resource* strip_rb[Gpu::kFrames] = {};
+    UINT64     strip_fence[Gpu::kFrames] = {};   // main fence value of the copy into strip_rb[i], 0 = nothing pending
+    int        mask_n = 0;                       // rects from the last valid strip
+    UiRect     mask_rects[64] = {};
+    double     mask_seen = 0;                    // NowMs() of the last valid decode (0 = never); stale after 1 s
+    bool       mask_active = false;              // a fresh mask is being applied (logged on change)
+
     // ---- decoupled model track ([nr] mode=async) --------------------------------------------------
     // Main hands one native frame at a time to the model thread (model_src copy + gray in a held OFA
     // slot, completed by main fence `fence`) whenever the thread asks (model_wants_frame). The thread

@@ -63,6 +63,62 @@ static const D3D12_RESOURCE_STATES COMMON = D3D12_RESOURCE_STATE_COMMON;
 static const D3D12_RESOURCE_STATES CSRC = D3D12_RESOURCE_STATE_COPY_SOURCE, CDST = D3D12_RESOURCE_STATE_COPY_DEST;
 static const D3D12_RESOURCE_FLAGS FUAV = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
+// ---- addon UI mask strip (addon\JustFlow\JustFlow.lua): 130 cells of 4x4 px at the top-left ----------
+static const UINT kStripCells = 2 * 64 + 2, kStripW = kStripCells * 4, kStripH = 4;   // 520 x 4 px
+static const UINT kStripPitch = (kStripW * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+
+// RGBA8 strip rows (pitch bytes apart) -> rects. Each 4x4 cell is read at its pixel (2, 2) only: one
+// pixel inside the cell, clear of a one-pixel bleed from either neighbour. Returns the rect count,
+// -1 when the header magic or the checksum do not match (out is untouched then).
+static int MaskDecode(const uint8_t* px, UINT pitch, UiRect* out)
+{
+    auto cell = [&](UINT i) { return px + 2 * pitch + (i * 4 + 2) * 4; };
+    const uint8_t* hd = cell(0);
+    if (hd[0] != 0x4A || hd[1] != 0x46 || hd[2] > 64) return -1;
+    const int n = hd[2];
+    UiRect r[64]; unsigned sum = 0;
+    for (int i = 0; i < n; ++i)
+    {
+        const uint8_t *a = cell(2 * i + 1), *b = cell(2 * i + 2);
+        sum += a[0] + a[1] + a[2] + b[0] + b[1] + b[2];
+        r[i].x0 = (a[0] << 4) | (a[1] >> 4); r[i].y0 = ((a[1] & 15) << 8) | a[2];
+        r[i].x1 = (b[0] << 4) | (b[1] >> 4); r[i].y1 = ((b[1] & 15) << 8) | b[2];
+    }
+    const uint8_t* ck = cell(2 * n + 1);
+    if (ck[0] != (sum & 255) || ck[1] != ck[0] || ck[2] != ck[0]) return -1;
+    memcpy(out, r, (size_t)n * sizeof(UiRect));
+    return n;
+}
+
+// Decode the newest retired strip copy (non-blocking: fence already completed); a mask not decoded
+// for 1 s expires to the manual rects. Logs once when the mask appears and once when it vanishes.
+static void MaskUpdate(Pipeline* p)
+{
+    Gpu& g = *p->g;
+    const UINT64 done = g.fence->GetCompletedValue();
+    int best = -1;
+    for (int i = 0; i < Gpu::kFrames; ++i)
+        if (p->strip_fence[i] && p->strip_fence[i] <= done && (best < 0 || p->strip_fence[i] > p->strip_fence[best])) best = i;
+    if (best >= 0)
+    {
+        const UINT64 bv = p->strip_fence[best];
+        for (auto& f : p->strip_fence) if (f <= bv) f = 0;   // consumed (older copies too)
+        uint8_t* px = nullptr; const D3D12_RANGE rr = { 0, (SIZE_T)kStripPitch * kStripH };
+        if (SUCCEEDED(p->strip_rb[best]->Map(0, &rr, (void**)&px)))
+        {
+            const int n = MaskDecode(px, kStripPitch, p->mask_rects);
+            const D3D12_RANGE none = { 0, 0 }; p->strip_rb[best]->Unmap(0, &none);
+            if (n >= 0) { p->mask_n = n; p->mask_seen = NowMs(); }
+        }
+    }
+    const bool fresh = p->cfg.mask && p->mask_seen > 0 && NowMs() - p->mask_seen < 1000.0;
+    if (fresh == p->mask_active) return;
+    p->mask_active = fresh;
+    if (!fresh) Log("[ui] addon mask lost (no valid strip for 1 s) - manual rects only");
+    else if (p->mask_n) Log("[ui] addon mask: %d rects, checksum ok (rect 1: %d,%d,%d,%d)", p->mask_n, p->mask_rects[0].x0, p->mask_rects[0].y0, p->mask_rects[0].x1, p->mask_rects[0].y1);
+    else Log("[ui] addon mask: 0 rects, checksum ok");
+}
+
 static bool AllocNative(Pipeline* p)
 {
     Gpu& g = *p->g;
@@ -245,6 +301,11 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
     p->ofa = OfaCreate(g, p->gw, p->gh, cfg.ofa_grid, cfg.ofa_dll.empty() ? nullptr : cfg.ofa_dll.c_str());
     if (!p->ofa) { PipelineDestroy(p); return nullptr; }
     if (!AllocNative(p) || !AllocWork(p)) { PipelineDestroy(p); return nullptr; }
+    for (auto& r : p->strip_rb)   // 9 KB each, always there so [ui] mask can be switched on by a reload
+    {
+        r = GpuMakeBuffer(g, (UINT64)kStripPitch * kStripH, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE, L"ui_strip_readback");
+        if (!r) { PipelineDestroy(p); return nullptr; }
+    }
     return p;
 }
 
@@ -256,6 +317,7 @@ void PipelineDestroy(Pipeline* p)
     if (p->fg) FgDestroy(p->fg);
     REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->nr_in); REL(p->nr_out); REL(p->mv);
     REL(p->model_src); ReleaseModelWork(p);
+    for (auto& r : p->strip_rb) REL(r);
     if (p->model_ctx.queue) GpuCtxShutdown(*p->g, p->model_ctx);   // its queue may hold a Wait on the OFA fence: before OfaDestroy
     if (p->ofa) OfaDestroy(p->ofa);
     if (p->nr) NrShutdown(p->nr);
@@ -339,6 +401,20 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     GpuBarrier(cl, p->color4k, NPSR, UAV);
     stamp(0); CsSwizzle(g, p->sh, cl, cap, p->color4k, p->w, p->h); stamp(1);
     GpuBarrier(cl, p->color4k, UAV, NPSR);
+    // addon mask: the top-left strip of this frame -> this slot's readback buffer (decoded once retired)
+    int strip_slot = -1;
+    if (c.mask && p->w >= kStripW && p->h >= 2 * kStripH && p->frame_index % (UINT)std::max(1, c.mask_every) == 0)
+    {
+        strip_slot = g.slot;
+        GpuBarrier(cl, p->color4k, NPSR, CSRC);
+        D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+        src.pResource = p->color4k; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.pResource = p->strip_rb[strip_slot]; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint.Footprint = { DXGI_FORMAT_R8G8B8A8_UNORM, kStripW, kStripH, 1, kStripPitch };
+        const D3D12_BOX box = { 0, 0, 0, kStripW, kStripH, 1 };
+        cl->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+        GpuBarrier(cl, p->color4k, CSRC, NPSR);
+    }
     GpuBarrier(cl, p->nr_in, NPSR, UAV);
     stamp(2);
     CsGray(g, p->sh, cl, p->color4k, p->w, p->h, p->gray, p->gw, p->gh);
@@ -366,6 +442,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     GpuBarrier(cl, cap, NPSR, COMMON);
     const UINT64 f1 = GpuEnd(g);
     if (!f1) return false;
+    if (strip_slot >= 0) p->strip_fence[strip_slot] = f1;
+    MaskUpdate(p);
     if (handoff)
     {
         mf.fence = f1;
@@ -433,8 +511,13 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     }
 
     ComposeParams cp;
-    cp.residual_strength = c.residual_strength; cp.feather = c.feather; cp.nrects = c.nrects; cp.warp = c.warp;
-    memcpy(cp.rects, c.rects, sizeof cp.rects);
+    cp.residual_strength = c.residual_strength; cp.feather = c.feather; cp.warp = c.warp;
+    if (p->mask_active)   // addon rects first, the strip itself hidden; manual ini rects appended
+    {
+        cp.nrects = p->mask_n; memcpy(cp.rects, p->mask_rects, (size_t)p->mask_n * sizeof(UiRect));
+        cp.strip_w = (int)kStripW; cp.strip_h = (int)kStripH;
+    }
+    for (int i = 0; i < c.nrects && cp.nrects < 64; ++i) cp.rects[cp.nrects++] = c.rects[i];
     const bool native = async ? (p->cmp_idx < 0 || p->bypass) : (!evaluated || p->evals_since_create <= (UINT)std::max(0, c.warmup));
     if (native) cp.wipe_mode = 2;
     else if (p->wipe == 1) { cp.wipe_mode = 1; cp.wipe_x = 0.5f; }
@@ -741,10 +824,11 @@ int main(int argc, char** argv)
                 StageStats mm; { std::lock_guard<std::mutex> lk(p->pub_mu); mm.v.swap(p->model_ms.v); }
                 const UINT model_evals = p->model_evals.exchange(0);
                 const double span = NowMs() - win_t0, cap_fps = frames * 1000.0 / span, fg_fps = fs.presented * 1000.0 / span;
-                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f static_skips=%u rate_drops=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u model_fps=%.1f model_ms=%.2f residual_age_frames=%.1f",
+                char mask[16]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "none");
+                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f static_skips=%u rate_drops=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u model_fps=%.1f model_ms=%.2f residual_age_frames=%.1f mask=%s",
                     cap_fps, p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), skips, rate_drops, age.med(), pipe.med(),
                     fg_fps, spacing.med(), spacing.p95(), fs.drops,
-                    model_evals * 1000.0 / span, mm.med(), p->residual_age.med());
+                    model_evals * 1000.0 / span, mm.med(), p->residual_age.med(), mask);
                 swprintf_s(status, L"%ls  cap %.0f  out %.0f fps  age %.0f ms", profile_name().c_str(), cap_fps, p->fg ? fg_fps : cap_fps, std::max(0.0, age.med()));
                 tray_state();
                 p->residual_age.v.clear();

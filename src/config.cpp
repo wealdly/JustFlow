@@ -90,6 +90,8 @@ bool ConfigLoad(const wchar_t* path, Config& c)
         UiRect rc;
         if (swscanf_s(r.c_str(), L"%d,%d,%d,%d", &rc.x0, &rc.y0, &rc.x1, &rc.y1) == 4) c.rects[c.nrects++] = rc;
     }
+    c.mask = B(path, L"ui", L"mask", c.mask);
+    c.mask_every = I(path, L"ui", L"mask_every", c.mask_every);
 
     c.fg_enabled = B(path, L"fg", L"enabled", c.fg_enabled);
     c.fg_multiplier = I(path, L"fg", L"multiplier", c.fg_multiplier);

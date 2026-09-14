@@ -36,8 +36,10 @@ struct Config
     std::wstring ofa_dll;
     // [ui]
     int   feather = 12;
-    int   nrects = 0;
+    int   nrects = 0;                      // manual rects (rect1..rect16); the addon mask adds up to 64 more at compose time
     UiRect rects[16] = {};
+    bool  mask = false;                    // decode the JustFlow addon's UI-mask strip from the capture
+    int   mask_every = 1;                  // read the strip back every N frames
     // [fg]
     bool  fg_enabled = false;
     int   fg_multiplier = 2;               // presented frames per rendered frame, 2..4
