@@ -62,7 +62,17 @@ over the base rate. Cap the game's frame rate so the sum fits; the log tells you
 
 JustFlow reads the game window's position, captures the screen through the OS, draws its own
 window on top, and listens for hotkeys. It does not open the game process, read or write its
-memory, hook it, or send input. That is the same footprint as streaming and overlay software.
+memory, hook it, or send input. That is the same class of software as OBS window capture,
+Discord's overlay, and Lossless Scaling, which are used with online games every day; the author
+has run Lossless Scaling with World of Warcraft for years without issue. JustFlow does strictly
+less than those: OBS's game-capture mode and the Discord overlay inject a hook DLL into the game,
+JustFlow never does.
+
+The import tables of both binaries are auditable with `dumpbin /imports`: no OpenProcess,
+ReadProcessMemory, WriteProcessMemory, CreateRemoteThread, SetWindowsHookEx, SendInput or any
+networking library. The optional WoW addon only reads frame positions and draws a texture; it calls
+no protected or automation API and has an off switch (`/justflow off`).
+
 Whether a given game's terms allow overlays is between you and its publisher.
 
 ## Credits
