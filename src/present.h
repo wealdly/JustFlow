@@ -1,5 +1,6 @@
 // Click-through overlay: WS_POPUP topmost/noactivate/toolwindow window on its own thread with a
-// flip-model swapchain (R8G8B8A8_UNORM, 2 buffers, tearing allowed) created on the Gpu queue.
+// flip-model swapchain (R8G8B8A8_UNORM, 2 buffers, tearing allowed). The swapchain lives on its
+// OWN direct queue: backbuffer copies and Present never queue behind NR / FG work on Gpu::queue.
 // WS_EX_LAYERED|WS_EX_TRANSPARENT are added AFTER swapchain creation (flip model refuses layered
 // at create). Hidden until the first Present. Global hotkeys are registered on the same thread.
 #pragma once
@@ -12,11 +13,20 @@ struct HotkeyDef { int id; UINT mods; UINT vk; };   // mods = MOD_CONTROL|MOD_AL
 Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture);
 void     OverlayDestroy(Overlay* o);
 
-// Backbuffer to copy into this frame (state PRESENT at rest; caller transitions to COPY_DEST and back).
-ID3D12Resource* OverlayBackbuffer(Overlay* o);
-// Present(0, ALLOW_TEARING). Reveals the window on the first successful present. Returns false on
-// DXGI failure (device removed etc.).
-bool OverlayPresent(Overlay* o);
+// Copies `src` (COPY_SOURCE, overlay size, RGBA8) into the current backbuffer on the present queue
+// and Presents (0, ALLOW_TEARING). `after`/`after_value`: fence the present queue waits on first
+// (the pipeline fence that completes `src`; nullptr = already complete). One caller at a time (main
+// thread, or the FG presenter while an Fg exists). Reveals the window on the first successful
+// present. Returns false on DXGI failure (device removed etc.).
+bool OverlayPresent(Overlay* o, ID3D12Resource* src, ID3D12Fence* after, UINT64 after_value);
+// `q` waits for the last OverlayPresent copy to finish reading its source (call before overwriting it).
+void OverlayGuard(Overlay* o, ID3D12CommandQueue* q);
+// CPU wait for both queues to go idle (before releasing anything a present copy may still read).
+void OverlayDrain(Overlay* o);
+// Blocks until the next vblank of the monitor under the overlay. False = no DXGI output matches
+// (display on another adapter): caller falls back to timer pacing.
+bool   OverlayWaitVBlank(Overlay* o);
+double OverlayVBlankMs(Overlay* o);   // refresh period of that monitor (1000/60 if unknown)
 // Reposition over the target's DWMWA_EXTENDED_FRAME_BOUNDS, hide while the target is iconic,
 // re-assert topmost every `reassert_every` calls. Call once per frame (or per second when idle).
 void OverlayFollow(Overlay* o, int reassert_every);

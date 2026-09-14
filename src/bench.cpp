@@ -82,16 +82,17 @@ static std::vector<std::wstring> ListPngs(const std::wstring& path)
 
 int RunBench(int argc, char** argv)
 {
-    std::wstring input; int frames = 120; UINT work_w = 0, work_h = 0; bool present = true;
+    std::wstring input, ini = L"nrfilter.ini"; int frames = 120; UINT work_w = 0, work_h = 0; bool present = true;
     for (int i = 1; i < argc; ++i)
     {
         if (!strcmp(argv[i], "--bench") && i + 1 < argc) { const char* s = argv[++i]; input.assign(s, s + strlen(s)); }
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--work") && i + 1 < argc) sscanf_s(argv[++i], "%ux%u", &work_w, &work_h);
         else if (!strcmp(argv[i], "--no-present")) present = false;
+        else if (!strcmp(argv[i], "--ini") && i + 1 < argc) { const char* s = argv[++i]; ini.assign(s, s + strlen(s)); }   // profile next to the exe, or a path
     }
     const std::wstring dir = ExeDir();
-    Config cfg; ConfigLoad((dir + L"\\nrfilter.ini").c_str(), cfg);
+    Config cfg; ConfigLoad((ini.find(L'\\') != std::wstring::npos ? ini : dir + L"\\" + ini).c_str(), cfg);
     LogInit((dir + L"\\bench.log").c_str());
     if (work_w && work_h) { cfg.work_w = work_w; cfg.work_h = work_h; }
 
@@ -141,7 +142,11 @@ int RunBench(int argc, char** argv)
     const double wall = NowMs() - t0;
     GpuWaitIdle(g);
     PipelineReadStamps(p);
-    if (p->fg) { UINT out = 0, drops = 0; FgStats(p->fg, out, drops); Log("[fg] bench: %u frames presented (%.1f fps), %u dropped", out, out * 1000.0 / wall, drops); }
+    if (p->fg)
+    {
+        FgStatsOut fs; FgStats(p->fg, fs); StageStats sp; sp.v = fs.spacing_ms;
+        Log("[fg] bench: %u frames presented (%.1f fps), %u dropped, spacing %.2f/%.2f ms (med/p95, %zu samples)", fs.presented, fs.presented * 1000.0 / wall, fs.drops, sp.med(), sp.p95(), sp.v.size());
+    }
 
     printf("\n%-16s %10s %10s %8s\n", "stage", "median ms", "p95 ms", "samples");
     FILE* csv = nullptr; _wfopen_s(&csv, (dir + L"\\bench.csv").c_str(), L"w");

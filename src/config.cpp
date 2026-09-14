@@ -79,6 +79,8 @@ bool ConfigLoad(const wchar_t* path, Config& c)
 
     c.fg_enabled = B(path, L"fg", L"enabled", c.fg_enabled);
     c.fg_multiplier = I(path, L"fg", L"multiplier", c.fg_multiplier);
+    c.fg_pacing_vblank = S(path, L"fg", L"pacing", c.fg_pacing_vblank ? L"vblank" : L"timer") != L"timer";
+    c.fg_mv_dilated = B(path, L"fg", L"mv_dilated", c.fg_mv_dilated);
 
     c.exclude_from_capture = B(path, L"overlay", L"exclude_from_capture", c.exclude_from_capture);
     c.reassert_topmost_every = I(path, L"overlay", L"reassert_topmost_every", c.reassert_topmost_every);

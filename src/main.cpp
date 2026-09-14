@@ -56,7 +56,7 @@ static bool AllocNative(Pipeline* p)
     Gpu& g = *p->g;
     p->color4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, NPSR, L"color4k");
     p->gray = GpuMakeTex(g, p->gw, p->gh, DXGI_FORMAT_R8_UNORM, FUAV, UAV, L"gray");
-    p->out4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, UAV, L"out4k");
+    p->out4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, D3D12_RESOURCE_STATE_COPY_SOURCE, L"out4k");
     if (p->w % p->gw || p->h % p->gh) Log("[main] warning: gray block %ux%u -> %ux%u is not integer", p->w, p->h, p->gw, p->gh);
     return p->color4k && p->gray && p->out4k;
 }
@@ -130,7 +130,7 @@ bool PipelineResize(Pipeline* p, UINT w, UINT h)
 void PipelineReload(Pipeline* p, const Config& c)
 {
     const bool rebuild = ConfigNeedsRebuild(p->cfg, c);
-    if (c.fg_multiplier != p->cfg.fg_multiplier) DropFg(p);
+    if (c.fg_multiplier != p->cfg.fg_multiplier || c.fg_pacing_vblank != p->cfg.fg_pacing_vblank || c.fg_mv_dilated != p->cfg.fg_mv_dilated) DropFg(p);   // recreated next frame
     p->cfg = c;
     if (rebuild && p->nr)
     {
@@ -167,7 +167,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (p->fg && (!c.fg_enabled || FgFailed(p->fg))) { if (FgFailed(p->fg)) p->cfg.fg_enabled = false; DropFg(p); }
     if (p->ov && c.fg_enabled && !p->fg)
     {
-        p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, c.fg_multiplier);
+        p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, c.fg_multiplier, c.fg_pacing_vblank, c.fg_mv_dilated);
         if (!p->fg) p->cfg.fg_enabled = false;
     }
     auto stamp = [&](int i) { if (c.gpu_timestamps) GpuStamp(g, cl, i); };
@@ -207,7 +207,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (p->measure_ofa) { GpuWait(g, OfaFence(p->ofa), OfaFenceValue(p->ofa), 5000); p->st[PS_OFA].add(NowMs() - ofa_t0); }
     g.queue->Wait(OfaFence(p->ofa), OfaFenceValue(p->ofa));
 
-    // ---- list 2: expand, (create | evaluate), compose, copy to backbuffer -------------------------
+    // ---- list 2: expand, (create | evaluate), compose, hand-off to the presenter -------------------
+    if (p->ov && !p->fg) OverlayGuard(p->ov, g.queue);   // the present queue may still be copying out4k
     tw = NowMs();
     if (!GpuBegin(g)) return false;
     p->cpu_wait[2].add(NowMs() - tw);
@@ -251,30 +252,26 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     else if (p->wipe == 1) { cp.wipe_mode = 1; cp.wipe_x = 0.5f; }
     else if (p->wipe == 2) { cp.wipe_mode = 1; cp.wipe_x = (float)fmod((NowMs() - p->wipe_t0) / 2000.0, 1.0); }
     GpuBarrier(cl, p->nr_out, UAV, NPSR);
+    GpuBarrier(cl, p->out4k, D3D12_RESOURCE_STATE_COPY_SOURCE, UAV);
     stamp(6);
     CsCompose(g, p->sh, cl, p->color4k, p->nr_in, p->nr_out, p->ww, p->wh, p->out4k, p->w, p->h, cp);
     stamp(7);
     GpuBarrier(cl, p->nr_out, NPSR, UAV);
+    GpuBarrier(cl, p->out4k, UAV, D3D12_RESOURCE_STATE_COPY_SOURCE);
     bool fg_recorded = false;
-    if (p->ov)
-    {
-        GpuBarrier(cl, p->out4k, UAV, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        if (p->fg) fg_recorded = FgRecord(p->fg, cl, p->out4k, p->mv);   // the presenter thread presents
-        else
-        {
-            ID3D12Resource* bb = OverlayBackbuffer(p->ov);
-            GpuBarrier(cl, bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
-            cl->CopyResource(bb, p->out4k);
-            GpuBarrier(cl, bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
-        }
-        GpuBarrier(cl, p->out4k, D3D12_RESOURCE_STATE_COPY_SOURCE, UAV);
-    }
+    if (p->fg) fg_recorded = FgRecord(p->fg, cl, p->out4k, p->mv);   // the presenter thread presents
     const UINT64 f2 = GpuEnd(g);
     if (!f2) return false;
     PipelineReadStamps(p);
     tw = NowMs();
-    if (p->fg) { if (fg_recorded) FgSubmit(p->fg, f2, reset); }
-    else if (p->ov && !OverlayPresent(p->ov)) { GpuLogDeviceRemoved(g, "present"); return false; }
+    if (p->fg) { if (fg_recorded) FgSubmit(p->fg, f2, reset, p->cap_qpc, p->acq_qpc); }
+    else if (p->ov)
+    {
+        // the present queue copies out4k once list 2 completes (fence f2) - no CPU wait here
+        if (!OverlayPresent(p->ov, p->out4k, g.fence, f2)) { GpuLogDeviceRemoved(g, "present"); return false; }
+        LONGLONG pq = 0, sq = 0; OverlayTimes(p->ov, pq, sq);
+        if (p->cap_qpc) { p->age_ms.add(QpcToMs(pq - p->cap_qpc)); p->pipe_ms.add(QpcToMs(pq - p->acq_qpc)); }
+    }
     p->cpu_wait[3].add(NowMs() - tw);
     if (evaluated) NrRetireTick(p->nr);
     p->last_evaluated = evaluated;
@@ -300,7 +297,7 @@ static void DumpFrame(Pipeline* p, const std::wstring& dir, int i)
     wchar_t path[MAX_PATH];
     if (GpuReadbackTex(*p->g, p->color4k, px.data(), p->w, p->h, 4, NPSR))
     { swprintf_s(path, L"%ls\\dump_%03d_native.png", dir.c_str(), i); SavePngRgba(path, px.data(), p->w, p->h); }
-    if (GpuReadbackTex(*p->g, p->out4k, px.data(), p->w, p->h, 4, UAV))
+    if (GpuReadbackTex(*p->g, p->out4k, px.data(), p->w, p->h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE))
     { swprintf_s(path, L"%ls\\dump_%03d_out.png", dir.c_str(), i); SavePngRgba(path, px.data(), p->w, p->h); }
     Log("[main] dumped frame %d", i);
 }
@@ -353,7 +350,7 @@ int main(int argc, char** argv)
         LONGLONG last_sysrel = 0;
         UINT frames = 0, skips = 0, rate_drops = 0; int follow_tick = 0; double last_processed_ms = 0;
         double win_t0 = NowMs();
-        std::vector<double> cpu_ms, lat_ms;
+        std::vector<double> cpu_ms;
         for (;;)
         {
             if (OverlayHotkey(p->ov, 4)) { Log("[main] quit hotkey"); quit = true; break; }
@@ -388,38 +385,41 @@ int main(int argc, char** argv)
                 continue;
             }
             if (CaptureIsFloat(cap)) { Log("[main] FP16 (HDR) capture is not supported in phase 1 - exiting"); quit = true; rc = 2; break; }
+            LARGE_INTEGER acq; QueryPerformanceCounter(&acq);
             const double t0 = NowMs();
             // max_fps: a GPU-bound game (Dawnwalker with 3X FG presents ~135 fps) would otherwise get a
             // full pipeline pass per presented frame and lose the GPU time. Drop frames above the cap.
             if (cfg.max_fps > 0 && t0 - last_processed_ms < 1000.0 / cfg.max_fps) { ++rate_drops; continue; }
             last_processed_ms = t0;
-            if (last_sysrel && sysrel - last_sysrel > 2500000) reset = true;   // > 250 ms gap
+            // > 250 ms gap (DDA: raw QPC ticks; WGC: 100 ns) -> scene reset
+            const bool dda = CaptureIsDda(cap);
+            if (last_sysrel && sysrel - last_sysrel > (dda ? qpf.QuadPart / 4 : 2500000)) reset = true;
             last_sysrel = sysrel;
+            // Capture timestamp in QPC ticks: DDA LastPresentTime already is; WGC SystemRelativeTime is
+            // 100 ns units (integer split keeps it exact: t * qpf overflows int64).
+            p->cap_qpc = dda ? sysrel : sysrel / 10000000 * qpf.QuadPart + (sysrel % 10000000) * qpf.QuadPart / 10000000;
+            p->acq_qpc = acq.QuadPart;
             if (!PipelineFrame(p, CaptureTexture(cap), CaptureFence(cap), fv, reset)) { Log("[main] frame failed - exiting"); GpuLogDeviceRemoved(g, "frame"); quit = true; rc = 3; break; }
             reset = false;
             OverlayFollow(p->ov, cfg.reassert_topmost_every);
             cpu_ms.push_back(NowMs() - t0);
-            if (p->last_evaluated)
-            {
-                LONGLONG pq = 0, sq = 0; OverlayTimes(p->ov, pq, sq);
-                if (pq) lat_ms.push_back((double)pq * 1000.0 / (double)qpf.QuadPart - (double)sysrel / 10000.0);
-                if (dumped < dump) DumpFrame(p, dir, dumped++);
-            }
+            if (p->last_evaluated && dumped < dump) DumpFrame(p, dir, dumped++);
             if (++frames % (UINT)std::max(1, cfg.stats_every) == 0)
             {
-                StageStats cpu{ cpu_ms }, lat{ lat_ms };
+                StageStats cpu{ cpu_ms }, spacing, age = p->age_ms, pipe = p->pipe_ms;
                 double gpu = 0;
                 for (int s = 0; s < PS_COUNT; ++s) if (s != PS_OFA && p->st[s].med() > 0) gpu += p->st[s].med();
-                UINT fg_out = 0, fg_drops = 0;
-                if (p->fg) FgStats(p->fg, fg_out, fg_drops);
-                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f static_skips=%u rate_drops=%u latency_ms(cap->present)=%.1f fg_out_fps=%.1f fg_drops=%u",
-                    frames * 1000.0 / (NowMs() - win_t0), p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), skips, rate_drops, lat.med(),
-                    fg_out * 1000.0 / (NowMs() - win_t0), fg_drops);
+                FgStatsOut fs;
+                if (p->fg) { FgStats(p->fg, fs); spacing.v.swap(fs.spacing_ms); age.v.swap(fs.age_ms); pipe.v.swap(fs.pipe_ms); }
+                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f static_skips=%u rate_drops=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u",
+                    frames * 1000.0 / (NowMs() - win_t0), p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), skips, rate_drops, age.med(), pipe.med(),
+                    fs.presented * 1000.0 / (NowMs() - win_t0), spacing.med(), spacing.p95(), fs.drops);
                 Log("[stats] gpu: swz=%.2f gray+ds=%.2f expand=%.2f eval=%.2f compose=%.2f | cpu waits: begin1=%.1f ofa=%.1f begin2=%.1f present=%.1f",
                     p->st[PS_SWIZZLE].med(), p->st[PS_GRAYDS].med(), p->st[PS_EXPAND].med(), p->st[PS_EVAL].med(), p->st[PS_COMPOSE].med(),
                     p->cpu_wait[0].med(), p->cpu_wait[1].med(), p->cpu_wait[2].med(), p->cpu_wait[3].med());
                 for (auto& s : p->cpu_wait) s.v.clear();
-                frames = 0; skips = 0; rate_drops = 0; win_t0 = NowMs(); cpu_ms.clear(); lat_ms.clear();
+                p->age_ms.v.clear(); p->pipe_ms.v.clear();
+                frames = 0; skips = 0; rate_drops = 0; win_t0 = NowMs(); cpu_ms.clear();
                 for (auto& s : p->st) s.v.clear();
             }
         }

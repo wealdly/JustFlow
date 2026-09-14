@@ -30,7 +30,27 @@ struct Overlay
     int    follow_calls = 0;
     RECT   last = {};
     LONGLONG present_qpc = 0, scanout_qpc = 0;
+    // present queue: swapchain + backbuffer copies, decoupled from the pipeline queue
+    ID3D12CommandQueue* pq = nullptr;
+    ID3D12CommandAllocator* alloc = nullptr; ID3D12GraphicsCommandList* list = nullptr;
+    ID3D12Fence* fence = nullptr; HANDLE event = nullptr; UINT64 fence_value = 0;
+    IDXGIOutput* output = nullptr; bool output_looked_up = false;
+    double vblank_ms = 1000.0 / 60.0;
 };
+
+static bool WaitPq(Overlay* o, UINT64 v, DWORD ms)
+{
+    if (!v || o->fence->GetCompletedValue() >= v) return true;
+    ResetEvent(o->event);
+    if (FAILED(o->fence->SetEventOnCompletion(v, o->event))) return false;
+    return WaitForSingleObject(o->event, ms) == WAIT_OBJECT_0 && o->fence->GetCompletedValue() >= v;
+}
+
+static void Drain(Overlay* o)
+{
+    if (o->g) GpuWaitIdle(*o->g);
+    if (o->pq && o->fence && SUCCEEDED(o->pq->Signal(o->fence, ++o->fence_value))) WaitPq(o, o->fence_value, 5000);
+}
 
 static LRESULT CALLBACK WndProc(HWND w, UINT m, WPARAM wp, LPARAM lp)
 {
@@ -120,12 +140,22 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
     o->flags = tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
     o->present_flags = tearing ? DXGI_PRESENT_ALLOW_TEARING : 0;
 
+    D3D12_COMMAND_QUEUE_DESC qd = {}; qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    o->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (FAILED(g.dev->CreateCommandQueue(&qd, __uuidof(ID3D12CommandQueue), (void**)&o->pq)) ||
+        FAILED(g.dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, __uuidof(ID3D12CommandAllocator), (void**)&o->alloc)) ||
+        FAILED(g.dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, o->alloc, nullptr, __uuidof(ID3D12GraphicsCommandList), (void**)&o->list)) ||
+        FAILED(g.dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), (void**)&o->fence)) || !o->event)
+    { Log("[present] present queue objects failed"); OverlayDestroy(o); return nullptr; }
+    o->list->Close();
+    o->pq->SetName(L"present_queue");
+
     DXGI_SWAP_CHAIN_DESC1 sd = {};
     sd.Width = w; sd.Height = h; sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count = 1;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount = 2;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE; sd.Flags = o->flags;
     IDXGISwapChain1* sc1 = nullptr;
-    HRESULT hr = g.factory->CreateSwapChainForHwnd(g.queue, o->hwnd, &sd, nullptr, nullptr, &sc1);
+    HRESULT hr = g.factory->CreateSwapChainForHwnd(o->pq, o->hwnd, &sd, nullptr, nullptr, &sc1);
     if (FAILED(hr) || !sc1) { Log("[present] CreateSwapChainForHwnd failed 0x%08X", hr); OverlayDestroy(o); return nullptr; }
     g.factory->MakeWindowAssociation(o->hwnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
     hr = sc1->QueryInterface(__uuidof(IDXGISwapChain3), (void**)&o->swap);
@@ -139,7 +169,7 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
     if (!SetLayeredWindowAttributes(o->hwnd, 0, 255, LWA_ALPHA)) Log("[present] SetLayeredWindowAttributes failed, err=%lu", GetLastError());
     SetWindowPos(o->hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
     if (target) OverlayFollow(o, 0);
-    Log("[present] overlay %ux%u ready (flip-discard%s, layered click-through%s)", w, h, tearing ? ", tearing" : "",
+    Log("[present] overlay %ux%u ready (flip-discard%s, layered click-through%s, own present queue)", w, h, tearing ? ", tearing" : "",
         exclude_from_capture ? ", excluded from capture" : "");
     return o;
 }
@@ -147,9 +177,15 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
 void OverlayDestroy(Overlay* o)
 {
     if (!o) return;
-    if (o->swap && o->g) GpuWaitIdle(*o->g);
+    Drain(o);
     ReleaseBuffers(o);
     if (o->swap) { o->swap->Release(); o->swap = nullptr; }
+    if (o->output) { o->output->Release(); o->output = nullptr; }
+    if (o->list) { o->list->Release(); o->list = nullptr; }
+    if (o->alloc) { o->alloc->Release(); o->alloc = nullptr; }
+    if (o->fence) { o->fence->Release(); o->fence = nullptr; }
+    if (o->pq) { o->pq->Release(); o->pq = nullptr; }
+    if (o->event) { CloseHandle(o->event); o->event = nullptr; }
     if (o->hwnd) PostMessageW(o->hwnd, WM_CLOSE, 0, 0);
     if (o->thread)
     {
@@ -165,11 +201,22 @@ void OverlayDestroy(Overlay* o)
     delete o;
 }
 
-ID3D12Resource* OverlayBackbuffer(Overlay* o) { return o->bb[o->swap->GetCurrentBackBufferIndex()]; }
 HWND OverlayHwnd(Overlay* o) { return o->hwnd; }
 
-bool OverlayPresent(Overlay* o)
+bool OverlayPresent(Overlay* o, ID3D12Resource* src, ID3D12Fence* after, UINT64 after_value)
 {
+    // ponytail: one allocator, so wait for the previous copy before reuse (it retired ~a frame ago).
+    if (!WaitPq(o, o->fence_value, 2000)) { Log("[present] previous copy did not retire"); return false; }
+    if (FAILED(o->alloc->Reset()) || FAILED(o->list->Reset(o->alloc, nullptr))) { Log("[present] list reset failed"); return false; }
+    ID3D12Resource* bb = o->bb[o->swap->GetCurrentBackBufferIndex()];
+    GpuBarrier(o->list, bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
+    o->list->CopyResource(bb, src);
+    GpuBarrier(o->list, bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+    if (FAILED(o->list->Close())) { Log("[present] list close failed"); return false; }
+    if (after) o->pq->Wait(after, after_value);
+    ID3D12CommandList* ls[] = { o->list };
+    o->pq->ExecuteCommandLists(1, ls);
+    o->pq->Signal(o->fence, ++o->fence_value);
     LARGE_INTEGER q; QueryPerformanceCounter(&q);
     const HRESULT hr = o->swap->Present(0, o->present_flags);
     if (FAILED(hr)) { Log("[present] Present failed 0x%08X", (unsigned)hr); return false; }
@@ -190,6 +237,37 @@ void OverlayTimes(Overlay* o, LONGLONG& present_qpc, LONGLONG& scanout_qpc)
 {
     present_qpc = o->present_qpc; scanout_qpc = o->scanout_qpc;
 }
+
+void OverlayGuard(Overlay* o, ID3D12CommandQueue* q) { if (o->fence_value) q->Wait(o->fence, o->fence_value); }
+void OverlayDrain(Overlay* o) { Drain(o); }
+
+// ponytail: the output is resolved once (first call); a window dragged to another monitor keeps
+// pacing on the old one until the overlay is recreated (resize / capture reopen).
+static IDXGIOutput* Output(Overlay* o)
+{
+    if (o->output_looked_up) return o->output;
+    o->output_looked_up = true;
+    const HMONITOR mon = MonitorFromWindow(o->hwnd, MONITOR_DEFAULTTONEAREST);
+    IDXGIOutput* out = nullptr;
+    for (UINT i = 0; o->g->adapter->EnumOutputs(i, &out) != DXGI_ERROR_NOT_FOUND; ++i)
+    {
+        DXGI_OUTPUT_DESC d = {};
+        if (SUCCEEDED(out->GetDesc(&d)) && d.Monitor == mon)
+        {
+            DEVMODEW dm = {}; dm.dmSize = sizeof dm;
+            if (EnumDisplaySettingsW(d.DeviceName, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1) o->vblank_ms = 1000.0 / dm.dmDisplayFrequency;
+            Log("[present] pacing on %ls (%lu Hz, vblank %.2f ms)", d.DeviceName, dm.dmDisplayFrequency, o->vblank_ms);
+            o->output = out;
+            return out;
+        }
+        out->Release(); out = nullptr;
+    }
+    Log("[present] no DXGI output on this adapter matches the overlay's monitor - timer pacing");
+    return nullptr;
+}
+
+bool   OverlayWaitVBlank(Overlay* o) { IDXGIOutput* out = Output(o); return out && SUCCEEDED(out->WaitForVBlank()); }
+double OverlayVBlankMs(Overlay* o) { Output(o); return o->vblank_ms; }
 
 void OverlayFollow(Overlay* o, int reassert_every)
 {
@@ -223,7 +301,7 @@ void OverlayFollow(Overlay* o, int reassert_every)
 
 bool OverlayResize(Overlay* o, UINT w, UINT h)
 {
-    GpuWaitIdle(*o->g);
+    Drain(o);
     ReleaseBuffers(o);
     const HRESULT hr = o->swap->ResizeBuffers(2, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, o->flags);
     if (FAILED(hr)) { Log("[present] ResizeBuffers %ux%u failed 0x%08X", w, h, (unsigned)hr); return false; }

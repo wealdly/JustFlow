@@ -38,6 +38,8 @@ struct Config
     // [fg]
     bool  fg_enabled = false;
     int   fg_multiplier = 2;               // presented frames per rendered frame, 2..4
+    bool  fg_pacing_vblank = true;         // pacing=vblank | timer
+    bool  fg_mv_dilated = true;            // DLSS-G motionVectorsDilated (see fg.cpp Evaluate)
     // [overlay]
     bool  exclude_from_capture = false;
     int   reassert_topmost_every = 300;

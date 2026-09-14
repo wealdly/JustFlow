@@ -36,7 +36,7 @@ struct Pipeline
     Ofa*     ofa = nullptr;
     Overlay* ov = nullptr;
     Fg*      fg = nullptr;        // frame generation presenter; exists while cfg.fg_enabled and it works
-    ID3D12Resource *color4k = nullptr, *gray = nullptr, *out4k = nullptr;   // rest: NPSR, UAV, UAV
+    ID3D12Resource *color4k = nullptr, *gray = nullptr, *out4k = nullptr;   // rest: NPSR, UAV, COPY_SOURCE
     ID3D12Resource *nr_in = nullptr, *nr_out = nullptr, *mv = nullptr;     // rest: NPSR, UAV, NPSR
     // NR feature lifecycle
     bool create_pending = false;
@@ -49,9 +49,12 @@ struct Pipeline
     double wipe_t0 = 0;
     bool   measure_ofa = false;   // bench only: CPU-wait around OfaExecute to time it in isolation
     bool   last_evaluated = false;
+    // capture timestamps of the frame being fed (QPC ticks, 0 = unknown): set by main before PipelineFrame
+    LONGLONG cap_qpc = 0, acq_qpc = 0;
     // stats (GPU timestamps by stage), cleared by the reader
     StageStats st[PS_COUNT];
     StageStats cpu_wait[4];   // 0 GpuBegin(list1) 1 OfaExecute 2 GpuBegin(list2) 3 Present
+    StageStats age_ms, pipe_ms;   // non-FG presents: present - cap_qpc, present - acq_qpc (FG: FgStats)
     UINT64     last_stamp_fence = 0;
     UINT64     last_stamp_fence_slot[3] = {};
 };

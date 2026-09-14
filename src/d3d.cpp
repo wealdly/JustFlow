@@ -6,11 +6,16 @@
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
 
-double NowMs()
+double QpcToMs(LONGLONG qpc)
 {
     static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
+    return (double)qpc * 1000.0 / (double)f.QuadPart;
+}
+
+double NowMs()
+{
     LARGE_INTEGER c; QueryPerformanceCounter(&c);
-    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+    return QpcToMs(c.QuadPart);
 }
 
 const char* NgxResultName(unsigned r)

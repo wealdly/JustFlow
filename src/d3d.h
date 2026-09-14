@@ -95,4 +95,5 @@ bool GpuStampsMsSlot(Gpu& g, int slot, double* ms, int pairs);
 
 // ---- misc ------------------------------------------------------------------------------------
 double NowMs();   // QPC milliseconds
+double QpcToMs(LONGLONG qpc_ticks);   // same clock as NowMs
 const char* NgxResultName(unsigned r);
