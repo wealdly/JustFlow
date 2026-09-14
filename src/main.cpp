@@ -136,19 +136,15 @@ void PipelineReload(Pipeline* p, const Config& c)
 void PipelineReadStamps(Pipeline* p)
 {
     Gpu& g = *p->g;
-    // same slot selection as GpuStampsMs, so the fence value identifies the slot for dedupe
-    int s = (g.slot + Gpu::kFrames - 1) % Gpu::kFrames; UINT64 v = 0;
-    for (int t = 0; t < Gpu::kFrames; ++t, s = (s + Gpu::kFrames - 1) % Gpu::kFrames)
+    for (int s = 0; s < Gpu::kFrames; ++s)
     {
-        v = g.alloc_fence[s];
-        if (v && g.fence->GetCompletedValue() >= v) break;
-        v = 0;
+        const UINT64 v = g.alloc_fence[s];
+        if (!v || v == p->last_stamp_fence_slot[s]) continue;
+        double ms[5];
+        if (!GpuStampsMsSlot(g, s, ms, 5)) continue;
+        p->last_stamp_fence_slot[s] = v;
+        p->st[PS_SWIZZLE].add(ms[0]); p->st[PS_GRAYDS].add(ms[1]); p->st[PS_EVAL].add(ms[2]); p->st[PS_COMPOSE].add(ms[3]); p->st[PS_EXPAND].add(ms[4]);
     }
-    if (!v || v == p->last_stamp_fence) return;
-    double ms[5];
-    if (!GpuStampsMs(g, ms, 5)) return;
-    p->last_stamp_fence = v;
-    p->st[PS_SWIZZLE].add(ms[0]); p->st[PS_GRAYDS].add(ms[1]); p->st[PS_EVAL].add(ms[2]); p->st[PS_COMPOSE].add(ms[3]); p->st[PS_EXPAND].add(ms[4]);
 }
 
 bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UINT64 wait_value, bool reset)
@@ -165,7 +161,9 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
 
     // ---- list 1: swizzle, gray, downscale, gray -> OFA input --------------------------------------
     if (wait_fence) g.queue->Wait(wait_fence, wait_value);
+    double tw = NowMs();
     if (!GpuBegin(g)) return false;
+    p->cpu_wait[0].add(NowMs() - tw);
     GpuBarrier(cl, cap, D3D12_RESOURCE_STATE_COMMON, NPSR);
     GpuBarrier(cl, p->color4k, NPSR, UAV);
     stamp(0); CsSwizzle(g, p->sh, cl, cap, p->color4k, p->w, p->h); stamp(1);
@@ -190,12 +188,16 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // ---- optical flow ----------------------------------------------------------------------------
     double ofa_t0 = 0;
     if (p->measure_ofa) { GpuWait(g, g.fence, f1, 5000); ofa_t0 = NowMs(); }
+    tw = NowMs();
     if (!OfaExecute(p->ofa, g.fence, f1, reset)) { Log("[ofa] execute failed"); return false; }
+    p->cpu_wait[1].add(NowMs() - tw);
     if (p->measure_ofa) { GpuWait(g, OfaFence(p->ofa), OfaFenceValue(p->ofa), 5000); p->st[PS_OFA].add(NowMs() - ofa_t0); }
     g.queue->Wait(OfaFence(p->ofa), OfaFenceValue(p->ofa));
 
     // ---- list 2: expand, (create | evaluate), compose, copy to backbuffer -------------------------
+    tw = NowMs();
     if (!GpuBegin(g)) return false;
+    p->cpu_wait[2].add(NowMs() - tw);
     ID3D12Resource* flow = OfaFlow(p->ofa);
     ID3D12Resource* cost = c.cost_reject ? OfaCost(p->ofa) : nullptr;
     GpuBarrier(cl, flow, D3D12_RESOURCE_STATE_COMMON, NPSR);
@@ -251,7 +253,9 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     }
     if (!GpuEnd(g)) return false;
     PipelineReadStamps(p);
+    tw = NowMs();
     if (p->ov && !OverlayPresent(p->ov)) { GpuLogDeviceRemoved(g, "present"); return false; }
+    p->cpu_wait[3].add(NowMs() - tw);
     if (evaluated) NrRetireTick(p->nr);
     p->last_evaluated = evaluated;
     return true;
@@ -385,6 +389,10 @@ int main(int argc, char** argv)
                 for (int s = 0; s < PS_COUNT; ++s) if (s != PS_OFA && p->st[s].med() > 0) gpu += p->st[s].med();
                 Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f static_skips=%u rate_drops=%u latency_ms(cap->present)=%.1f",
                     frames * 1000.0 / (NowMs() - win_t0), p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), skips, rate_drops, lat.med());
+                Log("[stats] gpu: swz=%.2f gray+ds=%.2f expand=%.2f eval=%.2f compose=%.2f | cpu waits: begin1=%.1f ofa=%.1f begin2=%.1f present=%.1f",
+                    p->st[PS_SWIZZLE].med(), p->st[PS_GRAYDS].med(), p->st[PS_EXPAND].med(), p->st[PS_EVAL].med(), p->st[PS_COMPOSE].med(),
+                    p->cpu_wait[0].med(), p->cpu_wait[1].med(), p->cpu_wait[2].med(), p->cpu_wait[3].med());
+                for (auto& s : p->cpu_wait) s.v.clear();
                 frames = 0; skips = 0; rate_drops = 0; win_t0 = NowMs(); cpu_ms.clear(); lat_ms.clear();
                 for (auto& s : p->st) s.v.clear();
             }

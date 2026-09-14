@@ -394,3 +394,21 @@ bool GpuStampsMs(Gpu& g, double* ms, int pairs)
     D3D12_RANGE none = { 0, 0 }; g.ts_readback->Unmap(0, &none);
     return true;
 }
+
+bool GpuStampsMsSlot(Gpu& g, int s, double* ms, int pairs)
+{
+    const UINT64 v = g.alloc_fence[s];
+    if (!v || g.fence->GetCompletedValue() < v) return false;
+    UINT64* data = nullptr;
+    D3D12_RANGE rr = { (SIZE_T)s * Gpu::kStamps * 8, (SIZE_T)(s + 1) * Gpu::kStamps * 8 };
+    if (FAILED(g.ts_readback->Map(0, &rr, (void**)&data))) return false;
+    const UINT64* st = data + s * Gpu::kStamps;
+    for (int i = 0; i < pairs; ++i)
+    {
+        const int a = 2 * i, b = 2 * i + 1;
+        ms[i] = (b < Gpu::kStamps && g.ts_written[s][a] && g.ts_written[s][b] && st[b] >= st[a])
+                    ? (double)(st[b] - st[a]) * 1000.0 / (double)g.ts_freq : -1.0;
+    }
+    D3D12_RANGE none = { 0, 0 }; g.ts_readback->Unmap(0, &none);
+    return true;
+}

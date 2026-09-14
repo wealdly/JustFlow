@@ -90,6 +90,8 @@ void GpuStamp(Gpu& g, ID3D12GraphicsCommandList* cl, int i);
 // Fill ms[i] with (stamp[i+1] - stamp[i]) in milliseconds for the most recently RETIRED slot;
 // pairs where either stamp was not written give -1. Returns false if no frame has retired yet.
 bool GpuStampsMs(Gpu& g, double* ms, int pairs);
+// Same for one specific ring slot; false if that slot's fence has not completed.
+bool GpuStampsMsSlot(Gpu& g, int slot, double* ms, int pairs);
 
 // ---- misc ------------------------------------------------------------------------------------
 double NowMs();   // QPC milliseconds

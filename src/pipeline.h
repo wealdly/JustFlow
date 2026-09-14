@@ -49,7 +49,9 @@ struct Pipeline
     bool   last_evaluated = false;
     // stats (GPU timestamps by stage), cleared by the reader
     StageStats st[PS_COUNT];
+    StageStats cpu_wait[4];   // 0 GpuBegin(list1) 1 OfaExecute 2 GpuBegin(list2) 3 Present
     UINT64     last_stamp_fence = 0;
+    UINT64     last_stamp_fence_slot[3] = {};
 };
 
 std::wstring ExeDir();
