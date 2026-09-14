@@ -1,6 +1,6 @@
 // Compute passes (all cs_5_0, compiled by fxc at build time into gen/*.h, bound through
 // GpuDispatch): swizzle, gray, downscale, expand (flow -> motion vectors), compose (matched
-// residual + UI rects + wipe). Every function records into `cl`; the caller owns barriers:
+// residual + UI rects + wipe), text (toast / HUD), sharpen (CAS-style). Every function records into `cl`; the caller owns barriers:
 //   sources must be NON_PIXEL_SHADER_RESOURCE, destinations UNORDERED_ACCESS.
 #pragma once
 #include "d3d.h"
@@ -49,6 +49,23 @@ void CsResidual(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resourc
 // Rects / feather / wipe as CsCompose; p.warp scales the warp (0 = no warp).
 void CsComposeResidual(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* native, ID3D12Resource* residual, UINT ww, UINT wh,
                        ID3D12Resource* mv, ID3D12Resource* out, UINT w, UINT h, const ComposeParams& p);
+// ---- on-screen text -------------------------------------------------------------------------
+// Draws `text` (ASCII 32..126, up to 64 chars, 8x8 font at `scale` px per font pixel) white with a
+// 1 px dark outline on a rounded dark box (padding box_pad) into an RGBA8 UAV (w x h). x/y = box
+// top-left; x < 0 centres horizontally, y < 0 puts it 48 px from the top. Dispatch covers the box only.
+void CsText(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* dst, UINT w, UINT h, const char* text,
+            int x, int y, int scale, float alpha, int box_pad);
+static const size_t kMaxText = 64;
+inline int TextBoxW(size_t len, int scale, int pad) { return (int)(len < kMaxText ? len : kMaxText) * 8 * scale + 2 * pad; }
+inline int TextBoxH(int scale, int pad) { return 8 * scale + 2 * pad; }
+
+// ---- sharpen ----------------------------------------------------------------------------------
+// Contrast-adaptive sharpen (CAS-style) RGBA8 src (NPSR) -> dst (UAV), both w x h, strength 0..1.
+// Pixels inside the first `nrects` rects of the rect texture (as uploaded by the compose recorded
+// earlier in the same list) pass through.
+void CsSharpen(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* dst, UINT w, UINT h,
+               float strength, UINT nrects);
+
 // Blocking round trip on g.list (not inside GpuBegin/GpuEnd): residual + compose_residual with mv=0
 // against a CPU reference within 1/255. Logs PASS/FAIL.
 bool ComposeSelfTest(Gpu& g);

@@ -47,12 +47,22 @@ void ResolveWork(Config& c, const std::wstring& dir)
     else { c.work_w = 2560; c.work_h = 1440; Log("[nr] work auto -> 2560x1440 (no justflow.spike.ini)"); }
 }
 
-// Overlay hotkey ids: 1 toggle, 2 wipe, 3 reload, 4 quit, 5 fg (OverlayHotkey(p->ov, id) in main).
-static void HotkeyDefs(const Config& c, HotkeyDef out[5])
+// Overlay hotkey ids: 1 toggle, 2 wipe, 3 reload, 4 quit, 5 fg, 6 hud (OverlayHotkey(p->ov, id) in main).
+static const int kHotkeys = 6;
+static void HotkeyDefs(const Config& c, HotkeyDef out[kHotkeys])
 {
-    const HotkeyDef k[5] = { { 1, c.hk_toggle.mods, c.hk_toggle.vk }, { 2, c.hk_wipe.mods, c.hk_wipe.vk }, { 3, c.hk_reload.mods, c.hk_reload.vk },
-                             { 4, c.hk_quit.mods, c.hk_quit.vk }, { 5, c.hk_fg.mods, c.hk_fg.vk } };
+    const HotkeyDef k[kHotkeys] = { { 1, c.hk_toggle.mods, c.hk_toggle.vk }, { 2, c.hk_wipe.mods, c.hk_wipe.vk }, { 3, c.hk_reload.mods, c.hk_reload.vk },
+                                    { 4, c.hk_quit.mods, c.hk_quit.vk }, { 5, c.hk_fg.mods, c.hk_fg.vk }, { 6, c.hk_hud.mods, c.hk_hud.vk } };
     memcpy(out, k, sizeof k);
+}
+
+void PipelineToast(Pipeline* p, const char* fmt, ...)
+{
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(p->toast, sizeof p->toast, fmt, ap);
+    va_end(ap);
+    p->toast_t0 = NowMs(); p->toast_until_ms = p->toast_t0 + 2000.0;
+    Log("[ui] toast: %s", p->toast);
 }
 
 // ---- pipeline ---------------------------------------------------------------------------------------
@@ -117,6 +127,7 @@ static void MaskUpdate(Pipeline* p)
     if (!fresh) Log("[ui] addon mask lost (no valid strip for 1 s) - manual rects only");
     else if (p->mask_n) Log("[ui] addon mask: %d rects, checksum ok (rect 1: %d,%d,%d,%d)", p->mask_n, p->mask_rects[0].x0, p->mask_rects[0].y0, p->mask_rects[0].x1, p->mask_rects[0].y1);
     else Log("[ui] addon mask: 0 rects, checksum ok");
+    if (fresh) PipelineToast(p, "UI mask: %d rects", p->mask_n); else PipelineToast(p, "UI mask lost");
 }
 
 static bool AllocNative(Pipeline* p)
@@ -125,8 +136,10 @@ static bool AllocNative(Pipeline* p)
     p->color4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, NPSR, L"color4k");
     p->gray = GpuMakeTex(g, p->gw, p->gh, DXGI_FORMAT_R8_UNORM, FUAV, UAV, L"gray");
     p->out4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, D3D12_RESOURCE_STATE_COPY_SOURCE, L"out4k");
+    p->sharp4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, D3D12_RESOURCE_STATE_COPY_SOURCE, L"sharp4k");
+    p->shown = p->out4k;
     if (p->w % p->gw || p->h % p->gh) Log("[main] warning: gray block %ux%u -> %ux%u is not integer", p->w, p->h, p->gw, p->gh);
-    return p->color4k && p->gray && p->out4k;
+    return p->color4k && p->gray && p->out4k && p->sharp4k;
 }
 
 static bool AllocWork(Pipeline* p)
@@ -284,10 +297,11 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
     const UINT bx = std::max(1u, (UINT)std::lround((double)w / cfg.ofa_w)), by = std::max(1u, (UINT)std::lround((double)h / cfg.ofa_h));
     p->gw = w / bx; p->gh = h / by;
     if (p->gw != cfg.ofa_w || p->gh != cfg.ofa_h) Log("[main] ofa input %ux%u adjusted to %ux%u (block %ux%u)", cfg.ofa_w, cfg.ofa_h, p->gw, p->gh, bx, by);
+    p->hud = cfg.hud;
     if (with_overlay)
     {
-        HotkeyDef keys[5]; HotkeyDefs(cfg, keys);
-        p->ov = OverlayCreate(g, target, w, h, keys, 5, cfg.exclude_from_capture, cfg.overlay_direct);
+        HotkeyDef keys[kHotkeys]; HotkeyDefs(cfg, keys);
+        p->ov = OverlayCreate(g, target, w, h, keys, kHotkeys, cfg.exclude_from_capture, cfg.overlay_direct);
         if (!p->ov) { PipelineDestroy(p); return nullptr; }
     }
     p->sh = ShadersCreate(g);
@@ -315,7 +329,7 @@ void PipelineDestroy(Pipeline* p)
     StopModel(p);
     GpuWaitIdle(*p->g);
     if (p->fg) FgDestroy(p->fg);
-    REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->nr_in); REL(p->nr_out); REL(p->mv);
+    REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->nr_in); REL(p->nr_out); REL(p->mv);
     REL(p->model_src); ReleaseModelWork(p);
     for (auto& r : p->strip_rb) REL(r);
     if (p->model_ctx.queue) GpuCtxShutdown(*p->g, p->model_ctx);   // its queue may hold a Wait on the OFA fence: before OfaDestroy
@@ -333,7 +347,7 @@ bool PipelineResize(Pipeline* p, UINT w, UINT h)
     StopModel(p);   // restarted lazily by the next frame (model_src is native-sized)
     GpuWaitIdle(*p->g);
     DropFg(p);   // sized to the output; recreated on the next frame
-    REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->model_src);
+    REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->model_src);
     p->w = w; p->h = h;
     p->force_reset = true;
     if (!AllocNative(p)) return false;
@@ -379,15 +393,16 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         StopModel(p); p->model_failed = false;   // async: the restart below creates the new feature on the model thread
         if (p->ww != c.work_w || p->wh != c.work_h) { GpuWaitIdle(g); DropFg(p); REL(p->nr_in); REL(p->nr_out); REL(p->mv); ReleaseModelWork(p); if (!AllocWork(p)) return false; }
         p->create_pending = true; reset = true;
+        PipelineToast(p, "Rebuilding model %ux%u...", p->ww, p->wh); p->model_toast_pending = true;
     }
     const bool async = c.nr_async && p->nr && !p->model_failed;
     if (async && !p->model_thread.joinable() && !StartModel(p)) return false;
     // FG lifecycle follows cfg.fg_enabled (ini, F8). A presenter failure turns the flag off; F8 retries.
-    if (p->fg && (!c.fg_enabled || FgFailed(p->fg))) { if (FgFailed(p->fg)) p->cfg.fg_enabled = false; DropFg(p); }
+    if (p->fg && (!c.fg_enabled || FgFailed(p->fg))) { if (FgFailed(p->fg)) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: presenter failed"); } DropFg(p); }
     if (p->ov && c.fg_enabled && !p->fg)
     {
         p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, c.fg_multiplier, c.fg_pacing_vblank, c.fg_mv_dilated);
-        if (!p->fg) p->cfg.fg_enabled = false;
+        if (!p->fg) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); }
     }
     if (p->fg) FgSetTiming(p->fg, c.fg_phase_ms, c.fg_anchor_delay_slots);   // ponytail: two atomic stores per frame, no reload plumbing
     auto stamp = [&](int i) { if (c.gpu_timestamps) GpuStamp(g, cl, i); };
@@ -541,9 +556,43 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         stamp(7);
         GpuBarrier(cl, p->nr_out, NPSR, UAV);
     }
-    GpuBarrier(cl, p->out4k, UAV, CSRC);
+    if (!native && p->model_toast_pending) { p->model_toast_pending = false; PipelineToast(p, "Model ready"); }
+    // sharpen (out4k -> sharp4k, UI rects untouched) before the text so the text stays crisp
+    ID3D12Resource* shown = p->out4k;
+    if (c.sharpen > 0)
+    {
+        GpuBarrier(cl, p->out4k, UAV, NPSR);
+        GpuBarrier(cl, p->sharp4k, CSRC, UAV);
+        CsSharpen(g, p->sh, cl, p->out4k, p->sharp4k, p->w, p->h, c.sharpen, (UINT)cp.nrects);   // rect_tex holds this frame's rects (compose above)
+        GpuBarrier(cl, p->out4k, NPSR, CSRC);
+        shown = p->sharp4k;
+    }
+    // toast (2 s, the last 0.4 s fade) top-centre; status HUD in its corner (also in bypass)
+    const double now = NowMs();
+    const bool toast_on = c.toast && p->toast[0] && now < p->toast_until_ms, hud_on = p->hud && p->hud_line[0][0];
+    if (toast_on || hud_on)
+    {
+        GpuUavBarrier(cl, shown);
+        if (toast_on)
+            CsText(g, p->sh, cl, shown, p->w, p->h, p->toast, -1, -1, c.toast_scale, (float)std::min(1.0, (p->toast_until_ms - now) / 400.0), 2 * c.toast_scale);
+        if (hud_on)
+        {
+            if (toast_on) GpuUavBarrier(cl, shown);   // a wide toast can reach a wide HUD line
+            const int sc = std::max(1, c.hud_scale), pad = 2 * sc, margin = 24, gap = sc, bh = TextBoxH(sc, pad);
+            const bool right = c.hud_corner & 1, bottom = c.hud_corner & 2;
+            int y = bottom ? (int)p->h - margin - 2 * bh - gap : margin;
+            for (const char* line : p->hud_line)
+            {
+                const int bw = TextBoxW(strlen(line), sc, pad);
+                if (*line) CsText(g, p->sh, cl, shown, p->w, p->h, line, right ? (int)p->w - margin - bw : margin, y, sc, 1.0f, pad);
+                y += bh + gap;
+            }
+        }
+    }
+    GpuBarrier(cl, shown, UAV, CSRC);
+    p->shown = shown;
     bool fg_recorded = false;
-    if (p->fg) fg_recorded = FgRecord(p->fg, cl, p->out4k, p->mv);   // the presenter thread presents
+    if (p->fg) fg_recorded = FgRecord(p->fg, cl, shown, p->mv);   // the presenter thread presents
     const UINT64 f2 = GpuEnd(g);
     if (!f2) return false;
     if (async && p->cmp_idx >= 0) p->residual_read_fence[p->cmp_idx] = f2;   // the model thread waits for it before rewriting that residual
@@ -553,7 +602,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     else if (p->ov)
     {
         // the present queue copies out4k once list 2 completes (fence f2) - no CPU wait here
-        if (!OverlayPresent(p->ov, p->out4k, g.fence, f2)) { GpuLogDeviceRemoved(g, "present"); return false; }
+        if (!OverlayPresent(p->ov, shown, g.fence, f2)) { GpuLogDeviceRemoved(g, "present"); return false; }
         LONGLONG pq = 0, sq = 0; OverlayTimes(p->ov, pq, sq);
         if (p->cap_qpc) { p->age_ms.add(QpcToMs(pq - p->cap_qpc)); p->pipe_ms.add(QpcToMs(pq - p->acq_qpc)); }
     }
@@ -582,7 +631,7 @@ static void DumpFrame(Pipeline* p, const std::wstring& dir, int i)
     wchar_t path[MAX_PATH];
     if (GpuReadbackTex(*p->g, p->color4k, px.data(), p->w, p->h, 4, NPSR))
     { swprintf_s(path, L"%ls\\dump_%03d_native.png", dir.c_str(), i); SavePngRgba(path, px.data(), p->w, p->h); }
-    if (GpuReadbackTex(*p->g, p->out4k, px.data(), p->w, p->h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE))
+    if (GpuReadbackTex(*p->g, p->shown, px.data(), p->w, p->h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE))
     { swprintf_s(path, L"%ls\\dump_%03d_out.png", dir.c_str(), i); SavePngRgba(path, px.data(), p->w, p->h); }
     Log("[main] dumped frame %d", i);
 }
@@ -683,22 +732,40 @@ static int RealMain(int argc, char** argv)
     auto apply_hotkeys = [&]   // cfg.hk_* -> overlay registration (a pipeline created later registers from cfg itself) + tray
     {
         bool ok = true;
-        if (p && p->ov) { HotkeyDef k[5]; HotkeyDefs(cfg, k); ok = OverlaySetHotkeys(p->ov, k, 5); }
+        if (p && p->ov) { HotkeyDef k[kHotkeys]; HotkeyDefs(cfg, k); ok = OverlaySetHotkeys(p->ov, k, kHotkeys); }
         tray_hotkeys();
         return ok;
     };
     // F9 / F10 / F8 / F11 and their tray menu items
-    auto toggle_nr = [&] { if (!p) return; p->bypass = !p->bypass; if (!p->bypass) p->force_reset = true; Log("[main] bypass %s", p->bypass ? "on" : "off"); tray_state(); };
-    auto cycle_wipe = [&] { if (!p) return; p->wipe = (p->wipe + 1) % 3; p->wipe_t0 = NowMs(); Log("[main] wipe %d", p->wipe); tray_state(); };
-    auto toggle_fg = [&] { if (!p) return; p->cfg.fg_enabled = !p->cfg.fg_enabled; Log("[main] fg %s", p->cfg.fg_enabled ? "on" : "off"); tray_state(); };
+    auto toggle_nr = [&] { if (!p) return; p->bypass = !p->bypass; if (!p->bypass) p->force_reset = true; Log("[main] bypass %s", p->bypass ? "on" : "off"); PipelineToast(p, "JustFlow: effect %s", p->bypass ? "OFF" : "ON"); tray_state(); };
+    auto cycle_wipe = [&] { if (!p) return; p->wipe = (p->wipe + 1) % 3; p->wipe_t0 = NowMs(); Log("[main] wipe %d", p->wipe); PipelineToast(p, "Wipe: %s", p->wipe == 1 ? "split" : p->wipe == 2 ? "sweep" : "off"); tray_state(); };
+    auto toggle_fg = [&]
+    {
+        if (!p) return; p->cfg.fg_enabled = !p->cfg.fg_enabled; Log("[main] fg %s", p->cfg.fg_enabled ? "on" : "off");
+        if (p->cfg.fg_enabled) PipelineToast(p, "Frame generation ON %dX", p->cfg.fg_multiplier); else PipelineToast(p, "Frame generation OFF");
+        tray_state();
+    };
+    auto toggle_hud = [&] { if (!p) return; p->hud = !p->hud; Log("[main] hud %s", p->hud ? "on" : "off"); PipelineToast(p, "Status HUD %s", p->hud ? "ON" : "OFF"); };
+    // the caps in force, for the toasts: "uncapped" | "cap 60" | "cap 60  model 30/s" | "model 30/s"
+    auto caps = [](const Config& c)
+    {
+        std::string s;
+        if (c.max_fps > 0) s = "cap " + std::to_string(c.max_fps);
+        if (c.model_max_fps > 0) s += (s.empty() ? "" : "  ") + std::string("model ") + std::to_string(c.model_max_fps) + "/s";
+        return s.empty() ? std::string("uncapped") : s;
+    };
     auto reload = [&]
     {
         if (!p) return;
-        Config nc; ConfigLoad(ini_path.c_str(), nc);
+        Config nc; const bool ok = ConfigLoad(ini_path.c_str(), nc);
         ResolveWork(nc, dir);
+        const bool cap_changed = nc.max_fps != cfg.max_fps || nc.model_max_fps != cfg.model_max_fps;
         PipelineReload(p, nc); cfg = nc;
         apply_hotkeys();
-        Log("[main] config reloaded");
+        Log("[main] config reloaded%s", ok ? "" : " (file missing - defaults)");
+        if (!ok) PipelineToast(p, "Reload failed");
+        else if (cap_changed) { if (cfg.max_fps > 0 || cfg.model_max_fps > 0) PipelineToast(p, "Cap: %s", caps(cfg).c_str()); else PipelineToast(p, "Cap: none"); }
+        else PipelineToast(p, "Profile reloaded: %ls", profile_name().c_str());
         tray_state();
     };
     auto handle_tray = [&]
@@ -735,11 +802,12 @@ static int RealMain(int argc, char** argv)
     };
 
     tray_hotkeys();
+    bool switched = false;   // the next pipeline comes from a tray profile switch (toast "Profile: x" instead of the startup line)
     while (!quit)
     {
         if (pending_profile >= 0)   // tray: switch profile (the pipeline is already torn down)
         {
-            profile = pending_profile; pending_profile = -1;
+            profile = pending_profile; pending_profile = -1; switched = true;
             ini_path = dir + L"\\profiles\\" + profiles[profile] + L".ini";
             Config nc;
             if (!ConfigLoad(ini_path.c_str(), nc)) Log("[main] %ls not found - defaults in use", ini_path.c_str());
@@ -766,12 +834,33 @@ static int RealMain(int argc, char** argv)
         p = PipelineCreate(g, cfg, CaptureWidth(cap), CaptureHeight(cap), true, target);
         if (!p) { CaptureClose(cap); rc = 1; break; }
         swprintf_s(status, L"%ls", profile_name().c_str()); tray_state();
+        if (switched) { switched = false; PipelineToast(p, "Profile: %ls", profile_name().c_str()); }
+        else
+        {
+            char model[24]; if (p->nr) sprintf_s(model, "%up model", p->wh); else strcpy_s(model, "no model");
+            PipelineToast(p, "JustFlow  %ls  %s  %s %.0f Hz  %s", profile_name().c_str(), model, CaptureIsDda(cap) ? "DDA" : "WGC", 1000.0 / OverlayVBlankMs(p->ov), caps(cfg).c_str());
+        }
 
         bool reset = true;
         LONGLONG last_sysrel = 0;
         UINT frames = 0, skips = 0, rate_drops = 0; int follow_tick = 0; double last_processed_ms = 0;
         double win_t0 = NowMs();
         std::vector<double> cpu_ms;
+        // FG / model counters are handed over on read: the HUD tick (250 ms) and the [stats] line share one drain
+        FgStatsOut fs_agg; UINT model_evals_acc = 0;
+        double hud_t = NowMs(); UINT hud_frames = 0, hud_presented = 0, hud_model = 0;
+        auto drain = [&]
+        {
+            if (p->fg)
+            {
+                FgStatsOut fs; FgStats(p->fg, fs);
+                fs_agg.presented += fs.presented; fs_agg.drops += fs.drops; hud_presented += fs.presented;
+                fs_agg.spacing_ms.insert(fs_agg.spacing_ms.end(), fs.spacing_ms.begin(), fs.spacing_ms.end());
+                fs_agg.age_ms.insert(fs_agg.age_ms.end(), fs.age_ms.begin(), fs.age_ms.end());
+                fs_agg.pipe_ms.insert(fs_agg.pipe_ms.end(), fs.pipe_ms.begin(), fs.pipe_ms.end());
+            }
+            const UINT me = p->model_evals.exchange(0); model_evals_acc += me; hud_model += me;
+        };
         for (;;)
         {
             handle_tray();
@@ -781,6 +870,7 @@ static int RealMain(int argc, char** argv)
             if (OverlayHotkey(p->ov, 2)) cycle_wipe();
             if (OverlayHotkey(p->ov, 5)) toggle_fg();
             if (OverlayHotkey(p->ov, 3)) reload();
+            if (OverlayHotkey(p->ov, 6)) toggle_hud();
             if (CaptureLost(cap)) { Log("[main] capture lost - back to waiting for the window"); break; }
             UINT nw = 0, nh = 0;
             if (CaptureSizeChanged(cap, nw, nh))
@@ -790,6 +880,7 @@ static int RealMain(int argc, char** argv)
                 CaptureClose(cap);
                 cap = CaptureOpen(g, target, cfg.cursor, cfg.border, cfg.dda);
                 if (!cap || !PipelineResize(p, CaptureWidth(cap), CaptureHeight(cap))) { Log("[main] recreate failed"); break; }
+                PipelineToast(p, "Capture %ux%u", CaptureWidth(cap), CaptureHeight(cap));
                 reset = true; last_sysrel = 0;
                 continue;
             }
@@ -828,15 +919,38 @@ static int RealMain(int argc, char** argv)
             OverlayFollow(p->ov, cfg.reassert_topmost_every);
             cpu_ms.push_back(NowMs() - t0);
             if (p->last_evaluated && dumped < dump) DumpFrame(p, dir, dumped++);
+            ++hud_frames;
+            if (p->hud && NowMs() - hud_t >= 250.0)   // status HUD: two lines from the live counters
+            {
+                drain();
+                const double dt = NowMs() - hud_t, cap_fps = hud_frames * 1000.0 / dt, out_fps = p->fg ? hud_presented * 1000.0 / dt : cap_fps;
+                const double age = p->fg ? StageStats{ fs_agg.age_ms }.med() : p->age_ms.med();
+                char capstr[12]; if (cfg.max_fps > 0) sprintf_s(capstr, "%d", cfg.max_fps); else strcpy_s(capstr, "none");
+                sprintf_s(p->hud_line[0], "in %.0f  out %.0f  age %.0f ms  cap %s", cap_fps, out_fps, std::max(0.0, age), capstr);
+                char nr[48];
+                if (p->bypass || !p->nr) strcpy_s(nr, "NR off");
+                else if (cfg.nr_async)
+                {
+                    double ms; { std::lock_guard<std::mutex> lk(p->pub_mu); ms = p->model_ms.med(); }
+                    sprintf_s(nr, "NR %.1f ms %up async %.0f fps", std::max(0.0, ms), p->wh, hud_model * 1000.0 / dt);
+                    if (cfg.model_max_fps > 0) sprintf_s(nr + strlen(nr), sizeof nr - strlen(nr), " model %d/s cap", cfg.model_max_fps);
+                }
+                else sprintf_s(nr, "NR %.1f ms %up", std::max(0.0, p->st[PS_EVAL].med()), p->wh);
+                char mask[8]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "-");
+                if (p->fg) sprintf_s(p->hud_line[1], "%s  FG %dX  mask %s", nr, p->cfg.fg_multiplier, mask);
+                else sprintf_s(p->hud_line[1], "%s  FG off  mask %s", nr, mask);
+                hud_t = NowMs(); hud_frames = 0; hud_presented = 0; hud_model = 0;
+            }
             if (++frames % (UINT)std::max(1, cfg.stats_every) == 0)
             {
                 StageStats cpu{ cpu_ms }, spacing, age = p->age_ms, pipe = p->pipe_ms;
                 double gpu = 0;
                 for (int s = 0; s < PS_COUNT; ++s) if (s != PS_OFA && p->st[s].med() > 0) gpu += p->st[s].med();
-                FgStatsOut fs;
-                if (p->fg) { FgStats(p->fg, fs); spacing.v.swap(fs.spacing_ms); age.v.swap(fs.age_ms); pipe.v.swap(fs.pipe_ms); }
+                drain();
+                FgStatsOut fs; std::swap(fs, fs_agg);
+                if (p->fg) { spacing.v.swap(fs.spacing_ms); age.v.swap(fs.age_ms); pipe.v.swap(fs.pipe_ms); }
                 StageStats mm; { std::lock_guard<std::mutex> lk(p->pub_mu); mm.v.swap(p->model_ms.v); }
-                const UINT model_evals = p->model_evals.exchange(0);
+                const UINT model_evals = model_evals_acc; model_evals_acc = 0;
                 const double span = NowMs() - win_t0, cap_fps = frames * 1000.0 / span, fg_fps = fs.presented * 1000.0 / span;
                 char mask[16]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "none");
                 Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f static_skips=%u rate_drops=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u model_fps=%.1f model_ms=%.2f residual_age_frames=%.1f mask=%s",

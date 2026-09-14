@@ -134,13 +134,39 @@ int RunBench(int argc, char** argv)
     int evaluated = 0, rc = 0;
     const double t0 = NowMs();
     const int slack = cfg.nr_async ? 256 : 64;   // async: feature create + warm-up happen on the model thread while frames keep flowing
+    // toast self-test ([log] selftest=1, single input frame): frame 5 composes with a forced toast, frame 6
+    // without; the box region must differ in >= 100 pixels.
+    const bool toast_test = cfg.selftest && tex.size() == 1;
+    static const char* const kToastText = "toast self-test";
+    std::vector<uint8_t> with_toast;
     for (int i = 0; evaluated < frames && i < frames + slack; ++i)
     {
+        if (toast_test && i == 5) { p->cfg.toast = true; PipelineToast(p, "%s", kToastText); }
+        if (toast_test && i == 6) p->toast_until_ms = 0;
         if (!PipelineFrame(p, tex[i % tex.size()], nullptr, 0, i == 0)) { Log("[bench] frame %d failed", i); GpuLogDeviceRemoved(g, "bench"); rc = 2; break; }
         // ponytail: idle after each frame so both lists of the frame retire and get sampled (the
         // stamp reader only sees the most recently retired slot). Per-stage GPU times are unaffected;
         // the fps line below is therefore not a throughput number.
         GpuWaitIdle(g); PipelineReadStamps(p);
+        if (toast_test && (i == 5 || i == 6))
+        {
+            std::vector<uint8_t> px((size_t)w * h * 4);
+            const bool got = GpuReadbackTex(g, p->shown, px.data(), w, h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            if (i == 5) { if (got) with_toast.swap(px); }
+            else
+            {
+                const int sc = std::max(1, p->cfg.toast_scale), pad = 2 * sc, bw = TextBoxW(strlen(kToastText), sc, pad), bh = TextBoxH(sc, pad);
+                const int x0 = std::max(0, ((int)w - bw) / 2), y0 = 48;
+                int changed = 0;
+                if (got && !with_toast.empty())
+                    for (int y = y0; y < std::min((int)h, y0 + bh); ++y) for (int x = x0; x < std::min((int)w, x0 + bw); ++x)
+                    {
+                        const uint8_t *a = &with_toast[((size_t)y * w + x) * 4], *b = &px[((size_t)y * w + x) * 4];
+                        if (abs(a[0] - b[0]) > 8 || abs(a[1] - b[1]) > 8 || abs(a[2] - b[2]) > 8) ++changed;
+                    }
+                Log("[cs] toast self-test %s (%d px changed in the %dx%d box at %d,%d)", changed >= 100 ? "PASS" : "FAIL", changed, bw, bh, x0, y0);
+            }
+        }
         if (!p->last_evaluated && !p->nr) p->last_evaluated = true;   // NR disabled: count composed frames
         if (p->last_evaluated && ++evaluated == std::max(0, cfg.warmup)) for (auto& s : p->st) s.v.clear();   // drop warm-up samples
     }

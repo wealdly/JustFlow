@@ -28,6 +28,7 @@ struct Config
     bool  nr_async = false;                // mode=sync (evaluate per frame) | async (decoupled model thread, residual compose)
     float warp = 1.0f;                     // async: residual sampled at uv + mv * warp (this frame's mv only, see PipelineFrame)
     int   model_max_fps = 0;               // async: throttle the model thread (0 = as fast as the leftover GPU allows)
+    float sharpen = 0.0f;                  // CAS-style sharpen after the compose, 0 = off (0.3-0.5 typical); live (F11)
     // [ofa]
     UINT  ofa_w = 960, ofa_h = 540;
     int   ofa_grid = 0;
@@ -40,6 +41,11 @@ struct Config
     UiRect rects[16] = {};
     bool  mask = false;                    // decode the JustFlow addon's UI-mask strip from the capture
     int   mask_every = 1;                  // read the strip back every N frames
+    bool  toast = true;                    // on-screen toast for state changes (top-centre, 2 s)
+    int   toast_scale = 4;                 // font pixel scale (4 = 32 px glyphs at 4K)
+    bool  hud = false;                     // status HUD at start (F7 toggles)
+    int   hud_corner = 1;                  // 0 tl, 1 tr, 2 bl, 3 br
+    int   hud_scale = 3;
     // [fg]
     bool  fg_enabled = false;
     int   fg_multiplier = 2;               // presented frames per rendered frame, 2..4
@@ -52,7 +58,7 @@ struct Config
     bool  exclude_from_capture = false;
     int   reassert_topmost_every = 300;
     // [hotkeys]
-    HotkeySpec hk_toggle, hk_wipe, hk_reload, hk_quit, hk_fg;
+    HotkeySpec hk_toggle, hk_wipe, hk_reload, hk_quit, hk_fg, hk_hud;
     // [log]
     std::wstring log_file = L"justflow.log";
     int   stats_every = 180;

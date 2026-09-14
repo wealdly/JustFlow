@@ -72,6 +72,7 @@ bool ConfigLoad(const wchar_t* path, Config& c)
     c.nr_async = S(path, L"nr", L"mode", c.nr_async ? L"async" : L"sync") == L"async";
     c.warp = F(path, L"nr", L"warp", c.warp);
     c.model_max_fps = I(path, L"nr", L"model_max_fps", c.model_max_fps);
+    c.sharpen = F(path, L"nr", L"sharpen", c.sharpen);
 
     const std::wstring in = S(path, L"ofa", L"input", L"960x540");
     if (swscanf_s(in.c_str(), L"%ux%u", &c.ofa_w, &c.ofa_h) != 2) { c.ofa_w = 960; c.ofa_h = 540; }
@@ -92,6 +93,12 @@ bool ConfigLoad(const wchar_t* path, Config& c)
     }
     c.mask = B(path, L"ui", L"mask", c.mask);
     c.mask_every = I(path, L"ui", L"mask_every", c.mask_every);
+    c.toast = B(path, L"ui", L"toast", c.toast);
+    c.toast_scale = I(path, L"ui", L"toast_scale", c.toast_scale);
+    c.hud = B(path, L"ui", L"hud", c.hud);
+    const std::wstring hc = S(path, L"ui", L"hud_corner", L"tr");
+    c.hud_corner = hc == L"tl" ? 0 : hc == L"bl" ? 2 : hc == L"br" ? 3 : 1;
+    c.hud_scale = I(path, L"ui", L"hud_scale", c.hud_scale);
 
     c.fg_enabled = B(path, L"fg", L"enabled", c.fg_enabled);
     c.fg_multiplier = I(path, L"fg", L"multiplier", c.fg_multiplier);
@@ -109,6 +116,7 @@ bool ConfigLoad(const wchar_t* path, Config& c)
     c.hk_reload = ParseHotkey(S(path, L"hotkeys", L"reload", L"F11"), VK_F11);
     c.hk_quit = ParseHotkey(S(path, L"hotkeys", L"quit", L"Ctrl+F12"), VK_F12);
     c.hk_fg = ParseHotkey(S(path, L"hotkeys", L"fg", L"F8"), VK_F8);
+    c.hk_hud = ParseHotkey(S(path, L"hotkeys", L"hud", L"F7"), VK_F7);
 
     c.log_file = S(path, L"log", L"file", c.log_file);
     c.stats_every = I(path, L"log", L"stats_every", c.stats_every);

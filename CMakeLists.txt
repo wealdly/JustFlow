@@ -14,7 +14,7 @@ set(FXC "${WINSDK_ROOT}/bin/${WINSDK_VER}/x64/fxc.exe")
 set(CPPWINRT_INC "${WINSDK_ROOT}/Include/${WINSDK_VER}/cppwinrt")
 
 # ---- shaders: fxc -> gen/<name>.h with g_cs_<name> byte array ----------------------------------
-set(SHADERS swizzle gray downscale expand compose residual compose_residual)
+set(SHADERS swizzle gray downscale expand compose residual compose_residual text sharpen)
 set(SHADER_HEADERS)
 foreach(s ${SHADERS})
     set(src ${CMAKE_SOURCE_DIR}/shaders/${s}.hlsl)

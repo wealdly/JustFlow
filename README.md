@@ -45,7 +45,11 @@ first one. The tray menu switches profiles live, toggles the effect and frame ge
 FG multiplier, opens the profile and the log, and edits the hotkeys (written back to the profile).
 
 Keys (configurable in the profile and the tray menu): F9 toggle the effect, F10 cycle the
-before/after wipe, F8 frame generation, F11 reload the profile, Ctrl+F12 quit.
+before/after wipe, F8 frame generation, F11 reload the profile, F7 status HUD, Ctrl+F12 quit.
+Every state change shows a 2 s toast at the top of the frame (`[ui] toast=0` turns it off); the
+HUD (`[ui] hud`, corner and scale there too) shows capture/output rate, frame age, model cost and
+mode, FG and mask state. `[nr] sharpen=0.3..0.5` adds a contrast-adaptive sharpen after the effect
+(UI rects excluded), live on F11.
 
 The `[stats]` lines in the log report capture rate, model cost, generation cadence, dropped
 frames, and the age of the frame on screen relative to the game's own present.
@@ -70,8 +74,7 @@ JustFlow never does.
 
 The import tables of both binaries are auditable with `dumpbin /imports`: no OpenProcess,
 ReadProcessMemory, WriteProcessMemory, CreateRemoteThread, SetWindowsHookEx, SendInput or any
-networking library. The optional WoW addon only reads frame positions and draws a texture; it calls
-no protected or automation API and has an off switch (`/justflow off`).
+networking library.
 
 Whether a given game's terms allow overlays is between you and its publisher.
 

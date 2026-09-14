@@ -41,6 +41,8 @@ struct Pipeline
     Overlay* ov = nullptr;
     Fg*      fg = nullptr;        // frame generation presenter; exists while cfg.fg_enabled and it works
     ID3D12Resource *color4k = nullptr, *gray = nullptr, *out4k = nullptr;   // rest: NPSR, UAV, COPY_SOURCE
+    ID3D12Resource *sharp4k = nullptr;                                     // out4k sharpened ([nr] sharpen > 0), rest COPY_SOURCE
+    ID3D12Resource *shown = nullptr;                                       // the texture handed onward last frame (out4k or sharp4k)
     ID3D12Resource *nr_in = nullptr, *nr_out = nullptr, *mv = nullptr;     // rest: NPSR, UAV, NPSR
     // NR feature lifecycle
     bool create_pending = false;
@@ -73,6 +75,13 @@ struct Pipeline
     UiRect     mask_rects[64] = {};
     double     mask_seen = 0;                    // NowMs() of the last valid decode (0 = never); stale after 1 s
     bool       mask_active = false;              // a fresh mask is being applied (logged on change)
+
+    // ---- on-screen text (CsText onto the frame handed onward): toast (2 s, 0.4 s fade) + status HUD
+    char       toast[65] = "";
+    double     toast_t0 = 0, toast_until_ms = 0;
+    bool       model_toast_pending = false;      // "Model ready" once a rebuilt model composes
+    bool       hud = false;                      // [ui] hud, F7
+    char       hud_line[2][65] = {};             // filled by main every 250 ms (empty = nothing drawn)
 
     // ---- decoupled model track ([nr] mode=async) --------------------------------------------------
     // Main hands one native frame at a time to the model thread (model_src copy + gray in a held OFA
@@ -118,6 +127,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* capture_bgra, ID3D12Fence* wait_
 bool PipelineResize(Pipeline* p, UINT w, UINT h);
 // Hot reload: compose params apply next frame; a create-latched change schedules a debounced rebuild.
 void PipelineReload(Pipeline* p, const Config& c);
+// Toast `fmt` (printf) top-centre for 2 s (drawn by the next PipelineFrame while [ui] toast=1). Main thread only.
+void PipelineToast(Pipeline* p, const char* fmt, ...);
 // Pull retired GPU timestamps into p->st (called inside PipelineFrame; call once more after idle).
 void PipelineReadStamps(Pipeline* p);
 void PipelineDestroy(Pipeline* p);
