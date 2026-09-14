@@ -30,8 +30,11 @@ struct ComposeParams
     float wipe_x = 0.5f;              // 0..1 of width
     int   feather = 12;               // px
     int   nrects = 0;
-    UiRect rects[16];
+    UiRect rects[64];
     float warp = 1.0f;                // CsComposeResidual only: residual sampled at uv + mv_uv * warp
+    // addon mask strip (top-left strip_w x strip_h px): output rows 0..strip_h-1 there replicate the
+    // composed rows just beneath, so the strip's pixels never reach the screen. 0 = off.
+    int   strip_w = 0, strip_h = 0;
 };
 // native RGBA8 (w x h) + nr_in / nr_out RGBA8 (ww x wh) -> out RGBA8 (w x h).
 void CsCompose(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* native, ID3D12Resource* nr_in, ID3D12Resource* nr_out,
