@@ -616,7 +616,21 @@ std::wstring PickProfile(const std::wstring& dir, const std::wstring& ini, std::
     return pdir + L"\\" + names[index] + L".ini";
 }
 
-int main(int argc, char** argv)
+static int RealMain(int argc, char** argv);
+
+// Windowed subsystem: no console window in live mode (the tray icon is the app). When launched
+// from a console (bench, spike, --dump), attach to it so stdout still lands there.
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
+{
+    if (AttachConsole(ATTACH_PARENT_PROCESS))
+    {
+        FILE* f = nullptr;
+        freopen_s(&f, "CONOUT$", "w", stdout); freopen_s(&f, "CONOUT$", "w", stderr);
+    }
+    return RealMain(__argc, __argv);
+}
+
+static int RealMain(int argc, char** argv)
 {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     int dump = 0;

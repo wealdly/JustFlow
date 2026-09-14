@@ -55,7 +55,7 @@ target_include_directories(justflow PRIVATE src ${CMAKE_BINARY_DIR}/gen third_pa
 target_link_directories(justflow PRIVATE third_party/ngx/lib)
 target_link_libraries(justflow PRIVATE d3d11 d3d12 dxgi dwmapi user32 gdi32 shell32 comctl32 windowscodecs WindowsApp nvsdk_ngx_d)
 target_compile_options(justflow PRIVATE /await:strict)   # C++/WinRT coroutine keywords are not used, but the headers want it on 14.44
-set_target_properties(justflow PROPERTIES WIN32_EXECUTABLE OFF)   # console: logs visible
+set_target_properties(justflow PROPERTIES WIN32_EXECUTABLE ON)    # tray app: no console window; attaches to a parent console when launched from one
 
 add_custom_command(TARGET justflow POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:nvngx_dll_justflow> $<TARGET_FILE_DIR:justflow>
