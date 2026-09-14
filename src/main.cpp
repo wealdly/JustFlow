@@ -1,5 +1,5 @@
 // JustFlow: capture a window -> DLSS 5 neural rendering -> click-through overlay.
-//   justflow [--ini <file>] [--dump N]        live mode (profile from profiles\*.ini, see PickProfile)
+//   justflow [--ini <file>] [--dump N]        live mode (app settings from justflow.ini, game profile from profiles\*.ini, see PickProfile)
 //   justflow --bench <png|dir> [--frames N] [--work WxH] [--no-present]
 #include "pipeline.h"
 #include "capture.h"
@@ -15,7 +15,7 @@
 int  RunBench(int argc, char** argv);                                             // bench.cpp
 bool SavePngRgba(const wchar_t* path, const uint8_t* rgba, UINT w, UINT h);       // bench.cpp
 
-const char* const kPipeStageName[PS_COUNT] = { "swizzle", "gray+downscale", "ofa", "expand", "eval", "compose", "ofa2" };
+const char* const kPipeStageName[PS_COUNT] = { "swizzle", "gray+downscale", "ofa", "expand", "eval", "compose", "ofa2", "artcnn" };
 
 double StageStats::pct(double p) const
 {
@@ -147,9 +147,10 @@ static bool AllocWork(Pipeline* p)
     Gpu& g = *p->g;
     p->ww = p->cfg.work_w; p->wh = p->cfg.work_h;
     p->nr_in = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, NPSR, L"nr_in");
+    p->nr_in2 = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, NPSR, L"nr_in2");
     p->nr_out = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, UAV, L"nr_out");
     p->mv = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R16G16_FLOAT, FUAV, NPSR, L"mv");
-    return p->nr_in && p->nr_out && p->mv;
+    return p->nr_in && p->nr_in2 && p->nr_out && p->mv;
 }
 
 // ---- decoupled model track ([nr] mode=async) ---------------------------------------------------------
@@ -160,19 +161,20 @@ static bool AllocModel(Pipeline* p)
     if (!p->nr_in_m)
     {
         p->nr_in_m = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, NPSR, L"nr_in_m");
+        p->nr_in2_m = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, NPSR, L"nr_in2_m");
         p->nr_out_m = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, UAV, L"nr_out_m");
         p->mv_m = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R16G16_FLOAT, FUAV, NPSR, L"mv_m");
         p->mv_res = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R16G16_FLOAT, FUAV, NPSR, L"mv_res");
         for (auto& r : p->residual) r = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R16G16B16A16_FLOAT, FUAV, NPSR, L"residual");
     }
-    return p->model_src && p->nr_in_m && p->nr_out_m && p->mv_m && p->mv_res && p->residual[0] && p->residual[1];
+    return p->model_src && p->nr_in_m && p->nr_in2_m && p->nr_out_m && p->mv_m && p->mv_res && p->residual[0] && p->residual[1];
 }
-static void ReleaseModelWork(Pipeline* p) { REL(p->nr_in_m); REL(p->nr_out_m); REL(p->mv_m); REL(p->mv_res); REL(p->residual[0]); REL(p->residual[1]); }
+static void ReleaseModelWork(Pipeline* p) { REL(p->nr_in_m); REL(p->nr_in2_m); REL(p->nr_out_m); REL(p->mv_m); REL(p->mv_res); REL(p->residual[0]); REL(p->residual[1]); }
 
 static void SetModelParams(Pipeline* p, const Config& c)
 {
     std::lock_guard<std::mutex> lk(p->model_mu);
-    p->model_params = { c.zero_below, c.cost_reject, c.exposure_scale, c.model_max_fps, c.warmup };
+    p->model_params = { c.zero_below, c.cost_reject, c.exposure_scale, c.model_max_fps, c.warmup, c.artcnn };
 }
 
 // One iteration per handed-over frame: list A (downscale) -> model flow (OFA pair 1, held gray vs the
@@ -209,6 +211,7 @@ static void ModelThread(Pipeline* p, bool create, NrConfig nc)
         GpuBarrier(c.list, p->nr_in_m, NPSR, UAV);
         CsDownscale(g, p->sh, c.list, p->model_src, p->w, p->h, p->nr_in_m, p->ww, p->wh);
         GpuBarrier(c.list, p->nr_in_m, UAV, NPSR);
+        if (mp.artcnn) { GpuBarrier(c.list, p->nr_in2_m, NPSR, UAV); CsArtCnn(g, p->sh, c.list, p->nr_in_m, p->nr_in2_m, p->ww, p->wh); GpuBarrier(c.list, p->nr_in2_m, UAV, NPSR); }
         GpuBarrier(c.list, p->model_src, NPSR, CDST);
         const UINT64 fa = GpuCtxEnd(c);
         if (!fa) return fail("ctx end A");
@@ -231,7 +234,7 @@ static void ModelThread(Pipeline* p, bool create, NrConfig nc)
         if (nr && NrReady(nr))
         {
             GpuCtxStamp(c, 0);
-            const unsigned r = NrEvaluate(nr, c.list, p->nr_in_m, p->mv_m, p->nr_out_m, reset, mp.exposure);
+            const unsigned r = NrEvaluate(nr, c.list, mp.artcnn ? p->nr_in2_m : p->nr_in_m, p->mv_m, p->nr_out_m, reset, mp.exposure);
             GpuCtxStamp(c, 1);
             if (r == 1) evaluated = true;
             else { static unsigned n = 0; if ((n++ % 120) == 0) Log("[nr] model evaluate -> 0x%08X (%s) %s", r, NgxResultName(r), NrLastError(nr)); }
@@ -330,7 +333,7 @@ void PipelineDestroy(Pipeline* p)
     StopModel(p);
     GpuWaitIdle(*p->g);
     if (p->fg) FgDestroy(p->fg);
-    REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->nr_in); REL(p->nr_out); REL(p->mv);
+    REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->nr_in); REL(p->nr_in2); REL(p->nr_out); REL(p->mv);
     REL(p->model_src); ReleaseModelWork(p);
     for (auto& r : p->strip_rb) REL(r);
     if (p->model_ctx.queue) GpuCtxShutdown(*p->g, p->model_ctx);   // its queue may hold a Wait on the OFA fence: before OfaDestroy
@@ -377,10 +380,10 @@ void PipelineReadStamps(Pipeline* p)
     {
         const UINT64 v = g.alloc_fence[s];
         if (!v || v == p->last_stamp_fence_slot[s]) continue;
-        double ms[5];
-        if (!GpuStampsMsSlot(g, s, ms, 5)) continue;
+        double ms[6];
+        if (!GpuStampsMsSlot(g, s, ms, 6)) continue;
         p->last_stamp_fence_slot[s] = v;
-        p->st[PS_SWIZZLE].add(ms[0]); p->st[PS_GRAYDS].add(ms[1]); p->st[PS_EVAL].add(ms[2]); p->st[PS_COMPOSE].add(ms[3]); p->st[PS_EXPAND].add(ms[4]);
+        p->st[PS_SWIZZLE].add(ms[0]); p->st[PS_GRAYDS].add(ms[1]); p->st[PS_EVAL].add(ms[2]); p->st[PS_COMPOSE].add(ms[3]); p->st[PS_EXPAND].add(ms[4]); p->st[PS_ARTCNN].add(ms[5]);
     }
 }
 
@@ -392,7 +395,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (p->rebuild_countdown > 0 && --p->rebuild_countdown == 0)
     {
         StopModel(p); p->model_failed = false;   // async: the restart below creates the new feature on the model thread
-        if (p->ww != c.work_w || p->wh != c.work_h) { GpuWaitIdle(g); DropFg(p); REL(p->nr_in); REL(p->nr_out); REL(p->mv); ReleaseModelWork(p); if (!AllocWork(p)) return false; }
+        if (p->ww != c.work_w || p->wh != c.work_h) { GpuWaitIdle(g); DropFg(p); REL(p->nr_in); REL(p->nr_in2); REL(p->nr_out); REL(p->mv); ReleaseModelWork(p); if (!AllocWork(p)) return false; }
         p->create_pending = true; reset = true;
         PipelineToast(p, "Rebuilding model %ux%u...", p->ww, p->wh); p->model_toast_pending = true;
     }
@@ -446,6 +449,12 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (!async) CsDownscale(g, p->sh, cl, p->color4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
     stamp(3);
     GpuBarrier(cl, p->nr_in, UAV, NPSR);
+    if (!async && c.artcnn)   // the evaluate reads nr_in2; compose keeps nr_in so the residual carries the ArtCNN delta too
+    {
+        GpuBarrier(cl, p->nr_in2, NPSR, UAV);
+        stamp(10); CsArtCnn(g, p->sh, cl, p->nr_in, p->nr_in2, p->ww, p->wh); stamp(11);
+        GpuBarrier(cl, p->nr_in2, UAV, NPSR);
+    }
     GpuBarrier(cl, p->gray, UAV, CSRC);
     ID3D12Resource* oin = OfaInput(p->ofa, p->ofa_cur);
     GpuBarrier(cl, oin, COMMON, CDST);
@@ -541,7 +550,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (!async && p->nr && NrReady(p->nr) && !p->bypass)
     {
         stamp(4);
-        const unsigned r = NrEvaluate(p->nr, cl, p->nr_in, p->mv, p->nr_out, reset, c.exposure_scale);
+        const unsigned r = NrEvaluate(p->nr, cl, c.artcnn ? p->nr_in2 : p->nr_in, p->mv, p->nr_out, reset, c.exposure_scale);
         stamp(5);
         if (r == 1) { evaluated = true; ++p->evals_since_create; }
         else { static unsigned n = 0; if ((n++ % 120) == 0) Log("[nr] evaluate -> 0x%08X (%s) %s", r, NgxResultName(r), NrLastError(p->nr)); }
@@ -679,11 +688,24 @@ std::wstring PickProfile(const std::wstring& dir, const std::wstring& ini, std::
     auto find = [&](const std::wstring& n) { for (size_t i = 0; i < names.size(); ++i) if (!_wcsicmp(names[i].c_str(), n.c_str())) return (int)i; return -1; };
     if (!ini.empty()) { index = find(Stem(ini)); return ini.find(L'\\') != std::wstring::npos ? ini : dir + L"\\" + ini; }
     if (names.empty()) return L"";
+    Config a; ConfigLoad((dir + L"\\justflow.ini").c_str(), nullptr, a);   // [app] profile=<name> pins the startup profile
+    if (!a.profile.empty() && _wcsicmp(a.profile.c_str(), L"auto") != 0)
+    {
+        index = find(a.profile);
+        if (index < 0) Log("[main] justflow.ini [app] profile=%ls is not in profiles\\ - auto-picking", a.profile.c_str());
+    }
     for (size_t i = 0; i < names.size() && index < 0; ++i)   // the first profile whose window is up right now
-    { Config c; if (ConfigLoad((pdir + L"\\" + names[i] + L".ini").c_str(), c) && FindTarget(c)) index = (int)i; }
+    { Config c; if ((ConfigLoad(nullptr, (pdir + L"\\" + names[i] + L".ini").c_str(), c) & 2) && FindTarget(c)) index = (int)i; }
     if (index < 0) index = find(L"wow");
     if (index < 0) index = 0;
     return pdir + L"\\" + names[index] + L".ini";
+}
+
+void LogConfigFiles(const std::wstring& app, const std::wstring& profile, int have)
+{
+    Log("[config] app %ls (%s) + profile %ls (%s)", app.c_str(), have & 1 ? "loaded" : "missing - defaults", profile.c_str(), have & 2 ? "loaded" : "missing - defaults");
+    const std::wstring stray = ConfigStrayKeys(profile.c_str());
+    if (!stray.empty()) Log("[config] ignored in %ls (app-layer keys, they belong in justflow.ini): %ls", profile.c_str(), stray.c_str());
 }
 
 static int RealMain(int argc, char** argv);
@@ -718,18 +740,18 @@ static int RealMain(int argc, char** argv)
         if (!strcmp(argv[i], "--dump") && i + 1 < argc) dump = atoi(argv[++i]);
         if (!strcmp(argv[i], "--ini") && i + 1 < argc) { const char* a = argv[++i]; ini_arg.assign(a, a + strlen(a)); }
     }
-    const std::wstring dir = ExeDir();
+    const std::wstring dir = ExeDir(), app_path = dir + L"\\justflow.ini";   // app layer; the profile is the game layer
     std::vector<std::wstring> profiles; int profile = -1;
     std::wstring ini_path = PickProfile(dir, ini_arg, profiles, profile);
     Config cfg;
-    const bool have_ini = ConfigLoad(ini_path.c_str(), cfg);
+    const int have = ConfigLoad(app_path.c_str(), ini_path.c_str(), cfg);
     std::wstring log_path = JoinPath(dir, cfg.log_file);
     LogInit(log_path.c_str());
-    if (!have_ini) Log("[main] %ls not found - defaults in use", ini_path.c_str());
-    else Log("[main] profile %ls (%zu in profiles\\)", ini_path.c_str(), profiles.size());
+    LogConfigFiles(app_path, ini_path, have);
+    Log("[main] profile %ls (%zu in profiles\\)", ini_path.c_str(), profiles.size());
     Gpu g;
     if (!GpuInit(g, -1)) return 1;
-    if (cfg.selftest) ComposeSelfTest(g);
+    if (cfg.selftest) { ComposeSelfTest(g); ArtCnnSelfTest(g); }
     ResolveWork(cfg, dir);
     LARGE_INTEGER qpf; QueryPerformanceFrequency(&qpf);
 
@@ -785,12 +807,13 @@ static int RealMain(int argc, char** argv)
     auto reload = [&]
     {
         if (!p) return;
-        Config nc; const bool ok = ConfigLoad(ini_path.c_str(), nc);
+        Config nc; const int have = ConfigLoad(app_path.c_str(), ini_path.c_str(), nc); const bool ok = (have & 2) != 0;
         ResolveWork(nc, dir);
         const bool cap_changed = nc.max_fps != cfg.max_fps || nc.model_max_fps != cfg.model_max_fps;
         PipelineReload(p, nc); cfg = nc;
         apply_hotkeys();
-        Log("[main] config reloaded%s", ok ? "" : " (file missing - defaults)");
+        LogConfigFiles(app_path, ini_path, have);
+        Log("[main] config reloaded%s", ok ? "" : " (profile missing - defaults)");
         if (!ok) PipelineToast(p, "Reload failed");
         else if (cap_changed) { if (cfg.max_fps > 0 || cfg.model_max_fps > 0) PipelineToast(p, "Cap: %s", caps(cfg).c_str()); else PipelineToast(p, "Cap: none"); }
         else PipelineToast(p, "Profile reloaded: %ls", profile_name().c_str());
@@ -810,18 +833,19 @@ static int RealMain(int argc, char** argv)
             cfg.fg_multiplier = arg; Log("[main] fg multiplier %d", arg); tray_state();
             break;
         case TraySelectProfile: if (arg >= 0 && arg < (int)profiles.size() && arg != profile) pending_profile = arg; break;
-        case TrayOpenConfig: ShellExecuteW(nullptr, L"open", ini_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
-        case TrayOpenLog:    ShellExecuteW(nullptr, L"open", log_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
+        case TrayOpenConfig:    ShellExecuteW(nullptr, L"open", ini_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
+        case TrayOpenAppConfig: ShellExecuteW(nullptr, L"open", app_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
+        case TrayOpenLog:       ShellExecuteW(nullptr, L"open", log_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
         case TrayQuit:       Log("[main] quit (tray)"); quit = true; break;
         case TrayHotkeys:
         {
             wchar_t hk[5][32]; TrayGetHotkeys(tray, hk);
             static const wchar_t* const keys[5] = { L"toggle", L"wipe", L"reload", L"fg", L"quit" };
-            for (int i = 0; i < 5; ++i) WritePrivateProfileStringW(L"hotkeys", keys[i], hk[i], ini_path.c_str());
+            for (int i = 0; i < 5; ++i) WritePrivateProfileStringW(L"hotkeys", keys[i], hk[i], app_path.c_str());   // app layer, never the profile
             cfg.hk_toggle = ParseHotkey(hk[0], 0); cfg.hk_wipe = ParseHotkey(hk[1], 0); cfg.hk_reload = ParseHotkey(hk[2], 0);
             cfg.hk_fg = ParseHotkey(hk[3], 0); cfg.hk_quit = ParseHotkey(hk[4], 0);
             const bool ok = apply_hotkeys();
-            Log("[main] hotkeys %ls %ls %ls %ls %ls -> %ls%s", hk[0], hk[1], hk[2], hk[3], hk[4], ini_path.c_str(), ok ? "" : " (some did not register)");
+            Log("[main] hotkeys %ls %ls %ls %ls %ls -> %ls%s", hk[0], hk[1], hk[2], hk[3], hk[4], app_path.c_str(), ok ? "" : " (some did not register)");
             TrayNotify(tray, L"JustFlow", ok ? L"Hotkeys updated" : L"Some hotkeys could not be registered (taken by another app?)");
             break;
         }
@@ -837,11 +861,11 @@ static int RealMain(int argc, char** argv)
         {
             profile = pending_profile; pending_profile = -1; switched = true;
             ini_path = dir + L"\\profiles\\" + profiles[profile] + L".ini";
-            Config nc;
-            if (!ConfigLoad(ini_path.c_str(), nc)) Log("[main] %ls not found - defaults in use", ini_path.c_str());
+            Config nc; const int have = ConfigLoad(app_path.c_str(), ini_path.c_str(), nc);
             ResolveWork(nc, dir); cfg = nc;
             const std::wstring lp = JoinPath(dir, cfg.log_file);
             if (lp != log_path) { log_path = lp; LogInit(log_path.c_str()); }
+            LogConfigFiles(app_path, ini_path, have);
             Log("[main] profile %ls", ini_path.c_str());
             tray_hotkeys();
             if (tray) TrayNotify(tray, L"JustFlow", (L"Profile: " + profiles[profile]).c_str());

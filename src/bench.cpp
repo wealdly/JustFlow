@@ -93,10 +93,10 @@ int RunBench(int argc, char** argv)
     }
     const std::wstring dir = ExeDir();
     std::vector<std::wstring> names; int idx;
-    const std::wstring ini_path = PickProfile(dir, ini, names, idx);   // no --ini: the same auto-pick as live mode
-    Config cfg; const bool have_ini = ConfigLoad(ini_path.c_str(), cfg);
+    const std::wstring ini_path = PickProfile(dir, ini, names, idx), app_path = dir + L"\\justflow.ini";   // no --ini: the same auto-pick as live mode
+    Config cfg; const int have = ConfigLoad(app_path.c_str(), ini_path.c_str(), cfg);
     LogInit((dir + L"\\bench.log").c_str());
-    Log("[bench] profile %ls%s", ini_path.c_str(), have_ini ? "" : " (not found - defaults)");
+    LogConfigFiles(app_path, ini_path, have);
     if (work_w && work_h) { cfg.work_w = work_w; cfg.work_h = work_h; }
 
     const std::vector<std::wstring> files = ListPngs(input);
@@ -116,7 +116,7 @@ int RunBench(int argc, char** argv)
 
     Gpu g;
     if (!GpuInit(g, -1)) return 1;
-    if (cfg.selftest) ComposeSelfTest(g);
+    if (cfg.selftest) { ComposeSelfTest(g); ArtCnnSelfTest(g); }
     ResolveWork(cfg, dir);
     Pipeline* p = PipelineCreate(g, cfg, w, h, present, nullptr);
     if (!p) { GpuShutdown(g); return 1; }

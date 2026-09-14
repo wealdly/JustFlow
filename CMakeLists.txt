@@ -14,7 +14,7 @@ set(FXC "${WINSDK_ROOT}/bin/${WINSDK_VER}/x64/fxc.exe")
 set(CPPWINRT_INC "${WINSDK_ROOT}/Include/${WINSDK_VER}/cppwinrt")
 
 # ---- shaders: fxc -> gen/<name>.h with g_cs_<name> byte array ----------------------------------
-set(SHADERS swizzle gray downscale expand compose residual compose_residual text sharpen)
+set(SHADERS swizzle gray downscale expand compose residual compose_residual text sharpen artcnn)
 set(SHADER_HEADERS)
 foreach(s ${SHADERS})
     set(src ${CMAKE_SOURCE_DIR}/shaders/${s}.hlsl)
@@ -60,5 +60,6 @@ set_target_properties(justflow PROPERTIES WIN32_EXECUTABLE ON)    # tray app: no
 add_custom_command(TARGET justflow POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:nvngx_dll_justflow> $<TARGET_FILE_DIR:justflow>
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/profiles $<TARGET_FILE_DIR:justflow>/profiles
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/justflow.ini $<TARGET_FILE_DIR:justflow>
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssg.dll $<TARGET_FILE_DIR:justflow>)
 endif()

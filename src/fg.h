@@ -1,10 +1,12 @@
 // Phase 2: DLSS frame generation (nvngx_dlssg.dll, NGX feature 11) on the composed 4K frame.
 // Desktop path lifted from NeuralScreen's frame_generation.inl: identity camera, flat 0.5 depth,
 // our OFA motion field in work-res pixels. A presenter thread owns OverlayPresent while an Fg
-// exists: it picks the newest ready slot, evaluates DLSS-G (multiplier - 1) times on its own
-// list/allocator/fence (executed on Gpu::queue), then presents generated frames + the real frame
-// through the overlay's present queue, paced on the monitor's vblank (or a CPU timer). Any failure
-// sets FgFailed; the caller destroys the Fg and presentation returns to the main thread.
+// exists: it takes the oldest ready slot, evaluates DLSS-G (multiplier - 1) times on its own
+// D3D12 queue (a GpuCtx: the evaluates never queue behind NR / compose on Gpu::queue; the FG
+// queue waits GPU-side on the slot's render fence, the present queue on the evaluate fence),
+// then presents generated frames + the real frame through the overlay's present queue, paced
+// on the monitor's vblank (or a CPU timer). Any failure sets FgFailed; the caller destroys the
+// Fg and presentation returns to the main thread.
 //
 // Pacing (vblank mode): output slot L = real interval / multiplier. Frame k of a slot is due at
 // anchor + k*L, anchor = max(now, previous real frame's target + L) - a continuous cadence when
@@ -16,8 +18,11 @@
 //
 // Contract:
 //   FgRecord  (main thread, inside list 2): copies composed (COPY_SOURCE) and mv (NPSR, restored)
-//             into a slot. Slot textures are owned here, so the pipeline may overwrite out4k/mv
-//             on the next frame. Returns false when no slot can be taken (frame not presented).
+//             into a slot (Gpu::queue waits GPU-side for the slot's last evaluate + present copy).
+//             Slot textures are owned here, so the pipeline may overwrite out4k/mv on the next
+//             frame. With every slot in flight it waits (bounded, ~2 real intervals) for the
+//             presenter to retire one rather than drop a real frame; on timeout the oldest ready
+//             slot is overwritten. Returns false when no slot can be taken (frame not presented).
 //   FgSubmit  (main thread, after GpuEnd): hands the recorded slot to the presenter with the fence
 //             value that completes the copy. reset = no interpolation against the previous frame.
 //             cap_qpc/acq_qpc (QPC ticks, 0 = unknown) feed the age/pipe latency stats.

@@ -33,11 +33,15 @@ static const int kSlots = 3, kMaxGen = 3;
 
 // Rest states: real CSRC, mv CDST, gen[] CSRC, depth NPSR, disable UAV. state: 0 free, 1 writing
 // (producer), 2 ready, 3 presenting; guarded by Fg::mu.
+// Queues: the main queue writes real/mv (FgRecord copies, fence = Gpu::fence value); the FG queue
+// (Fg::ctx) reads them + writes gen[] (eval_fence = ctx fence value); the present queue reads
+// real/gen[] after waiting on eval_fence. Reuse: the main queue waits on eval_fence and on the last
+// present copy before the next FgRecord copies into the slot.
 struct FgSlot
 {
     ID3D12Resource *real = nullptr, *mv = nullptr, *gen[kMaxGen] = {};
     int    state = 0;
-    UINT64 seq = 0, fence = 0;
+    UINT64 seq = 0, fence = 0, eval_fence = 0;
     bool   interpolate = false;
     double interval = 16.0;   // ms between this and the previous submit
     LONGLONG cap_qpc = 0, acq_qpc = 0;
@@ -69,32 +73,13 @@ struct Fg
     std::atomic<UINT> presented{ 0 }, drops{ 0 };
     std::vector<double> spacing, age, pipe;   // guarded by mu; handed over by FgStats
     double last_present = 0;
-    ID3D12CommandAllocator* alloc = nullptr; ID3D12GraphicsCommandList* list = nullptr;
-    ID3D12Fence* fence = nullptr; HANDLE event = nullptr; UINT64 fence_value = 0;
+    GpuCtx ctx;   // the FG queue: DLSS-G evaluates never sit behind NR / compose on Gpu::queue
 };
 
 static bool Fail(Fg* f, const char* why)
 {
     if (!f->failed.exchange(true)) Log("[fg] disabled: %s", why);
     return false;
-}
-
-static bool WaitFence(Fg* f, ID3D12Fence* fence, UINT64 v, DWORD ms)
-{
-    UINT64 done = fence->GetCompletedValue();
-    if (done == UINT64_MAX) return false;
-    if (done >= v) return true;
-    ResetEvent(f->event);
-    if (FAILED(fence->SetEventOnCompletion(v, f->event))) return false;
-    const ULONGLONG deadline = GetTickCount64() + ms;
-    for (;;)
-    {
-        const ULONGLONG now = GetTickCount64();
-        if (WaitForSingleObject(f->event, now >= deadline ? 0 : (DWORD)(deadline - now)) != WAIT_OBJECT_0) return false;
-        done = fence->GetCompletedValue();
-        if (done == UINT64_MAX) return false;
-        if (done >= v) return true;
-    }
 }
 
 // ---- NGX calls with SEH (no unwindable objects in these frames) --------------------------------
@@ -112,23 +97,12 @@ static NVSDK_NGX_Result SafeEvaluate(Fg* f, ID3D12GraphicsCommandList* cl, NVSDK
 }
 
 // ---- presenter thread ---------------------------------------------------------------------------
-static bool Begin(Fg* f) { return SUCCEEDED(f->alloc->Reset()) && SUCCEEDED(f->list->Reset(f->alloc, nullptr)) ? true : Fail(f, "list reset"); }
-
-static bool Exec(Fg* f, DWORD ms)
+// Copy src (a texture of slot s) into the overlay backbuffer (present queue, after the slot's
+// evaluate on the FG queue) and present. `real`: this is the slot's real frame (latency stats).
+static bool Present(Fg* f, ID3D12Resource* src, const FgSlot* s, bool real)
 {
-    if (FAILED(f->list->Close())) return Fail(f, "list close");
-    ID3D12CommandList* ls[] = { f->list };
-    f->g->queue->ExecuteCommandLists(1, ls);
-    const UINT64 v = ++f->fence_value;
-    if (FAILED(f->g->queue->Signal(f->fence, v))) return Fail(f, "queue signal");
-    return WaitFence(f, f->fence, v, ms) ? true : Fail(f, "fence wait (device removed?)");
-}
-
-// Copy src into the overlay backbuffer (present queue) and present. `real_of`: the slot whose real
-// frame this is (latency stats); nullptr for generated frames.
-static bool Present(Fg* f, ID3D12Resource* src, const FgSlot* real_of)
-{
-    if (!OverlayPresent(f->ov, src, nullptr, 0)) return Fail(f, "Present failed");
+    if (!OverlayPresent(f->ov, src, f->ctx.fence, s->eval_fence)) return Fail(f, "Present failed");
+    const FgSlot* real_of = real ? s : nullptr;
     LONGLONG pq = 0, sq = 0; OverlayTimes(f->ov, pq, sq);
     const double t = QpcToMs(pq);
     ++f->presented;
@@ -142,8 +116,9 @@ static bool Present(Fg* f, ID3D12Resource* src, const FgSlot* real_of)
 
 static bool Evaluate(Fg* f, FgSlot* s, bool interpolate, bool& allow)
 {
-    if (!Begin(f)) return false;
-    ID3D12GraphicsCommandList* cl = f->list;
+    Gpu& g = *f->g;
+    if (!GpuCtxBegin(g, f->ctx)) return Fail(f, "FG queue begin (device removed?)");
+    ID3D12GraphicsCommandList* cl = f->ctx.list;
     GpuBarrier(cl, s->real, CSRC, NPSR);
     GpuBarrier(cl, s->mv, CDST, NPSR);
     NVSDK_NGX_DLSSG_Opt_Eval_Params opt = {};
@@ -193,7 +168,13 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate, bool& allow)
     }
     GpuBarrier(cl, s->real, NPSR, CSRC);
     GpuBarrier(cl, s->mv, NPSR, CDST);
-    if (!Exec(f, 10000)) return false;   // CPU-side wait: the present queue may copy gen/real right after
+    f->ctx.queue->Wait(g.fence, s->fence);   // GPU-side: the slot's real + mv copies (list 2) are complete on the main queue
+    const UINT64 v = GpuCtxEnd(f->ctx);
+    if (!v) return Fail(f, "FG queue submit");
+    s->eval_fence = v;
+    // CPU wait on the FG queue only (the disable flag decides whether the generated frames go out);
+    // the present queue orders itself on eval_fence, never on this thread.
+    if (!GpuCtxWait(f->ctx, f->ctx.fence, v, 10000)) return Fail(f, "evaluate fence wait (device removed?)");
     if (code) { Log("[fg] evaluate raised 0x%08X", code); return Fail(f, "evaluate raised an exception"); }
     if (NVSDK_NGX_FAILED(r)) { Log("[fg] evaluate -> 0x%08X (%s)", r, NgxResultName(r)); return Fail(f, "evaluate failed"); }
     allow = true;
@@ -239,11 +220,12 @@ static void Presenter(Fg* f)
             std::unique_lock<std::mutex> lk(f->mu);
             f->cv.wait(lk, [&] { return f->stop || newer_ready(0); });
             if (f->stop) break;
-            for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq > s->seq)) s = &x;
-            for (auto& x : f->slots) if (x.state == 2 && &x != s) { x.state = 0; ++f->drops; }
+            // Oldest ready first: every real frame is shown; a newer ready slot pre-empts this one's
+            // generated frames (wait_until), so a backlog clears at one vblank per slot.
+            for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq < s->seq)) s = &x;
             s->state = 3;
         }
-        bool ok = WaitFence(f, f->g->fence, s->fence, 2000) ? true : Fail(f, "render fence wait");
+        bool ok = true;
         bool allow = false;
         const bool interp = s->interpolate && s->seq == prev + 1;   // a dropped frame breaks the pair
         if (ok) ok = Evaluate(f, s, interp, allow);
@@ -263,17 +245,17 @@ static void Presenter(Fg* f)
                     const double target = anchor + i * L + ph;
                     if (!wait_until(target, s->seq)) { preempted = true; break; }
                     if (NowMs() - target > L * 0.5 + vb * 0.5) { ++f->drops; continue; }   // stale: skip, never burst
-                    if (!Present(f, s->gen[i], nullptr)) { ok = false; break; }
+                    if (!Present(f, s->gen[i], s, false)) { ok = false; break; }
                 }
                 real_target = preempted ? NowMs() : anchor + f->count * L;
             }
             // The real frame is never skipped for lateness: only `stop` interrupts (seq MAX = no pre-emption).
-            if (ok && wait_until(real_target + ph, UINT64_MAX)) ok = Present(f, s->real, s);
+            if (ok && wait_until(real_target + ph, UINT64_MAX)) ok = Present(f, s->real, s, true);
             prev_real_target = real_target;
         }
         prev = s->seq;
-        std::lock_guard<std::mutex> lk(f->mu);
-        s->state = 0;
+        { std::lock_guard<std::mutex> lk(f->mu); s->state = 0; }
+        f->cv.notify_all();   // FgRecord may be waiting for a free slot
     }
 }
 
@@ -307,12 +289,7 @@ Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UI
     f->vblank = vblank_pacing; f->mv_dilated = mv_dilated;
     auto fail = [&](const char* why) { Fail(f, why); FgDestroy(f); return (Fg*)nullptr; };
 
-    if (FAILED(g.dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, __uuidof(ID3D12CommandAllocator), (void**)&f->alloc)) ||
-        FAILED(g.dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, f->alloc, nullptr, __uuidof(ID3D12GraphicsCommandList), (void**)&f->list)) ||
-        FAILED(g.dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), (void**)&f->fence)))
-        return fail("presenter command objects");
-    f->list->Close();
-    f->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!GpuCtxInit(g, f->ctx, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, L"fg")) return fail("FG queue");
 
     // NGX core: Init is harmless if ngx_nr already did it; the parameter block comes from the core.
     f->path_list[0] = f->dir.c_str();
@@ -365,17 +342,16 @@ void FgDestroy(Fg* f)
     if (!f) return;
     f->stop = true; f->cv.notify_all();
     if (f->thread.joinable()) f->thread.join();
-    // Drain: producer copies and evaluate lists still referencing the slots share Gpu::queue; the
-    // last backbuffer copy reads a slot on the present queue.
-    if (f->fence && f->event && SUCCEEDED(f->g->queue->Signal(f->fence, ++f->fence_value))) WaitFence(f, f->fence, f->fence_value, 5000);
+    // Drain: evaluates on the FG queue, producer copies on Gpu::queue and the last backbuffer copy
+    // on the present queue all reference the slots.
+    if (f->ctx.queue) GpuCtxWaitIdle(f->ctx, 5000);
     if (f->ov) OverlayDrain(f->ov);
     if (f->feature) { std::lock_guard<std::mutex> lk(NgxMutex()); f->release(f->feature); f->feature = nullptr; }
     // ponytail: no Shutdown1 - NR's parameter block lives in the same core; the refcount leaks until exit.
     if (f->params) NVSDK_NGX_D3D12_DestroyParameters(f->params);
     for (auto& s : f->slots) { REL(s.real); REL(s.mv); for (auto& t : s.gen) REL(t); }
     REL(f->depth); REL(f->disable); REL(f->disable_rb);
-    REL(f->list); REL(f->alloc); REL(f->fence);
-    if (f->event) CloseHandle(f->event);
+    GpuCtxShutdown(*f->g, f->ctx);
     if (f->dll) FreeLibrary(f->dll);
     delete f;
 }
@@ -397,19 +373,32 @@ void FgStats(Fg* f, FgStatsOut& out)
 bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* composed, ID3D12Resource* mv)
 {
     if (f->failed) return false;
-    FgSlot* s = nullptr;
+    FgSlot* s = nullptr; UINT64 eval = 0;
     {
-        std::lock_guard<std::mutex> lk(f->mu);
-        for (auto& x : f->slots) if (x.state == 0) { s = &x; break; }
-        if (!s)   // producer ahead of the presenter: overwrite the oldest ready slot (it would be discarded anyway)
+        std::unique_lock<std::mutex> lk(f->mu);
+        auto free_slot = [&] { for (auto& x : f->slots) if (x.state == 0) return &x; return (FgSlot*)nullptr; };
+        if (!(s = free_slot()))
         {
-            for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq < s->seq)) s = &x;
-            if (!s) return false;
-            ++f->drops;
+            // Every slot is in flight (one presenting, two ready): wait for the presenter to retire
+            // the oldest (a newer ready slot pre-empts its generated frames, so ~1 vblank) instead
+            // of dropping a real frame. ponytail: bound = 2 real intervals; on timeout the oldest
+            // ready slot is overwritten (the presenter is stuck behind the display).
+            const double bound = std::clamp(2.0 * (f->history ? NowMs() - f->last_submit : 16.0), 8.0, 50.0);
+            f->cv.wait_for(lk, std::chrono::duration<double, std::milli>(bound), [&] { return f->stop || f->failed || (s = free_slot()) != nullptr; });
+            if (!s)
+            {
+                for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq < s->seq)) s = &x;
+                if (!s) return false;
+                ++f->drops;
+            }
         }
-        s->state = 1;
+        s->state = 1; eval = s->eval_fence;
     }
     f->pending = s;
+    // GPU-side ordering for the reuse: the FG queue's last evaluate of this slot (reads real/mv,
+    // writes gen) and the present queue's last copy (reads real/gen) complete before list 2 writes.
+    if (eval) f->g->queue->Wait(f->ctx.fence, eval);
+    OverlayGuard(f->ov, f->g->queue);
     GpuBarrier(cl, s->real, CSRC, CDST);
     cl->CopyResource(s->real, composed);
     GpuBarrier(cl, s->real, CDST, CSRC);

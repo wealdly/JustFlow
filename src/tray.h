@@ -12,10 +12,11 @@ enum TrayEvent
     TrayWipe,           // cycle wipe mode
     TrayReload,
     TraySelectProfile,  // arg = index into TraySetProfiles
-    TrayOpenConfig,
+    TrayOpenConfig,     // the active profile (profiles\<game>.ini)
+    TrayOpenAppConfig,  // justflow.ini (hotkeys, ui, overlay, log stats)
     TrayOpenLog,
     TrayQuit,
-    TrayHotkeys,        // dialog OK'd: read the new strings with TrayGetHotkeys, write ini, re-register
+    TrayHotkeys,        // dialog OK'd: read the new strings with TrayGetHotkeys, write justflow.ini, re-register
 };
 
 struct TrayState

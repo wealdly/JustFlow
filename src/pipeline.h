@@ -25,7 +25,7 @@ struct StageStats
     double p95() const { return pct(0.95); }
 };
 
-enum PipeStage { PS_SWIZZLE, PS_GRAYDS, PS_OFA, PS_EXPAND, PS_EVAL, PS_COMPOSE, PS_OFA2, PS_COUNT };   // PS_OFA/PS_OFA2: bench only (CPU round trip)
+enum PipeStage { PS_SWIZZLE, PS_GRAYDS, PS_OFA, PS_EXPAND, PS_EVAL, PS_COMPOSE, PS_OFA2, PS_ARTCNN, PS_COUNT };   // PS_OFA/PS_OFA2: bench only (CPU round trip); PS_ARTCNN: sync path only
 extern const char* const kPipeStageName[PS_COUNT];
 
 struct Pipeline
@@ -44,6 +44,7 @@ struct Pipeline
     ID3D12Resource *sharp4k = nullptr;                                     // out4k sharpened ([nr] sharpen > 0), rest COPY_SOURCE
     ID3D12Resource *shown = nullptr;                                       // the texture handed onward last frame (out4k or sharp4k)
     ID3D12Resource *nr_in = nullptr, *nr_out = nullptr, *mv = nullptr;     // rest: NPSR, UAV, NPSR
+    ID3D12Resource *nr_in2 = nullptr, *nr_in2_m = nullptr;                 // [nr] artcnn: CsArtCnn(nr_in[_m]) -> the evaluate input (NPSR); compose/residual keep nr_in
     // NR feature lifecycle
     bool create_pending = false;
     int  rebuild_countdown = 0;
@@ -94,7 +95,7 @@ struct Pipeline
     // nor cmp_held (main's flow reference until it moves to a newer residual); the model thread only
     // reads them, and asks for the next frame once its flow has consumed them.
     struct ModelFrame { int held = 2; UINT64 fence = 0; UINT index = 0; bool reset = true; };
-    struct ModelParams { float zero_below = 0.5f; UINT cost_reject = 0; float exposure = 1.0f; int max_fps = 0, warmup = 8; };
+    struct ModelParams { float zero_below = 0.5f; UINT cost_reject = 0; float exposure = 1.0f; int max_fps = 0, warmup = 8; bool artcnn = false; };
     GpuCtx     model_ctx;
     std::thread model_thread;
     std::mutex model_mu; std::condition_variable model_cv;   // guards model_stop/model_frame_ready/model_frame/model_params
@@ -119,9 +120,12 @@ std::wstring ExeDir();
 // work_w/h == 0 -> justflow.spike.ini [spike] work=WxH (+create_style/param_block) else 2560x1440.
 void ResolveWork(Config& c, const std::wstring& dir);
 // Profiles: profiles\*.ini next to the exe, `names` = the sorted stems. `ini` (--ini) wins when non-empty
-// (index = its stem's slot in names, -1 if none); otherwise the first profile whose [capture] window
-// exists right now, else "wow", else the first. Returns the ini path ("" when there is no profile at all).
+// (index = its stem's slot in names, -1 if none); else justflow.ini [app] profile=<name> when it is not "auto";
+// otherwise the first profile whose [capture] window exists right now, else "wow", else the first.
+// Returns the ini path ("" when there is no profile at all).
 std::wstring PickProfile(const std::wstring& dir, const std::wstring& ini, std::vector<std::wstring>& names, int& index);
+// "[config] app ... + profile ..." with `have` from ConfigLoad, plus the app-layer keys the profile carries (ignored).
+void LogConfigFiles(const std::wstring& app, const std::wstring& profile, int have);
 
 Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_overlay, HWND target);
 // One frame. capture_bgra is BGRA8 w x h in COMMON; the queue first waits on wait_fence/wait_value

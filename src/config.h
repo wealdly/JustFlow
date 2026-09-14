@@ -1,4 +1,7 @@
-// Profile ini schema (profiles\*.ini). Loaded with GetPrivateProfile*; reload on hotkey.
+// Two ini layers, loaded with GetPrivateProfile*; reload on hotkey.
+//   justflow.ini (next to the exe) = APP: [app], [hotkeys], [overlay], [ui] toast*/hud*, [log] stats_every/
+//     gpu_timestamps/selftest, [ofa] dll_path, [nr] create_style/param_block (machine-level, from the spike).
+//   profiles\<game>.ini = GAME: everything else. The table in config.cpp (kAppKeys) is the authority.
 #pragma once
 #include <windows.h>
 #include <string>
@@ -9,6 +12,8 @@ struct HotkeySpec { UINT mods = 0; UINT vk = 0; };
 
 struct Config
 {
+    // [app] (justflow.ini)
+    std::wstring profile = L"auto";        // startup profile: auto (first whose window is up, else wow, else first) | <name>
     // [capture]
     std::wstring window_class = L"";      // profiles name the game; the binary carries no game-specific strings
     std::wstring window_title = L"";
@@ -17,8 +22,8 @@ struct Config
     // [nr]
     bool  nr_enabled = true;
     UINT  work_w = 0, work_h = 0;          // 0 = auto (from spike results / default 2560x1440)
-    int   create_style = 1;                // 0 = A (NeuralScreen set), 1 = B (plain)
-    int   param_block = 1;                 // 1 Allocate, 2 Capability, 3 Own
+    int   create_style = 1;                // 0 = A (NeuralScreen set), 1 = B (plain)   [app layer]
+    int   param_block = 1;                 // 1 Allocate, 2 Capability, 3 Own           [app layer]
     NrTuning tuning;
     float exposure_scale = 1.0f;
     float residual_strength = 1.0f;
@@ -29,13 +34,14 @@ struct Config
     float warp = 1.0f;                     // async: residual sampled at uv + mv * warp (this frame's mv only, see PipelineFrame)
     int   model_max_fps = 0;               // async: throttle the model thread (0 = as fast as the leftover GPU allows)
     float sharpen = 0.0f;                  // CAS-style sharpen after the compose, 0 = off (0.3-0.5 typical); live (F11)
+    bool  artcnn = false;                  // ArtCNN C4F16_DS luma pass on the model input (CsArtCnn nr_in -> nr_in2); live (F11)
     // [ofa]
     UINT  ofa_w = 960, ofa_h = 540;
     int   ofa_grid = 0;
     UINT  cost_reject = 0;
     float zero_below = 0.5f;
-    std::wstring ofa_dll;
-    // [ui]
+    std::wstring ofa_dll;                  // [app layer]
+    // [ui] (toast*/hud* are app layer, the rest profile)
     int   feather = 12;
     int   nrects = 0;                      // manual rects (rect1..rect16); the addon mask adds up to 64 more at compose time
     UiRect rects[16] = {};
@@ -44,7 +50,7 @@ struct Config
     bool  toast = true;                    // on-screen toast for state changes (top-centre, 2 s)
     int   toast_scale = 4;                 // font pixel scale (4 = 32 px glyphs at 4K)
     bool  hud = false;                     // status HUD at start (F7 toggles)
-    int   hud_corner = 1;                  // 0 tl, 1 tr, 2 bl, 3 br
+    int   hud_corner = 0;                  // 0 tl, 1 tr, 2 bl, 3 br
     int   hud_scale = 3;
     // [fg]
     bool  fg_enabled = false;
@@ -53,21 +59,25 @@ struct Config
     bool  fg_mv_dilated = true;            // DLSS-G motionVectorsDilated (see fg.cpp Evaluate)
     float fg_phase_ms = 0.0f;              // shifts every scheduled present target (negative = earlier); live (F11)
     int   fg_anchor_delay_slots = 0;       // 1 = first generated frame gets a full slot after the model pass; live (F11)
-    // [overlay]
-    bool  overlay_direct = false;          // mode=composed (layered, DWM-composed) | direct (monitor-sized, independent-flip capable)
+    // [overlay] (app layer)
+    bool  overlay_direct = false;         // mode=composed (layered, DWM-composed) | direct (monitor-sized, independent-flip capable)
     bool  exclude_from_capture = false;
     int   reassert_topmost_every = 300;
-    // [hotkeys]
+    // [hotkeys] (app layer)
     HotkeySpec hk_toggle, hk_wipe, hk_reload, hk_quit, hk_fg, hk_hud;
-    // [log]
+    // [log] (file is per profile, the rest app layer)
     std::wstring log_file = L"justflow.log";
     int   stats_every = 180;
     bool  gpu_timestamps = true;
     bool  selftest = false;                // run ComposeSelfTest once at startup
 };
 
-// Reads `path`; missing keys keep the defaults above. Returns false if the file is absent.
-bool ConfigLoad(const wchar_t* path, Config& c);
+// Reads every key from the file of its layer only (`app` = justflow.ini, `profile` = profiles\<game>.ini), so an
+// app key inside a profile is ignored. Missing keys/files keep the defaults above; either path may be null.
+// Returns a mask of the files found: 1 = app, 2 = profile.
+int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c);
+// "sec.key, sec.key" of app-layer keys present in `profile` (ignored by ConfigLoad); empty = none.
+std::wstring ConfigStrayKeys(const wchar_t* profile);
 // True if a key that is latched at CreateFeature differs (work size, style, block, tuning).
 bool ConfigNeedsRebuild(const Config& a, const Config& b);
 // Fills an NrConfig from the config (work size must already be resolved).

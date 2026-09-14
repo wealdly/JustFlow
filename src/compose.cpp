@@ -10,13 +10,16 @@
 #include "cs_compose_residual.h"
 #include "cs_text.h"
 #include "cs_sharpen.h"
+#include "cs_artcnn.h"
 #include <algorithm>
 #include <cstdlib>
 #include <vector>
 
 struct Shaders
 {
-    ComputePso swizzle, gray, downscale, expand, compose, residual, compose_residual, text, sharpen;
+    ComputePso swizzle, gray, downscale, expand, compose, residual, compose_residual, text, sharpen, artcnn;
+    ID3D12Resource* feat[3] = {};         // CsArtCnn feature maps (2w x 2h RGBA16F, UAV at rest), sized feat_w x feat_h
+    UINT feat_w = 0, feat_h = 0;
     // UI rects for compose: 256x1 R32_SINT texture (64 rects x 4), refilled from a per-slot upload
     // buffer inside CsCompose (recorded into the caller's list; nothing blocks).
     ID3D12Resource* rect_tex = nullptr;
@@ -77,6 +80,7 @@ Shaders* ShadersCreate(Gpu& g)
     ok &= GpuMakeCompute(g, g_cs_compose_residual, sizeof g_cs_compose_residual, 4, 1, 12, s->compose_residual, L"cs_compose_residual");
     ok &= GpuMakeCompute(g, g_cs_text,      sizeof g_cs_text,      1, 1, 24, s->text,      L"cs_text");
     ok &= GpuMakeCompute(g, g_cs_sharpen,   sizeof g_cs_sharpen,   2, 1, 4,  s->sharpen,   L"cs_sharpen");
+    ok &= GpuMakeCompute(g, g_cs_artcnn,    sizeof g_cs_artcnn,    3, 1, 3,  s->artcnn,    L"cs_artcnn");
     s->rect_tex = GpuMakeTex(g, kRectInts, 1, DXGI_FORMAT_R32_SINT, D3D12_RESOURCE_FLAG_NONE,
                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"ui_rects");
     ok &= s->rect_tex != nullptr;
@@ -98,8 +102,9 @@ Shaders* ShadersCreate(Gpu& g)
 void ShadersDestroy(Shaders* s)
 {
     if (!s) return;
-    ComputePso* p[] = { &s->swizzle, &s->gray, &s->downscale, &s->expand, &s->compose, &s->residual, &s->compose_residual, &s->text, &s->sharpen };
+    ComputePso* p[] = { &s->swizzle, &s->gray, &s->downscale, &s->expand, &s->compose, &s->residual, &s->compose_residual, &s->text, &s->sharpen, &s->artcnn };
     for (ComputePso* x : p) { if (x->pso) x->pso->Release(); if (x->root) x->root->Release(); }
+    for (ID3D12Resource* r : s->feat) if (r) r->Release();
     if (s->rect_tex) s->rect_tex->Release();
     if (s->font_tex) s->font_tex->Release();
     for (ID3D12Resource* r : s->rect_up) if (r) r->Release();
@@ -222,6 +227,70 @@ void CsSharpen(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource
     const GpuView srv[2] = { { src, DXGI_FORMAT_R8G8B8A8_UNORM }, { s->rect_tex, DXGI_FORMAT_R32_SINT } };
     const GpuView uav = { dst, DXGI_FORMAT_R8G8B8A8_UNORM };
     GpuDispatch(g, cl, s->sharpen, srv, &uav, &c, GpuGroups(w, 8), GpuGroups(h, 8));
+}
+
+// ---------------------------------------------------------------------------------------------
+void CsArtCnn(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* dst, UINT w, UINT h)
+{
+    const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    if (s->feat_w != w || s->feat_h != h)   // ponytail: one size at a time; the pipeline idles before a work-size change
+    {
+        for (ID3D12Resource*& t : s->feat)
+        {
+            if (t) t->Release();
+            t = GpuMakeTex(g, 2 * w, 2 * h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, UAV, L"artcnn_feat");
+            if (!t) { Log("[cs] artcnn feature texture %ux%u failed", 2 * w, 2 * h); s->feat_w = s->feat_h = 0; return; }
+        }
+        s->feat_w = w; s->feat_h = h;
+    }
+    ID3D12Resource *A = s->feat[0], *B = s->feat[1], *C = s->feat[2];
+    // views take each resource's own format (unused SRV slots are bound to src, which is NPSR throughout)
+    auto pass = [&](UINT layer, ID3D12Resource* in, ID3D12Resource* skip, ID3D12Resource* out)
+    {
+        const UINT c[3] = { w, h, layer };
+        const GpuView srv[3] = { { in, DXGI_FORMAT_UNKNOWN }, { skip, DXGI_FORMAT_UNKNOWN }, { src, DXGI_FORMAT_UNKNOWN } };
+        const GpuView uav = { out, DXGI_FORMAT_UNKNOWN };
+        GpuDispatch(g, cl, s->artcnn, srv, &uav, c, GpuGroups(w, 8), GpuGroups(h, 8));
+    };
+    pass(0, src, src, A); GpuBarrier(cl, A, UAV, NPSR);
+    pass(1, A, src, B);   GpuBarrier(cl, B, UAV, NPSR);
+    pass(2, B, src, C);   GpuBarrier(cl, C, UAV, NPSR); GpuBarrier(cl, B, NPSR, UAV);
+    pass(3, C, src, B);   GpuBarrier(cl, B, UAV, NPSR); GpuBarrier(cl, C, NPSR, UAV);
+    pass(4, B, src, C);   GpuBarrier(cl, C, UAV, NPSR); GpuBarrier(cl, B, NPSR, UAV);
+    pass(5, C, src, B);   GpuBarrier(cl, B, UAV, NPSR); GpuBarrier(cl, C, NPSR, UAV);
+    pass(6, B, A, dst);   GpuBarrier(cl, B, NPSR, UAV); GpuBarrier(cl, A, NPSR, UAV);
+}
+
+bool ArtCnnSelfTest(Gpu& g)
+{
+    const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    const UINT w = 64, h = 64;
+    Shaders* s = ShadersCreate(g);
+    if (!s) return false;
+    ID3D12Resource* src = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"st_artcnn_src");
+    ID3D12Resource* dst = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, UAV, L"st_artcnn_dst");
+    bool ok = src && dst;
+    // run(image) -> max |dst - src| over RGB. flat: 128 everywhere; edge: 64 | 192 split down the middle
+    std::vector<uint8_t> px((size_t)w * h * 4), got((size_t)w * h * 4);
+    auto run = [&](bool edge, int& max_delta) -> bool
+    {
+        for (UINT y = 0; y < h; ++y) for (UINT x = 0; x < w; ++x)
+        { uint8_t* p = &px[((size_t)y * w + x) * 4]; p[0] = p[1] = p[2] = (uint8_t)(edge ? (x < w / 2 ? 64 : 192) : 128); p[3] = 255; }
+        if (!GpuUploadTex(g, src, px.data(), w, h, 4, NPSR) || !GpuBegin(g)) return false;
+        CsArtCnn(g, s, g.list, src, dst, w, h);
+        const UINT64 v = GpuEnd(g);
+        if (!v || !GpuWait(g, g.fence, v, 5000) || !GpuReadbackTex(g, dst, got.data(), w, h, 4, UAV)) return false;
+        max_delta = 0;
+        for (size_t i = 0; i < px.size(); ++i) if (i % 4 != 3) max_delta = std::max(max_delta, abs((int)px[i] - (int)got[i]));
+        return true;
+    };
+    int flat = -1, edge = -1;
+    ok = ok && run(false, flat) && run(true, edge);
+    ok = ok && flat <= 2 && edge > 0;
+    Log("[cs] artcnn self-test %s (flat grey max delta %d/255, step edge max delta %d/255)", ok ? "PASS" : "FAIL", flat, edge);
+    if (src) src->Release(); if (dst) dst->Release();
+    ShadersDestroy(s);
+    return ok;
 }
 
 bool ComposeSelfTest(Gpu& g)

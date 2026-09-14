@@ -17,7 +17,7 @@ const UINT WM_TRAY_STATE = WM_APP + 2;   // TraySetState -> refresh tooltip on t
 const UINT ICON_ID = 1;
 
 enum { IDM_STATUS = 1, IDM_NR, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM_MULT3, IDM_MULT4, IDM_WIPE, IDM_RELOAD,
-       IDM_HOTKEYS, IDM_CONFIG, IDM_LOG, IDM_QUIT, IDM_PROFILE0 = 100 };
+       IDM_HOTKEYS, IDM_CONFIG, IDM_APPCONFIG, IDM_LOG, IDM_QUIT, IDM_PROFILE0 = 100 };
 const int HK_EDIT0 = 100;   // dialog edit ids HK_EDIT0..HK_EDIT0+4
 const wchar_t* const HK_LABELS[5] = { L"Toggle NR", L"Wipe", L"Reload", L"Frame gen", L"Quit" };
 }
@@ -200,7 +200,8 @@ static HMENU BuildMenu(Tray* t)
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
 
     AppendMenuW(m, MF_STRING, IDM_HOTKEYS, L"Hotkeys...");
-    AppendMenuW(m, MF_STRING, IDM_CONFIG, L"Open config file");
+    AppendMenuW(m, MF_STRING, IDM_CONFIG, L"Open profile");
+    AppendMenuW(m, MF_STRING, IDM_APPCONFIG, L"Open app settings");
     AppendMenuW(m, MF_STRING, IDM_LOG, L"Open log");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_QUIT, L"Quit");
@@ -223,6 +224,7 @@ static void ShowMenu(Tray* t)
     case IDM_WIPE:    Push(t, TrayWipe); break;
     case IDM_RELOAD:  Push(t, TrayReload); break;
     case IDM_CONFIG:  Push(t, TrayOpenConfig); break;
+    case IDM_APPCONFIG: Push(t, TrayOpenAppConfig); break;
     case IDM_LOG:     Push(t, TrayOpenLog); break;
     case IDM_QUIT:    Push(t, TrayQuit); break;
     case IDM_HOTKEYS: ShowHotkeyDialog(t); break;

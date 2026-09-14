@@ -1,19 +1,46 @@
 #include "config.h"
-#include "log.h"
 #include <cstdlib>
 #include <cstring>
 #include <cwctype>
 
-static std::wstring S(const wchar_t* path, const wchar_t* sec, const wchar_t* key, const std::wstring& def)
+// ---- layers -----------------------------------------------------------------------------------------
+// App-layer keys (justflow.ini). key == nullptr = the whole section. Anything not listed is a profile key
+// ([ui] rectN included). Entries are grouped by section (ConfigStrayKeys scans one pass per section).
+struct AppKey { const wchar_t *sec, *key; };
+static const AppKey kAppKeys[] = {
+    { L"app", nullptr },
+    { L"hotkeys", nullptr },
+    { L"overlay", nullptr },
+    { L"ui", L"toast" }, { L"ui", L"toast_scale" }, { L"ui", L"hud" }, { L"ui", L"hud_corner" }, { L"ui", L"hud_scale" },
+    { L"log", L"stats_every" }, { L"log", L"gpu_timestamps" }, { L"log", L"selftest" },
+    { L"ofa", L"dll_path" },
+    { L"nr", L"create_style" }, { L"nr", L"param_block" },
+};
+
+static bool IsAppKey(const wchar_t* sec, const wchar_t* key)
 {
-    wchar_t buf[512]; GetPrivateProfileStringW(sec, key, def.c_str(), buf, 512, path); return buf;
+    for (const auto& k : kAppKeys) if (!_wcsicmp(k.sec, sec) && (!k.key || !_wcsicmp(k.key, key))) return true;
+    return false;
 }
-static int   I(const wchar_t* path, const wchar_t* sec, const wchar_t* key, int def) { return (int)GetPrivateProfileIntW(sec, key, def, path); }
-static bool  B(const wchar_t* path, const wchar_t* sec, const wchar_t* key, bool def) { return I(path, sec, key, def ? 1 : 0) != 0; }
-static float F(const wchar_t* path, const wchar_t* sec, const wchar_t* key, float def)
+
+std::wstring ConfigStrayKeys(const wchar_t* profile)
 {
-    wchar_t buf[64]; GetPrivateProfileStringW(sec, key, L"", buf, 64, path);
-    return buf[0] ? (float)wcstod(buf, nullptr) : def;
+    std::wstring out;
+    if (!profile || !*profile || GetFileAttributesW(profile) == INVALID_FILE_ATTRIBUTES) return out;
+    const wchar_t* last = L"";
+    for (const auto& k : kAppKeys)
+    {
+        if (!_wcsicmp(k.sec, last)) continue;
+        last = k.sec;
+        wchar_t buf[4096]; GetPrivateProfileSectionW(k.sec, buf, 4096, profile);   // "key=val\0key=val\0\0", comments dropped
+        for (const wchar_t* e = buf; *e; e += wcslen(e) + 1)
+        {
+            std::wstring key(e, wcscspn(e, L"="));
+            while (!key.empty() && iswspace(key.back())) key.pop_back();
+            if (IsAppKey(k.sec, key.c_str())) out += (out.empty() ? L"" : L", ") + std::wstring(k.sec) + L"." + key;
+        }
+    }
+    return out;
 }
 
 HotkeySpec ParseHotkey(std::wstring s, UINT def_vk)
@@ -42,87 +69,103 @@ std::wstring FormatHotkey(const HotkeySpec& h)
     return s;
 }
 
-bool ConfigLoad(const wchar_t* path, Config& c)
+int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
 {
-    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) return false;
-    c.window_class = S(path, L"capture", L"window_class", c.window_class);
-    c.window_title = S(path, L"capture", L"window_title", c.window_title);
-    c.cursor = B(path, L"capture", L"cursor", c.cursor);
-    c.dda = S(path, L"capture", L"mode", L"dda") != L"wgc";
-    c.border = B(path, L"capture", L"border", c.border);
+    auto exists = [](const wchar_t* p) { return p && *p && GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES; };
+    const wchar_t* pa = exists(app) ? app : nullptr;
+    const wchar_t* pp = exists(profile) ? profile : nullptr;
+    // each key is read from the file of its layer; a missing file reads as "key absent" (default kept)
+    auto P = [&](const wchar_t* sec, const wchar_t* key) { return IsAppKey(sec, key) ? pa : pp; };
+    auto S = [&](const wchar_t* sec, const wchar_t* key, const std::wstring& def) -> std::wstring
+    {
+        const wchar_t* path = P(sec, key); if (!path) return def;
+        wchar_t buf[512]; GetPrivateProfileStringW(sec, key, def.c_str(), buf, 512, path); return buf;
+    };
+    auto I = [&](const wchar_t* sec, const wchar_t* key, int def) { const wchar_t* path = P(sec, key); return path ? (int)GetPrivateProfileIntW(sec, key, def, path) : def; };
+    auto B = [&](const wchar_t* sec, const wchar_t* key, bool def) { return I(sec, key, def ? 1 : 0) != 0; };
+    auto F = [&](const wchar_t* sec, const wchar_t* key, float def) { const std::wstring s = S(sec, key, L""); return s.empty() ? def : (float)wcstod(s.c_str(), nullptr); };
 
-    c.nr_enabled = B(path, L"nr", L"enabled", c.nr_enabled);
-    const std::wstring work = S(path, L"nr", L"work", L"auto");
+    c.profile = S(L"app", L"profile", c.profile);
+
+    c.window_class = S(L"capture", L"window_class", c.window_class);
+    c.window_title = S(L"capture", L"window_title", c.window_title);
+    c.cursor = B(L"capture", L"cursor", c.cursor);
+    c.dda = S(L"capture", L"mode", L"dda") != L"wgc";
+    c.border = B(L"capture", L"border", c.border);
+
+    c.nr_enabled = B(L"nr", L"enabled", c.nr_enabled);
+    const std::wstring work = S(L"nr", L"work", L"auto");
     if (swscanf_s(work.c_str(), L"%ux%u", &c.work_w, &c.work_h) != 2) { c.work_w = c.work_h = 0; }
-    c.create_style = I(path, L"nr", L"create_style", c.create_style);
-    c.param_block = I(path, L"nr", L"param_block", c.param_block);
-    c.tuning.preset = I(path, L"nr", L"preset", c.tuning.preset);
-    c.tuning.style = I(path, L"nr", L"style", c.tuning.style);
-    c.tuning.intensity = F(path, L"nr", L"intensity", c.tuning.intensity);
-    c.tuning.local_tone = F(path, L"nr", L"local_tone", c.tuning.local_tone);
-    c.tuning.local_structure = F(path, L"nr", L"local_structure", c.tuning.local_structure);
-    c.tuning.skin_structure = F(path, L"nr", L"skin_structure", c.tuning.skin_structure);
-    c.tuning.auto_mask = B(path, L"nr", L"auto_mask", c.tuning.auto_mask);
-    c.tuning.ui_correction = B(path, L"nr", L"ui_correction", c.tuning.ui_correction);
-    c.exposure_scale = F(path, L"nr", L"exposure_scale", c.exposure_scale);
-    c.residual_strength = F(path, L"nr", L"residual_strength", c.residual_strength);
-    c.warmup = I(path, L"nr", L"warmup", c.warmup);
-    c.rebuild_debounce_frames = I(path, L"nr", L"rebuild_debounce_frames", c.rebuild_debounce_frames);
-    c.max_fps = I(path, L"nr", L"max_fps", c.max_fps);
-    c.nr_async = S(path, L"nr", L"mode", c.nr_async ? L"async" : L"sync") == L"async";
-    c.warp = F(path, L"nr", L"warp", c.warp);
-    c.model_max_fps = I(path, L"nr", L"model_max_fps", c.model_max_fps);
-    c.sharpen = F(path, L"nr", L"sharpen", c.sharpen);
+    c.create_style = I(L"nr", L"create_style", c.create_style);
+    c.param_block = I(L"nr", L"param_block", c.param_block);
+    c.tuning.preset = I(L"nr", L"preset", c.tuning.preset);
+    c.tuning.style = I(L"nr", L"style", c.tuning.style);
+    c.tuning.intensity = F(L"nr", L"intensity", c.tuning.intensity);
+    c.tuning.local_tone = F(L"nr", L"local_tone", c.tuning.local_tone);
+    c.tuning.local_structure = F(L"nr", L"local_structure", c.tuning.local_structure);
+    c.tuning.skin_structure = F(L"nr", L"skin_structure", c.tuning.skin_structure);
+    c.tuning.auto_mask = B(L"nr", L"auto_mask", c.tuning.auto_mask);
+    c.tuning.ui_correction = B(L"nr", L"ui_correction", c.tuning.ui_correction);
+    c.exposure_scale = F(L"nr", L"exposure_scale", c.exposure_scale);
+    c.residual_strength = F(L"nr", L"residual_strength", c.residual_strength);
+    c.warmup = I(L"nr", L"warmup", c.warmup);
+    c.rebuild_debounce_frames = I(L"nr", L"rebuild_debounce_frames", c.rebuild_debounce_frames);
+    c.max_fps = I(L"nr", L"max_fps", c.max_fps);
+    c.nr_async = S(L"nr", L"mode", c.nr_async ? L"async" : L"sync") == L"async";
+    c.warp = F(L"nr", L"warp", c.warp);
+    c.model_max_fps = I(L"nr", L"model_max_fps", c.model_max_fps);
+    c.sharpen = F(L"nr", L"sharpen", c.sharpen);
+    c.artcnn = B(L"nr", L"artcnn", c.artcnn);
 
-    const std::wstring in = S(path, L"ofa", L"input", L"960x540");
+    const std::wstring in = S(L"ofa", L"input", L"960x540");
     if (swscanf_s(in.c_str(), L"%ux%u", &c.ofa_w, &c.ofa_h) != 2) { c.ofa_w = 960; c.ofa_h = 540; }
-    const std::wstring grid = S(path, L"ofa", L"grid", L"auto");
+    const std::wstring grid = S(L"ofa", L"grid", L"auto");
     c.ofa_grid = grid == L"auto" ? 0 : _wtoi(grid.c_str());
-    c.cost_reject = (UINT)I(path, L"ofa", L"cost_reject", (int)c.cost_reject);
-    c.zero_below = F(path, L"ofa", L"zero_below", c.zero_below);
-    c.ofa_dll = S(path, L"ofa", L"dll_path", L"");
+    c.cost_reject = (UINT)I(L"ofa", L"cost_reject", (int)c.cost_reject);
+    c.zero_below = F(L"ofa", L"zero_below", c.zero_below);
+    c.ofa_dll = S(L"ofa", L"dll_path", L"");
 
-    c.feather = I(path, L"ui", L"feather", c.feather);
+    c.feather = I(L"ui", L"feather", c.feather);
     c.nrects = 0;
     for (int i = 1; i <= 16; ++i)
     {
         wchar_t key[16]; swprintf_s(key, L"rect%d", i);
-        const std::wstring r = S(path, L"ui", key, L"");
+        const std::wstring r = S(L"ui", key, L"");
         UiRect rc;
         if (swscanf_s(r.c_str(), L"%d,%d,%d,%d", &rc.x0, &rc.y0, &rc.x1, &rc.y1) == 4) c.rects[c.nrects++] = rc;
     }
-    c.mask = B(path, L"ui", L"mask", c.mask);
-    c.mask_every = I(path, L"ui", L"mask_every", c.mask_every);
-    c.toast = B(path, L"ui", L"toast", c.toast);
-    c.toast_scale = I(path, L"ui", L"toast_scale", c.toast_scale);
-    c.hud = B(path, L"ui", L"hud", c.hud);
-    const std::wstring hc = S(path, L"ui", L"hud_corner", L"tr");
+    c.mask = B(L"ui", L"mask", c.mask);
+    c.mask_every = I(L"ui", L"mask_every", c.mask_every);
+    c.toast = B(L"ui", L"toast", c.toast);
+    c.toast_scale = I(L"ui", L"toast_scale", c.toast_scale);
+    c.hud = B(L"ui", L"hud", c.hud);
+    const std::wstring hc = S(L"ui", L"hud_corner", L"tl");
     c.hud_corner = hc == L"tl" ? 0 : hc == L"bl" ? 2 : hc == L"br" ? 3 : 1;
-    c.hud_scale = I(path, L"ui", L"hud_scale", c.hud_scale);
+    c.hud_scale = I(L"ui", L"hud_scale", c.hud_scale);
 
-    c.fg_enabled = B(path, L"fg", L"enabled", c.fg_enabled);
-    c.fg_multiplier = I(path, L"fg", L"multiplier", c.fg_multiplier);
-    c.fg_pacing_vblank = S(path, L"fg", L"pacing", c.fg_pacing_vblank ? L"vblank" : L"timer") != L"timer";
-    c.fg_mv_dilated = B(path, L"fg", L"mv_dilated", c.fg_mv_dilated);
-    c.fg_phase_ms = F(path, L"fg", L"phase_ms", c.fg_phase_ms);
-    c.fg_anchor_delay_slots = I(path, L"fg", L"anchor_delay_slots", c.fg_anchor_delay_slots);
+    c.fg_enabled = B(L"fg", L"enabled", c.fg_enabled);
+    c.fg_multiplier = I(L"fg", L"multiplier", c.fg_multiplier);
+    c.fg_pacing_vblank = S(L"fg", L"pacing", c.fg_pacing_vblank ? L"vblank" : L"timer") != L"timer";
+    c.fg_mv_dilated = B(L"fg", L"mv_dilated", c.fg_mv_dilated);
+    c.fg_phase_ms = F(L"fg", L"phase_ms", c.fg_phase_ms);
+    c.fg_anchor_delay_slots = I(L"fg", L"anchor_delay_slots", c.fg_anchor_delay_slots);
 
-    c.overlay_direct = S(path, L"overlay", L"mode", c.overlay_direct ? L"direct" : L"composed") == L"direct";
-    c.exclude_from_capture = B(path, L"overlay", L"exclude_from_capture", c.exclude_from_capture);
-    c.reassert_topmost_every = I(path, L"overlay", L"reassert_topmost_every", c.reassert_topmost_every);
+    c.overlay_direct = S(L"overlay", L"mode", c.overlay_direct ? L"direct" : L"composed") == L"direct";
+    c.exclude_from_capture = B(L"overlay", L"exclude_from_capture", c.exclude_from_capture);
+    c.reassert_topmost_every = I(L"overlay", L"reassert_topmost_every", c.reassert_topmost_every);
 
-    c.hk_toggle = ParseHotkey(S(path, L"hotkeys", L"toggle", L"F9"), VK_F9);
-    c.hk_wipe = ParseHotkey(S(path, L"hotkeys", L"wipe", L"F10"), VK_F10);
-    c.hk_reload = ParseHotkey(S(path, L"hotkeys", L"reload", L"F11"), VK_F11);
-    c.hk_quit = ParseHotkey(S(path, L"hotkeys", L"quit", L"Ctrl+F12"), VK_F12);
-    c.hk_fg = ParseHotkey(S(path, L"hotkeys", L"fg", L"F8"), VK_F8);
-    c.hk_hud = ParseHotkey(S(path, L"hotkeys", L"hud", L"F7"), VK_F7);
+    c.hk_toggle = ParseHotkey(S(L"hotkeys", L"toggle", L"F9"), VK_F9);
+    c.hk_wipe = ParseHotkey(S(L"hotkeys", L"wipe", L"F10"), VK_F10);
+    c.hk_reload = ParseHotkey(S(L"hotkeys", L"reload", L"F11"), VK_F11);
+    c.hk_quit = ParseHotkey(S(L"hotkeys", L"quit", L"Ctrl+F12"), VK_F12);
+    c.hk_fg = ParseHotkey(S(L"hotkeys", L"fg", L"F8"), VK_F8);
+    c.hk_hud = ParseHotkey(S(L"hotkeys", L"hud", L"F7"), VK_F7);
 
-    c.log_file = S(path, L"log", L"file", c.log_file);
-    c.stats_every = I(path, L"log", L"stats_every", c.stats_every);
-    c.gpu_timestamps = B(path, L"log", L"gpu_timestamps", c.gpu_timestamps);
-    c.selftest = B(path, L"log", L"selftest", c.selftest);
-    return true;
+    c.log_file = S(L"log", L"file", c.log_file);
+    c.stats_every = I(L"log", L"stats_every", c.stats_every);
+    c.gpu_timestamps = B(L"log", L"gpu_timestamps", c.gpu_timestamps);
+    c.selftest = B(L"log", L"selftest", c.selftest);
+    return (pa ? 1 : 0) | (pp ? 2 : 0);
 }
 
 bool ConfigNeedsRebuild(const Config& a, const Config& b)
