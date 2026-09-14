@@ -25,7 +25,7 @@ struct StageStats
     double p95() const { return pct(0.95); }
 };
 
-enum PipeStage { PS_SWIZZLE, PS_GRAYDS, PS_OFA, PS_EXPAND, PS_EVAL, PS_COMPOSE, PS_COUNT };
+enum PipeStage { PS_SWIZZLE, PS_GRAYDS, PS_OFA, PS_EXPAND, PS_EVAL, PS_COMPOSE, PS_OFA2, PS_COUNT };   // PS_OFA/PS_OFA2: bench only (CPU round trip)
 extern const char* const kPipeStageName[PS_COUNT];
 
 struct Pipeline
@@ -63,7 +63,7 @@ struct Pipeline
     StageStats age_ms, pipe_ms;   // non-FG presents: present - cap_qpc, present - acq_qpc (FG: FgStats)
     UINT64     last_stamp_fence = 0;
     UINT64     last_stamp_fence_slot[3] = {};
-    int        ofa_cur = 0;       // per-frame OFA input ping-pong (slots 0/1); 2/3 are the model track's held grays
+    int        ofa_cur = 0;       // per-frame OFA input ping-pong (slots 0/1); 2..4 are the model track's held grays
     UINT       frame_index = 0;   // frames fed (main thread)
 
     // ---- addon UI mask ([ui] mask=1): the JustFlow addon draws a 4 px strip of 4x4 cells at the
@@ -88,7 +88,11 @@ struct Pipeline
     // slot, completed by main fence `fence`) whenever the thread asks (model_wants_frame). The thread
     // downscales, runs its own flow (pair 1, held slot vs the previous model frame's), evaluates NR on
     // its own queue and publishes residual[idx] (= nr_out - nr_in at work res) with its ctx fence
-    // value; main composes native + warped residual each frame (CsComposeResidual).
+    // value and the held slot of its frame; main composes native + residual each frame, warped by the
+    // flow current frame -> that held gray (pair 2 -> mv_res), so the warp spans the residual's age.
+    // Held slots 2..4: a hand-off never takes the last handed-off slot (the model's next flow reference)
+    // nor cmp_held (main's flow reference until it moves to a newer residual); the model thread only
+    // reads them, and asks for the next frame once its flow has consumed them.
     struct ModelFrame { int held = 2; UINT64 fence = 0; UINT index = 0; bool reset = true; };
     struct ModelParams { float zero_below = 0.5f; UINT cost_reject = 0; float exposure = 1.0f; int max_fps = 0, warmup = 8; };
     GpuCtx     model_ctx;
@@ -102,11 +106,12 @@ struct Pipeline
     bool       model_reset_pending = true;             // main: reset flags accumulated since the last hand-off
     ID3D12Resource* model_src = nullptr;               // RGBA8 native, COPY_DEST at rest
     ID3D12Resource *nr_in_m = nullptr, *nr_out_m = nullptr, *mv_m = nullptr;   // work res: NPSR, UAV, NPSR
+    ID3D12Resource* mv_res = nullptr;                  // main: motion current frame -> residual's model frame (work res, NPSR)
     ID3D12Resource* residual[2] = {};                  // RGBA16F work res, NPSR at rest
     std::mutex pub_mu;                                 // guards pub_* and model_ms
-    int        pub_idx = -1; UINT64 pub_fence = 0; UINT pub_frame = 0;
+    int        pub_idx = -1; UINT64 pub_fence = 0; UINT pub_frame = 0; int pub_held = -1;
     StageStats model_ms;                               // model evaluate GPU ms (drained by the stats reader)
-    int        cmp_idx = -1; UINT64 cmp_fence = 0;     // residual the main queue last waited for
+    int        cmp_idx = -1; UINT64 cmp_fence = 0; int cmp_held = -1;   // residual the main queue last waited for + its held gray slot
     StageStats residual_age;                           // per composed frame: frame_index - residual's frame index
 };
 

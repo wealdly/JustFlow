@@ -1,7 +1,7 @@
 // Decoupled compose: res = native + warp(residual, mv) * strength. The residual was computed on an
-// older (model) frame; mv is THIS frame's current -> previous motion in work-res pixels, so the
-// content now at p was at p + mv before: sample the residual at uv + mv_uv * warp (bilinear,
-// zero outside the frame). Then the same UI rects / feather / wipe as compose.hlsl.
+// older (model) frame M; mv is the motion from THIS frame to M in work-res pixels, so the content
+// now at p was at p + mv in M: sample the residual at uv + mv_uv * warp (bilinear, zero outside
+// the frame). Then the same UI rects / feather / wipe as compose.hlsl.
 Texture2D<float4>   native   : register(t0);
 Texture2D<float4>   residual : register(t1);   // RGBA16F, ww x wh
 Texture2D<float2>   mv       : register(t2);   // R16G16F, any size (sampled by uv)

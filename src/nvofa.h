@@ -14,19 +14,19 @@ Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid /* 0 = smallest supported */, co
 void OfaDestroy(Ofa* o);
 
 // Gray inputs: OfaInputCount R8_UNORM textures. Slots 0/1 are the per-frame ping-pong: write
-// `OfaInput(o, OfaCurrent(o))` this frame; slots 2/3 are free for a held reference (e.g. the model
-// track CopyResource's the last model frame's gray there). Resting state COMMON (copy into it from
-// a COPY_SOURCE gray texture, or dispatch into it as UAV and transition back to COMMON before
-// OfaExecute).
-inline int      OfaInputCount(Ofa*) { return 4; }
+// `OfaInput(o, OfaCurrent(o))` this frame; slots 2..4 are free for held references (the model track
+// keeps its model frames' grays there). Resting state COMMON (copy into it from a COPY_SOURCE gray
+// texture, or dispatch into it as UAV and transition back to COMMON before OfaExecute).
+inline int      OfaInputCount(Ofa*) { return 5; }
 ID3D12Resource* OfaInput(Ofa* o, int which);
 int             OfaCurrent(Ofa* o);
 // Executes flow current -> previous (matches the NR convention) into output pair 0. `reset` = no
 // reference frame (first frame / scene cut): the flow is zeroed instead. Swaps current/previous.
 bool OfaExecute(Ofa* o, ID3D12Fence* in_fence, UINT64 in_value, bool reset);
 // Explicit inputs: flow input_idx -> ref_idx into output pair `out_pair` (0 = per-frame flow read
-// by the FG path, 1 = model track: OfaFlow2/OfaCost2). Does not touch OfaCurrent. Returns the
-// OfaFence value that signals when the flow is ready (0 on failure). Thread-safe with OfaExecute.
+// by the FG path, 1 = model track: OfaFlow2/OfaCost2, 2 = current frame -> model frame for the
+// residual warp: OfaFlow3/OfaCost3). Does not touch OfaCurrent. Returns the OfaFence value that
+// signals when the flow is ready (0 on failure). Thread-safe with OfaExecute.
 UINT64 OfaExecuteRef(Ofa* o, ID3D12Fence* in_fence, UINT64 in_value, int input_idx, int ref_idx, int out_pair, bool reset);
 ID3D12Fence*    OfaFence(Ofa* o);
 UINT64          OfaFenceValue(Ofa* o);
@@ -37,6 +37,8 @@ UINT            OfaFlowHeight(Ofa* o);
 UINT            OfaGrid(Ofa* o);
 // Cost output R8_UINT (same grid), COMMON at rest. Optional confidence mask input to the expand pass.
 ID3D12Resource* OfaCost(Ofa* o);
-// Output pair 1 (model track).
+// Output pair 1 (model track) and pair 2 (residual warp, main thread).
 ID3D12Resource* OfaFlow2(Ofa* o);
 ID3D12Resource* OfaCost2(Ofa* o);
+ID3D12Resource* OfaFlow3(Ofa* o);
+ID3D12Resource* OfaCost3(Ofa* o);

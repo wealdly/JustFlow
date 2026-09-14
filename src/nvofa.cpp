@@ -10,7 +10,7 @@
 
 #pragma comment(lib, "version.lib")
 
-static const int kIn = 4;    // input slots; reg[] = inputs[0..3], flow[0], cost[0], flow[1], cost[1]
+static const int kIn = 5, kOut = 3;   // input slots (0/1 per frame, 2..4 held); reg[] = inputs[0..kIn-1], then flow[i], cost[i] per pair
 struct Ofa
 {
     Gpu* g = nullptr;
@@ -20,9 +20,9 @@ struct Ofa
     ID3D12Fence* fence = nullptr;
     UINT64 value = 0;
     ID3D12Resource* inputs[kIn] = {};
-    ID3D12Resource* flow[2] = {};
-    ID3D12Resource* cost[2] = {};
-    NvOFGPUBufferHandle reg[kIn + 4] = {};
+    ID3D12Resource* flow[kOut] = {};
+    ID3D12Resource* cost[kOut] = {};
+    NvOFGPUBufferHandle reg[kIn + 2 * kOut] = {};
     UINT w = 0, h = 0, grid = 0, fw = 0, fh = 0;
     int current = 0;
     std::mutex mu;   // nvOFExecute + value from two threads (per-frame path, model track)
@@ -152,16 +152,19 @@ Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid, const wchar_t* dll_override)
 
     if (FAILED(g.dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), (void**)&o->fence))) { Log("[ofa] fence failed"); OfaDestroy(o); return nullptr; }
     o->fw = (w + o->grid - 1) / o->grid; o->fh = (h + o->grid - 1) / o->grid;
-    const wchar_t* in_names[kIn] = { L"ofa_in0", L"ofa_in1", L"ofa_in2", L"ofa_in3" };
+    const wchar_t* in_names[kIn] = { L"ofa_in0", L"ofa_in1", L"ofa_in2", L"ofa_in3", L"ofa_in4" };
+    const wchar_t* flow_names[kOut] = { L"ofa_flow", L"ofa_flow2", L"ofa_flow3" }, *cost_names[kOut] = { L"ofa_cost", L"ofa_cost2", L"ofa_cost3" };
     for (int i = 0; i < kIn; ++i)
         o->inputs[i] = GpuMakeTex(g, w, h, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, in_names[i]);
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < kOut; ++i)
     {
-        o->flow[i] = GpuMakeTex(g, o->fw, o->fh, DXGI_FORMAT_R16G16_SINT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, i ? L"ofa_flow2" : L"ofa_flow");
-        o->cost[i] = GpuMakeTex(g, o->fw, o->fh, DXGI_FORMAT_R8_UINT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, i ? L"ofa_cost2" : L"ofa_cost");
+        o->flow[i] = GpuMakeTex(g, o->fw, o->fh, DXGI_FORMAT_R16G16_SINT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, flow_names[i]);
+        o->cost[i] = GpuMakeTex(g, o->fw, o->fh, DXGI_FORMAT_R8_UINT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, cost_names[i]);
     }
-    ID3D12Resource* res[kIn + 4] = { o->inputs[0], o->inputs[1], o->inputs[2], o->inputs[3], o->flow[0], o->cost[0], o->flow[1], o->cost[1] };
-    for (int i = 0; i < kIn + 4; ++i)
+    ID3D12Resource* res[kIn + 2 * kOut];
+    for (int i = 0; i < kIn; ++i) res[i] = o->inputs[i];
+    for (int i = 0; i < kOut; ++i) { res[kIn + 2 * i] = o->flow[i]; res[kIn + 2 * i + 1] = o->cost[i]; }
+    for (int i = 0; i < kIn + 2 * kOut; ++i)
     {
         if (!res[i]) { OfaDestroy(o); return nullptr; }
         NV_OF_REGISTER_RESOURCE_PARAMS_D3D12 rp = {};
@@ -198,7 +201,7 @@ void OfaDestroy(Ofa* o)
     delete o;
 }
 
-ID3D12Resource* OfaInput(Ofa* o, int which) { return o->inputs[which & (kIn - 1)]; }
+ID3D12Resource* OfaInput(Ofa* o, int which) { return o->inputs[std::clamp(which, 0, kIn - 1)]; }
 int             OfaCurrent(Ofa* o)          { return o->current; }
 ID3D12Fence*    OfaFence(Ofa* o)            { return o->fence; }
 UINT64          OfaFenceValue(Ofa* o)       { return o->value; }
@@ -209,12 +212,14 @@ UINT            OfaGrid(Ofa* o)             { return o->grid; }
 ID3D12Resource* OfaCost(Ofa* o)             { return o->cost[0]; }
 ID3D12Resource* OfaFlow2(Ofa* o)            { return o->flow[1]; }
 ID3D12Resource* OfaCost2(Ofa* o)            { return o->cost[1]; }
+ID3D12Resource* OfaFlow3(Ofa* o)            { return o->flow[2]; }
+ID3D12Resource* OfaCost3(Ofa* o)            { return o->cost[2]; }
 
 UINT64 OfaExecuteRef(Ofa* o, ID3D12Fence* in_fence, UINT64 in_value, int input_idx, int ref_idx, int out_pair, bool reset)
 {
     std::lock_guard<std::mutex> lk(o->mu);
     // reset: input == reference -> ~zero flow, and the expand pass zeroes it anyway.
-    input_idx &= kIn - 1; ref_idx = reset ? input_idx : (ref_idx & (kIn - 1)); out_pair &= 1;
+    input_idx = std::clamp(input_idx, 0, kIn - 1); ref_idx = reset ? input_idx : std::clamp(ref_idx, 0, kIn - 1); out_pair = std::clamp(out_pair, 0, kOut - 1);
     NV_OF_FENCE_POINT ready = { in_fence, in_value }, done = { o->fence, ++o->value };
     NV_OF_EXECUTE_INPUT_PARAMS_D3D12 in = {};
     in.inputFrame = o->reg[input_idx];

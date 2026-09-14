@@ -35,8 +35,9 @@ struct Capture
     // ponytail: two shared textures, ping-pong. With two submissions per frame the 3-deep allocator
     // ring guarantees the D3D12 reader of texture (n-2) has retired before D3D11 writes it again,
     // which a single texture would not give without a CPU wait.
-    ID3D11Texture2D* shared11[2] = {};
-    ID3D12Resource*  shared12[2] = {};
+    static const int kRing = 4;   // 4 deep: the D3D11 copy must never wait on a D3D12 reader (that throttled capture to 30 fps)
+    ID3D11Texture2D* shared11[kRing] = {};
+    ID3D12Resource*  shared12[kRing] = {};
     ID3D12Fence*     fence12 = nullptr;
     ID3D11Fence*     fence11 = nullptr;
     UINT64           fence_value = 0;
@@ -72,7 +73,7 @@ static void CaptureFree(Capture* c)
     catch (winrt::hresult_error const&) {}
     c->session = nullptr; c->pool = nullptr; c->item = nullptr; c->device = nullptr;
     if (c->dup) { if (c->dup_frame_held) c->dup->ReleaseFrame(); c->dup->Release(); c->dup = nullptr; }
-    for (int i = 0; i < 2; ++i) { REL(c->shared12[i]); REL(c->shared11[i]); }
+    for (int i = 0; i < Capture::kRing; ++i) { REL(c->shared12[i]); REL(c->shared11[i]); }
     REL(c->fence11); REL(c->fence12); REL(c->ctx4); REL(c->ctx); REL(c->dev);
     if (c->frame_event) { CloseHandle(c->frame_event); c->frame_event = nullptr; }
     delete c;
@@ -84,7 +85,7 @@ static bool CreateBridge(Gpu& g, Capture* c)
     if (FAILED(c->dev->QueryInterface(__uuidof(ID3D11Device5), (void**)&d5))) { Log("[cap] ID3D11Device5 unavailable"); return false; }
     bool ok = false;
     HANDLE nt = nullptr;
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < Capture::kRing; ++i)
     {
         D3D11_TEXTURE2D_DESC sd = {};
         sd.Width = c->w; sd.Height = c->h; sd.MipLevels = 1; sd.ArraySize = 1;
@@ -179,7 +180,7 @@ static bool AcquireDda(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG&
     res->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&tex);
     res->Release();
     if (!tex) return false;
-    const int idx = (int)((c->fence_value + 1) & 1);
+    const int idx = (int)((c->fence_value + 1) % Capture::kRing);
     if (!c->is_float)
     {
         D3D11_BOX box = { (UINT)(c->win_rect.left - c->out_rect.left), (UINT)(c->win_rect.top - c->out_rect.top), 0,
@@ -310,7 +311,7 @@ bool CaptureAcquire(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG& sy
             Log("[cap] frame format %u (%s), surface %ux%u", (unsigned)fd.Format,
                 fd.Format == DXGI_FORMAT_B8G8R8A8_UNORM ? "BGRA8" : c->is_float ? "FP16" : "other", fd.Width, fd.Height);
         }
-        const int idx = (int)((c->fence_value + 1) & 1);
+        const int idx = (int)((c->fence_value + 1) % Capture::kRing);
         // A format other than the shared texture's cannot be copied (D3D11 refuses); the fence is
         // still signalled so the caller sees the frame and refuses on CaptureIsFloat.
         if (fd.Format == DXGI_FORMAT_B8G8R8A8_UNORM)

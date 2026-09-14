@@ -15,7 +15,7 @@
 int  RunBench(int argc, char** argv);                                             // bench.cpp
 bool SavePngRgba(const wchar_t* path, const uint8_t* rgba, UINT w, UINT h);       // bench.cpp
 
-const char* const kPipeStageName[PS_COUNT] = { "swizzle", "gray+downscale", "ofa", "expand", "eval", "compose" };
+const char* const kPipeStageName[PS_COUNT] = { "swizzle", "gray+downscale", "ofa", "expand", "eval", "compose", "ofa2" };
 
 double StageStats::pct(double p) const
 {
@@ -162,11 +162,12 @@ static bool AllocModel(Pipeline* p)
         p->nr_in_m = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, NPSR, L"nr_in_m");
         p->nr_out_m = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, UAV, L"nr_out_m");
         p->mv_m = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R16G16_FLOAT, FUAV, NPSR, L"mv_m");
+        p->mv_res = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R16G16_FLOAT, FUAV, NPSR, L"mv_res");
         for (auto& r : p->residual) r = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R16G16B16A16_FLOAT, FUAV, NPSR, L"residual");
     }
-    return p->model_src && p->nr_in_m && p->nr_out_m && p->mv_m && p->residual[0] && p->residual[1];
+    return p->model_src && p->nr_in_m && p->nr_out_m && p->mv_m && p->mv_res && p->residual[0] && p->residual[1];
 }
-static void ReleaseModelWork(Pipeline* p) { REL(p->nr_in_m); REL(p->nr_out_m); REL(p->mv_m); REL(p->residual[0]); REL(p->residual[1]); }
+static void ReleaseModelWork(Pipeline* p) { REL(p->nr_in_m); REL(p->nr_out_m); REL(p->mv_m); REL(p->mv_res); REL(p->residual[0]); REL(p->residual[1]); }
 
 static void SetModelParams(Pipeline* p, const Config& c)
 {
@@ -261,7 +262,7 @@ static void ModelThread(Pipeline* p, bool create, NrConfig nc)
         std::lock_guard<std::mutex> lk(p->pub_mu);
         p->model_ms.add(ms);
         // publish only past the warm-up (the evaluates still run to build the temporal history)
-        if (evals > (UINT)std::max(0, mp.warmup)) { p->pub_idx = j; p->pub_fence = fb; p->pub_frame = fr.index; j ^= 1; }
+        if (evals > (UINT)std::max(0, mp.warmup)) { p->pub_idx = j; p->pub_fence = fb; p->pub_frame = fr.index; p->pub_held = fr.held; j ^= 1; }
     }
 }
 
@@ -270,7 +271,7 @@ static bool StartModel(Pipeline* p)
     if (!p->model_ctx.queue && !GpuCtxInit(*p->g, p->model_ctx, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, L"model")) return false;
     if (!AllocModel(p)) return false;
     p->model_stop = false; p->model_frame_ready = false; p->model_failed = false; p->model_wants_frame = true; p->model_reset_pending = true;
-    p->pub_idx = -1; p->cmp_idx = -1; p->cmp_fence = 0;
+    p->pub_idx = -1; p->cmp_idx = -1; p->cmp_fence = 0; p->cmp_held = -1;
     SetModelParams(p, p->cfg);
     const bool create = p->create_pending; p->create_pending = false;
     p->model_thread = std::thread(ModelThread, p, create, ConfigToNr(p->cfg));
@@ -406,6 +407,15 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     }
     if (p->fg) FgSetTiming(p->fg, c.fg_phase_ms, c.fg_anchor_delay_slots);   // ponytail: two atomic stores per frame, no reload plumbing
     auto stamp = [&](int i) { if (c.gpu_timestamps) GpuStamp(g, cl, i); };
+    // async: the residual composed this frame = the newest published one (the queue waits for it once
+    // per publish, before list 2). Picked before list 1 so the hand-off below can avoid its held slot.
+    UINT residual_frame = 0; bool wait_pub = false;
+    if (async)
+    {
+        int idx, held; UINT64 pf;
+        { std::lock_guard<std::mutex> lk(p->pub_mu); idx = p->pub_idx; pf = p->pub_fence; residual_frame = p->pub_frame; held = p->pub_held; }
+        if (idx >= 0 && (idx != p->cmp_idx || pf != p->cmp_fence)) { wait_pub = true; p->cmp_idx = idx; p->cmp_fence = pf; p->cmp_held = held; }
+    }
 
     // ---- list 1: swizzle, gray, downscale, gray -> OFA input --------------------------------------
     if (wait_fence) g.queue->Wait(wait_fence, wait_value);
@@ -448,7 +458,9 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (async && p->model_wants_frame.load())
     {
         handoff = true; p->model_wants_frame = false;
-        mf.held = p->model_frame.held == 2 ? 3 : 2; mf.index = p->frame_index; mf.reset = p->model_reset_pending; p->model_reset_pending = false;
+        // held slot 2..4: not the last hand-off's (the model's next flow reference), not cmp_held (ours)
+        mf.held = 2; while (mf.held == p->model_frame.held || mf.held == p->cmp_held) ++mf.held;
+        mf.index = p->frame_index; mf.reset = p->model_reset_pending; p->model_reset_pending = false;
         ID3D12Resource* hin = OfaInput(p->ofa, mf.held);
         GpuBarrier(cl, hin, COMMON, CDST); cl->CopyResource(hin, p->gray); GpuBarrier(cl, hin, CDST, COMMON);
         GpuBarrier(cl, p->color4k, NPSR, CSRC); cl->CopyResource(p->model_src, p->color4k); GpuBarrier(cl, p->color4k, CSRC, NPSR);
@@ -468,24 +480,25 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     PipelineReadStamps(p);
 
     // ---- optical flow (pair 0, per frame; the model track runs its own on pair 1) -----------------
+    // async + a residual to compose: a second flow, this frame -> the residual's model frame (its gray
+    // is still held in slot cmp_held), pair 2 -> mv_res: the warp then spans the residual's age.
+    const bool warp_res = async && p->cmp_idx >= 0 && !p->bypass;
     double ofa_t0 = 0;
     if (p->measure_ofa) { GpuWait(g, g.fence, f1, 5000); ofa_t0 = NowMs(); }
     tw = NowMs();
     const UINT64 ov = OfaExecuteRef(p->ofa, g.fence, f1, p->ofa_cur, 1 - p->ofa_cur, 0, reset);   // OfaFenceValue is shared with the model thread: use the returned value
+    const UINT64 ov2 = warp_res && ov ? OfaExecuteRef(p->ofa, g.fence, f1, p->ofa_cur, p->cmp_held, 2, reset) : 0;
     p->cpu_wait[1].add(NowMs() - tw);
-    if (!ov) { Log("[ofa] execute failed"); return false; }
+    if (!ov || (warp_res && !ov2)) { Log("[ofa] execute failed"); return false; }
     p->ofa_cur ^= 1;
-    if (p->measure_ofa) { GpuWait(g, OfaFence(p->ofa), ov, 5000); p->st[PS_OFA].add(NowMs() - ofa_t0); }
-    g.queue->Wait(OfaFence(p->ofa), ov);
-
-    // async: pick up the newest published residual; the queue waits for it once per publish
-    UINT residual_frame = 0;
-    if (async)
+    if (p->measure_ofa)
     {
-        int idx; UINT64 pf;
-        { std::lock_guard<std::mutex> lk(p->pub_mu); idx = p->pub_idx; pf = p->pub_fence; residual_frame = p->pub_frame; }
-        if (idx >= 0 && (idx != p->cmp_idx || pf != p->cmp_fence)) { g.queue->Wait(p->model_ctx.fence, pf); p->cmp_idx = idx; p->cmp_fence = pf; }
+        GpuWait(g, OfaFence(p->ofa), ov, 5000); p->st[PS_OFA].add(NowMs() - ofa_t0);
+        if (ov2) { ofa_t0 = NowMs(); GpuWait(g, OfaFence(p->ofa), ov2, 5000); p->st[PS_OFA2].add(NowMs() - ofa_t0); }
     }
+    g.queue->Wait(OfaFence(p->ofa), ov);
+    if (ov2) g.queue->Wait(OfaFence(p->ofa), ov2);   // also orders the next list 1's hand-off copies after this read of the held slot
+    if (wait_pub) g.queue->Wait(p->model_ctx.fence, p->cmp_fence);
 
     // ---- list 2: expand, (create | evaluate), compose, hand-off to the presenter -------------------
     if (p->ov && !p->fg) OverlayGuard(p->ov, g.queue);   // the present queue may still be copying out4k
@@ -503,6 +516,15 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     GpuBarrier(cl, p->mv, UAV, NPSR);
     GpuBarrier(cl, flow, NPSR, D3D12_RESOURCE_STATE_COMMON);
     if (cost) GpuBarrier(cl, cost, NPSR, D3D12_RESOURCE_STATE_COMMON);
+    if (warp_res)
+    {
+        ID3D12Resource* flow3 = OfaFlow3(p->ofa); ID3D12Resource* cost3 = c.cost_reject ? OfaCost3(p->ofa) : nullptr;
+        GpuBarrier(cl, flow3, COMMON, NPSR); if (cost3) GpuBarrier(cl, cost3, COMMON, NPSR);
+        GpuBarrier(cl, p->mv_res, NPSR, UAV);
+        CsExpand(g, p->sh, cl, flow3, cost3, OfaFlowWidth(p->ofa), OfaFlowHeight(p->ofa), p->gw, p->gh, p->mv_res, p->ww, p->wh, c.zero_below, c.cost_reject, reset);
+        GpuBarrier(cl, p->mv_res, UAV, NPSR);
+        GpuBarrier(cl, flow3, NPSR, COMMON); if (cost3) GpuBarrier(cl, cost3, NPSR, COMMON);
+    }
 
     if (!async && p->nr && !NrReady(p->nr) && p->create_pending)
     {
@@ -540,11 +562,10 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     GpuBarrier(cl, p->out4k, CSRC, UAV);
     if (async)
     {
-        // The residual is from model frame M; mv is only this frame's motion (current -> previous).
-        // v1 limitation: the ideal warp is the motion accumulated since M; we use this frame's mv
-        // scaled by [nr] warp, which is exact for a 1-frame-old residual and approximate beyond.
+        // The residual is from model frame M; mv_res is this frame's motion current -> M (the flow
+        // against M's held gray), scaled by [nr] warp. mv (current -> previous) stays with FG.
         stamp(6);
-        CsComposeResidual(g, p->sh, cl, p->color4k, p->residual[std::max(p->cmp_idx, 0)], p->ww, p->wh, p->mv, p->out4k, p->w, p->h, cp);
+        CsComposeResidual(g, p->sh, cl, p->color4k, p->residual[std::max(p->cmp_idx, 0)], p->ww, p->wh, p->mv_res, p->out4k, p->w, p->h, cp);
         stamp(7);
         if (!native) { evaluated = true; p->residual_age.add((double)(p->frame_index - residual_frame)); }
     }
@@ -853,6 +874,9 @@ static int RealMain(int argc, char** argv)
         UINT frames = 0, skips = 0, rate_drops = 0; int follow_tick = 0; double last_processed_ms = 0;
         double win_t0 = NowMs();
         std::vector<double> cpu_ms;
+        // wall time inside CaptureAcquire (DDA wait + D3D11 copy/Flush), accumulated over the attempts
+        // (timeouts, rate drops) that precede each processed frame; one sample per processed frame
+        StageStats acq_ms, hud_acq; double acq_acc = 0;
         // FG / model counters are handed over on read: the HUD tick (250 ms) and the [stats] line share one drain
         FgStatsOut fs_agg; UINT model_evals_acc = 0;
         double hud_t = NowMs(); UINT hud_frames = 0, hud_presented = 0, hud_model = 0;
@@ -892,7 +916,10 @@ static int RealMain(int argc, char** argv)
                 continue;
             }
             UINT64 fv = 0; LONGLONG sysrel = 0;
-            if (!CaptureAcquire(cap, 50, fv, sysrel))
+            const double acq_t0 = NowMs();
+            const bool acquired = CaptureAcquire(cap, 50, fv, sysrel);
+            acq_acc += NowMs() - acq_t0;
+            if (!acquired)
             {
                 ++skips;
                 if ((++follow_tick % 10) == 0) OverlayFollow(p->ov, cfg.reassert_topmost_every);
@@ -921,6 +948,7 @@ static int RealMain(int argc, char** argv)
             // 100 ns units (integer split keeps it exact: t * qpf overflows int64).
             p->cap_qpc = dda ? sysrel : sysrel / 10000000 * qpf.QuadPart + (sysrel % 10000000) * qpf.QuadPart / 10000000;
             p->acq_qpc = acq.QuadPart;
+            acq_ms.add(acq_acc); hud_acq.add(acq_acc); acq_acc = 0;
             if (!PipelineFrame(p, CaptureTexture(cap), CaptureFence(cap), fv, reset)) { Log("[main] frame failed - exiting"); GpuLogDeviceRemoved(g, "frame"); quit = true; rc = 3; break; }
             reset = false;
             OverlayFollow(p->ov, cfg.reassert_topmost_every);
@@ -933,7 +961,8 @@ static int RealMain(int argc, char** argv)
                 const double dt = NowMs() - hud_t, cap_fps = hud_frames * 1000.0 / dt, out_fps = p->fg ? hud_presented * 1000.0 / dt : cap_fps;
                 const double age = p->fg ? StageStats{ fs_agg.age_ms }.med() : p->age_ms.med();
                 char capstr[12]; if (cfg.max_fps > 0) sprintf_s(capstr, "%d", cfg.max_fps); else strcpy_s(capstr, "none");
-                sprintf_s(p->hud_line[0], "in %.0f  out %.0f  age %.0f ms  cap %s", cap_fps, out_fps, std::max(0.0, age), capstr);
+                sprintf_s(p->hud_line[0], "in %.0f  out %.0f  age %.0f ms  acq %.1f ms  cap %s", cap_fps, out_fps, std::max(0.0, age), std::max(0.0, hud_acq.med()), capstr);
+                hud_acq.v.clear();
                 char nr[48];
                 if (p->bypass || !p->nr) strcpy_s(nr, "NR off");
                 else if (cfg.nr_async)
@@ -952,7 +981,7 @@ static int RealMain(int argc, char** argv)
             {
                 StageStats cpu{ cpu_ms }, spacing, age = p->age_ms, pipe = p->pipe_ms;
                 double gpu = 0;
-                for (int s = 0; s < PS_COUNT; ++s) if (s != PS_OFA && p->st[s].med() > 0) gpu += p->st[s].med();
+                for (int s = 0; s < PS_COUNT; ++s) if (s != PS_OFA && s != PS_OFA2 && p->st[s].med() > 0) gpu += p->st[s].med();
                 drain();
                 FgStatsOut fs; std::swap(fs, fs_agg);
                 if (p->fg) { spacing.v.swap(fs.spacing_ms); age.v.swap(fs.age_ms); pipe.v.swap(fs.pipe_ms); }
@@ -960,8 +989,8 @@ static int RealMain(int argc, char** argv)
                 const UINT model_evals = model_evals_acc; model_evals_acc = 0;
                 const double span = NowMs() - win_t0, cap_fps = frames * 1000.0 / span, fg_fps = fs.presented * 1000.0 / span;
                 char mask[16]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "none");
-                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f static_skips=%u rate_drops=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u model_fps=%.1f model_ms=%.2f residual_age_frames=%.1f mask=%s",
-                    cap_fps, p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), skips, rate_drops, age.med(), pipe.med(),
+                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f acq_ms=%.2f static_skips=%u rate_drops=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u model_fps=%.1f model_ms=%.2f residual_age_frames=%.1f mask=%s",
+                    cap_fps, p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), acq_ms.med(), skips, rate_drops, age.med(), pipe.med(),
                     fg_fps, spacing.med(), spacing.p95(), fs.drops,
                     model_evals * 1000.0 / span, mm.med(), p->residual_age.med(), mask);
                 swprintf_s(status, L"%ls  cap %.0f  out %.0f fps  age %.0f ms", profile_name().c_str(), cap_fps, p->fg ? fg_fps : cap_fps, std::max(0.0, age.med()));
@@ -972,7 +1001,7 @@ static int RealMain(int argc, char** argv)
                     p->cpu_wait[0].med(), p->cpu_wait[1].med(), p->cpu_wait[2].med(), p->cpu_wait[3].med());
                 for (auto& s : p->cpu_wait) s.v.clear();
                 p->age_ms.v.clear(); p->pipe_ms.v.clear();
-                frames = 0; skips = 0; rate_drops = 0; win_t0 = NowMs(); cpu_ms.clear();
+                frames = 0; skips = 0; rate_drops = 0; win_t0 = NowMs(); cpu_ms.clear(); acq_ms.v.clear();
                 for (auto& s : p->st) s.v.clear();
             }
         }
