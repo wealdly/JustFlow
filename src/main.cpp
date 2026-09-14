@@ -361,7 +361,8 @@ bool PipelineResize(Pipeline* p, UINT w, UINT h)
 void PipelineReload(Pipeline* p, const Config& c)
 {
     const bool rebuild = ConfigNeedsRebuild(p->cfg, c);
-    if (c.fg_multiplier != p->cfg.fg_multiplier || c.fg_pacing_vblank != p->cfg.fg_pacing_vblank || c.fg_mv_dilated != p->cfg.fg_mv_dilated) DropFg(p);   // recreated next frame
+    // recreated next frame (a multiplier change is caught there: the presenter is rebuilt only when it differs)
+    if (c.fg_pacing_vblank != p->cfg.fg_pacing_vblank || (c.fg_enabled && c.fg_mv_dilated != p->cfg.fg_mv_dilated)) DropFg(p);
     if (c.overlay_direct != p->cfg.overlay_direct) Log("[overlay] mode=%s takes effect on the next capture open / restart (window recreate)", c.overlay_direct ? "direct" : "composed");
     if (c.nr_async != p->cfg.nr_async) { StopModel(p); p->model_failed = false; p->force_reset = true; Log("[nr] mode=%s", c.nr_async ? "async" : "sync"); }
     p->cfg = c;
@@ -401,14 +402,26 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     }
     const bool async = c.nr_async && p->nr && !p->model_failed;
     if (async && !p->model_thread.joinable() && !StartModel(p)) return false;
-    // FG lifecycle follows cfg.fg_enabled (ini, F8). A presenter failure turns the flag off; F8 retries.
-    if (p->fg && (!c.fg_enabled || FgFailed(p->fg))) { if (FgFailed(p->fg)) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: presenter failed"); } DropFg(p); }
-    if (p->ov && c.fg_enabled && !p->fg)
+    // The presenter is always on while an overlay exists: passthrough (multiplier 1) with FG off,
+    // generation with cfg.fg_enabled (ini, F8). A generation failure turns the flag off (F8 retries)
+    // and the presenter is rebuilt as passthrough; a passthrough failure is a lost device: frame fails.
+    if (p->ov)
     {
-        p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, c.fg_multiplier, c.fg_pacing_vblank, c.fg_mv_dilated);
-        if (!p->fg) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); }
+        const int want = c.fg_enabled ? c.fg_multiplier : 1;
+        if (p->fg && FgFailed(p->fg))
+        {
+            if (FgMultiplier(p->fg) == 1) { Log("[fg] passthrough presenter failed"); return false; }
+            p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: presenter failed");
+        }
+        if (p->fg && (FgFailed(p->fg) || FgMultiplier(p->fg) != want)) DropFg(p);
+        if (!p->fg)
+        {
+            p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, want, c.fg_pacing_vblank, c.fg_mv_dilated);
+            if (!p->fg && want > 1) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, 1, c.fg_pacing_vblank, c.fg_mv_dilated); }
+            if (!p->fg) { Log("[fg] passthrough presenter create failed"); return false; }
+        }
+        FgSetTiming(p->fg, c.fg_phase_ms, c.fg_anchor_delay_slots);   // ponytail: two atomic stores per frame, no reload plumbing
     }
-    if (p->fg) FgSetTiming(p->fg, c.fg_phase_ms, c.fg_anchor_delay_slots);   // ponytail: two atomic stores per frame, no reload plumbing
     auto stamp = [&](int i) { if (c.gpu_timestamps) GpuStamp(g, cl, i); };
     // async: the residual composed this frame = the newest published one (the queue waits for it once
     // per publish, before list 2). Picked before list 1 so the hand-off below can avoid its held slot.
@@ -510,7 +523,6 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (wait_pub) g.queue->Wait(p->model_ctx.fence, p->cmp_fence);
 
     // ---- list 2: expand, (create | evaluate), compose, hand-off to the presenter -------------------
-    if (p->ov && !p->fg) OverlayGuard(p->ov, g.queue);   // the present queue may still be copying out4k
     tw = NowMs();
     if (!GpuBegin(g)) return false;
     p->cpu_wait[2].add(NowMs() - tw);
@@ -621,21 +633,14 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     }
     GpuBarrier(cl, shown, UAV, CSRC);
     p->shown = shown;
-    bool fg_recorded = false;
-    if (p->fg) fg_recorded = FgRecord(p->fg, cl, shown, p->mv);   // the presenter thread presents
+    // the presenter thread presents (passthrough or generation); --no-present has no Fg
+    const bool fg_recorded = p->fg && FgRecord(p->fg, cl, shown, p->mv);
     const UINT64 f2 = GpuEnd(g);
     if (!f2) return false;
     if (async && p->cmp_idx >= 0) p->residual_read_fence[p->cmp_idx] = f2;   // the model thread waits for it before rewriting that residual
     PipelineReadStamps(p);
     tw = NowMs();
-    if (p->fg) { if (fg_recorded) FgSubmit(p->fg, f2, reset, p->cap_qpc, p->acq_qpc); }
-    else if (p->ov)
-    {
-        // the present queue copies out4k once list 2 completes (fence f2) - no CPU wait here
-        if (!OverlayPresent(p->ov, shown, g.fence, f2)) { GpuLogDeviceRemoved(g, "present"); return false; }
-        LONGLONG pq = 0, sq = 0; OverlayTimes(p->ov, pq, sq);
-        if (p->cap_qpc) { p->age_ms.add(QpcToMs(pq - p->cap_qpc)); p->pipe_ms.add(QpcToMs(pq - p->acq_qpc)); }
-    }
+    if (fg_recorded) FgSubmit(p->fg, f2, reset, p->cap_qpc, p->acq_qpc);
     p->cpu_wait[3].add(NowMs() - tw);
     if (evaluated && !async) NrRetireTick(p->nr);   // async: the model thread ticks
     p->last_evaluated = evaluated;   // async: composed with a residual
@@ -982,8 +987,8 @@ static int RealMain(int argc, char** argv)
             if (p->hud && NowMs() - hud_t >= 250.0)   // status HUD: two lines from the live counters
             {
                 drain();
-                const double dt = NowMs() - hud_t, cap_fps = hud_frames * 1000.0 / dt, out_fps = p->fg ? hud_presented * 1000.0 / dt : cap_fps;
-                const double age = p->fg ? StageStats{ fs_agg.age_ms }.med() : p->age_ms.med();
+                const double dt = NowMs() - hud_t, cap_fps = hud_frames * 1000.0 / dt, out_fps = hud_presented * 1000.0 / dt;
+                const double age = StageStats{ fs_agg.age_ms }.med();
                 char capstr[12]; if (cfg.max_fps > 0) sprintf_s(capstr, "%d", cfg.max_fps); else strcpy_s(capstr, "none");
                 sprintf_s(p->hud_line[0], "in %.0f  out %.0f  age %.0f ms  acq %.1f ms  cap %s", cap_fps, out_fps, std::max(0.0, age), std::max(0.0, hud_acq.med()), capstr);
                 hud_acq.v.clear();
@@ -997,34 +1002,34 @@ static int RealMain(int argc, char** argv)
                 }
                 else sprintf_s(nr, "NR %.1f ms %up", std::max(0.0, p->st[PS_EVAL].med()), p->wh);
                 char mask[8]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "-");
-                if (p->fg) sprintf_s(p->hud_line[1], "%s  FG %dX  mask %s", nr, p->cfg.fg_multiplier, mask);
+                if (p->fg && FgMultiplier(p->fg) > 1) sprintf_s(p->hud_line[1], "%s  FG %dX %.1fms  mask %s", nr, FgMultiplier(p->fg), std::max(0.0, FgEvalMs(p->fg, nullptr)), mask);
                 else sprintf_s(p->hud_line[1], "%s  FG off  mask %s", nr, mask);
                 hud_t = NowMs(); hud_frames = 0; hud_presented = 0; hud_model = 0;
             }
             if (++frames % (UINT)std::max(1, cfg.stats_every) == 0)
             {
-                StageStats cpu{ cpu_ms }, spacing, age = p->age_ms, pipe = p->pipe_ms;
+                StageStats cpu{ cpu_ms }, spacing, age, pipe;
                 double gpu = 0;
                 for (int s = 0; s < PS_COUNT; ++s) if (s != PS_OFA && s != PS_OFA2 && p->st[s].med() > 0) gpu += p->st[s].med();
                 drain();
                 FgStatsOut fs; std::swap(fs, fs_agg);
-                if (p->fg) { spacing.v.swap(fs.spacing_ms); age.v.swap(fs.age_ms); pipe.v.swap(fs.pipe_ms); }
+                spacing.v.swap(fs.spacing_ms); age.v.swap(fs.age_ms); pipe.v.swap(fs.pipe_ms);
+                double fg_eval_p95 = -1; const double fg_eval = p->fg ? FgEvalMs(p->fg, &fg_eval_p95) : -1;
                 StageStats mm; { std::lock_guard<std::mutex> lk(p->pub_mu); mm.v.swap(p->model_ms.v); }
                 const UINT model_evals = model_evals_acc; model_evals_acc = 0;
                 const double span = NowMs() - win_t0, cap_fps = frames * 1000.0 / span, fg_fps = fs.presented * 1000.0 / span;
                 char mask[16]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "none");
-                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f acq_ms=%.2f dda_accum=%.2f static_skips=%u rate_drops=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u model_fps=%.1f model_ms=%.2f residual_age_frames=%.1f mask=%s",
+                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f acq_ms=%.2f dda_accum=%.2f static_skips=%u rate_drops=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u fg_eval_ms=%.2f/%.2f(med/p95) model_fps=%.1f model_ms=%.2f residual_age_frames=%.1f mask=%s",
                     cap_fps, p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), acq_ms.med(), CaptureAccumMean(cap), skips, rate_drops, age.med(), pipe.med(),
-                    fg_fps, spacing.med(), spacing.p95(), fs.drops,
+                    fg_fps, spacing.med(), spacing.p95(), fs.drops, fg_eval, fg_eval_p95,
                     model_evals * 1000.0 / span, mm.med(), p->residual_age.med(), mask);
-                swprintf_s(status, L"%ls  cap %.0f  out %.0f fps  age %.0f ms", profile_name().c_str(), cap_fps, p->fg ? fg_fps : cap_fps, std::max(0.0, age.med()));
+                swprintf_s(status, L"%ls  cap %.0f  out %.0f fps  age %.0f ms", profile_name().c_str(), cap_fps, fg_fps, std::max(0.0, age.med()));
                 tray_state();
                 p->residual_age.v.clear();
                 Log("[stats] gpu: swz=%.2f gray+ds=%.2f expand=%.2f eval=%.2f compose=%.2f | cpu waits: begin1=%.1f ofa=%.1f begin2=%.1f present=%.1f",
                     p->st[PS_SWIZZLE].med(), p->st[PS_GRAYDS].med(), p->st[PS_EXPAND].med(), p->st[PS_EVAL].med(), p->st[PS_COMPOSE].med(),
                     p->cpu_wait[0].med(), p->cpu_wait[1].med(), p->cpu_wait[2].med(), p->cpu_wait[3].med());
                 for (auto& s : p->cpu_wait) s.v.clear();
-                p->age_ms.v.clear(); p->pipe_ms.v.clear();
                 frames = 0; skips = 0; rate_drops = 0; win_t0 = NowMs(); cpu_ms.clear(); acq_ms.v.clear();
                 for (auto& s : p->st) s.v.clear();
             }

@@ -52,7 +52,7 @@ struct Fg
     Gpu*     g = nullptr;
     Overlay* ov = nullptr;
     UINT     w = 0, h = 0, mw = 0, mh = 0;
-    int      count = 1;                      // generated frames per real frame
+    int      count = 1;                      // generated frames per real frame (0 = passthrough)
     bool     vblank = true, mv_dilated = true;
     std::atomic<double> phase{ 0.0 }; std::atomic<int> anchor_delay{ 0 };   // FgSetTiming (main) -> Presenter
     std::wstring dir;
@@ -72,6 +72,7 @@ struct Fg
     std::atomic<bool> stop{ false }, failed{ false };
     std::atomic<UINT> presented{ 0 }, drops{ 0 };
     std::vector<double> spacing, age, pipe;   // guarded by mu; handed over by FgStats
+    double eval_ring[256] = {}; unsigned eval_n = 0;   // guarded by mu; generation GPU ms per real frame (FgEvalMs)
     double last_present = 0;
     GpuCtx ctx;   // the FG queue: DLSS-G evaluates never sit behind NR / compose on Gpu::queue
 };
@@ -98,10 +99,12 @@ static NVSDK_NGX_Result SafeEvaluate(Fg* f, ID3D12GraphicsCommandList* cl, NVSDK
 
 // ---- presenter thread ---------------------------------------------------------------------------
 // Copy src (a texture of slot s) into the overlay backbuffer (present queue, after the slot's
-// evaluate on the FG queue) and present. `real`: this is the slot's real frame (latency stats).
+// evaluate on the FG queue; passthrough: after its render fence) and present. `real`: this is the
+// slot's real frame (latency stats).
 static bool Present(Fg* f, ID3D12Resource* src, const FgSlot* s, bool real)
 {
-    if (!OverlayPresent(f->ov, src, f->ctx.fence, s->eval_fence)) return Fail(f, "Present failed");
+    const bool ok = f->count ? OverlayPresent(f->ov, src, f->ctx.fence, s->eval_fence) : OverlayPresent(f->ov, src, f->g->fence, s->fence);
+    if (!ok) return Fail(f, "Present failed");
     const FgSlot* real_of = real ? s : nullptr;
     LONGLONG pq = 0, sq = 0; OverlayTimes(f->ov, pq, sq);
     const double t = QpcToMs(pq);
@@ -159,7 +162,9 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate, bool& allow)
         opt.multiFrameIndex = (unsigned)i + 1;
         ep.pOutputInterpFrame = s->gen[i];
         GpuBarrier(cl, s->gen[i], CSRC, UAV);
+        GpuCtxStamp(f->ctx, 2 * i);
         { std::lock_guard<std::mutex> lk(NgxMutex()); r = SafeEvaluate(f, cl, &ep, &opt, &code); }
+        GpuCtxStamp(f->ctx, 2 * i + 1);
         GpuBarrier(cl, f->disable, UAV, CSRC);
         cl->CopyBufferRegion(f->disable_rb, (UINT64)i * 4, f->disable, 0, 4);
         GpuBarrier(cl, f->disable, CSRC, UAV);
@@ -169,6 +174,7 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate, bool& allow)
     GpuBarrier(cl, s->real, NPSR, CSRC);
     GpuBarrier(cl, s->mv, NPSR, CDST);
     f->ctx.queue->Wait(g.fence, s->fence);   // GPU-side: the slot's real + mv copies (list 2) are complete on the main queue
+    const int slot = f->ctx.slot;
     const UINT64 v = GpuCtxEnd(f->ctx);
     if (!v) return Fail(f, "FG queue submit");
     s->eval_fence = v;
@@ -177,6 +183,14 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate, bool& allow)
     if (!GpuCtxWait(f->ctx, f->ctx.fence, v, 10000)) return Fail(f, "evaluate fence wait (device removed?)");
     if (code) { Log("[fg] evaluate raised 0x%08X", code); return Fail(f, "evaluate raised an exception"); }
     if (NVSDK_NGX_FAILED(r)) { Log("[fg] evaluate -> 0x%08X (%s)", r, NgxResultName(r)); return Fail(f, "evaluate failed"); }
+    // generation cost of this real frame = the sum of its evaluates (the fence just completed, so the slot is readable)
+    double ms[kMaxGen] = {};
+    if (GpuCtxStampsMsSlot(f->ctx, slot, ms, f->count))
+    {
+        double sum = 0; bool valid = true;
+        for (int i = 0; i < f->count; ++i) { if (ms[i] < 0) valid = false; sum += ms[i]; }
+        if (valid) { std::lock_guard<std::mutex> lk(f->mu); f->eval_ring[f->eval_n++ % 256] = sum; }
+    }
     allow = true;
     uint8_t* d = nullptr; D3D12_RANGE rr = { 0, (SIZE_T)f->count * 4 };
     if (SUCCEEDED(f->disable_rb->Map(0, &rr, (void**)&d)))
@@ -259,6 +273,31 @@ static void Presenter(Fg* f)
     }
 }
 
+// Passthrough (count == 0): the newest ready slot goes out as soon as its render fence completes,
+// on the next vblank (vblank pacing) or right away (timer). Older ready slots are dropped, never
+// shown stale, and the main thread is never throttled by a display slower than the capture.
+static void Passthrough(Fg* f)
+{
+    bool vb = f->vblank;
+    while (!f->stop && !f->failed)
+    {
+        FgSlot* s = nullptr;
+        {
+            std::unique_lock<std::mutex> lk(f->mu);
+            f->cv.wait(lk, [&] { for (auto& x : f->slots) if (x.state == 2) return true; return f->stop.load(); });
+            if (f->stop) break;
+            for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq > s->seq)) s = &x;
+            for (auto& x : f->slots) if (x.state == 2 && &x != s) { x.state = 0; ++f->drops; }
+            s->state = 3;
+        }
+        bool ok = GpuCtxWait(f->ctx, f->g->fence, s->fence, 10000) || Fail(f, "render fence wait (device removed?)");
+        if (ok && vb && !OverlayWaitVBlank(f->ov)) vb = false;   // no output: immediate from here on
+        if (ok) Present(f, s->real, s, true);
+        { std::lock_guard<std::mutex> lk(f->mu); s->state = 0; }
+        f->cv.notify_all();   // FgRecord may be waiting for a free slot
+    }
+}
+
 // ---- lifecycle ---------------------------------------------------------------------------------------
 #define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
 
@@ -285,11 +324,20 @@ Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UI
 {
     Fg* f = new Fg;
     f->g = &g; f->ov = ov; f->dir = dir; f->w = out_w; f->h = out_h; f->mw = mv_w; f->mh = mv_h;
-    f->count = std::clamp(multiplier, 2, 4) - 1;
+    f->count = std::clamp(multiplier, 1, 4) - 1;
     f->vblank = vblank_pacing; f->mv_dilated = mv_dilated;
     auto fail = [&](const char* why) { Fail(f, why); FgDestroy(f); return (Fg*)nullptr; };
 
+    // ponytail: passthrough keeps the ctx too (its event is what the presenter waits on) - one code path.
     if (!GpuCtxInit(g, f->ctx, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, L"fg")) return fail("FG queue");
+    if (!f->count)
+    {
+        for (auto& s : f->slots)
+            if (!(s.real = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, CSRC, L"fg_real"))) return fail("slot textures");
+        f->thread = std::thread(Passthrough, f);
+        Log("[fg] passthrough presenter %ux%u pacing=%s", out_w, out_h, vblank_pacing ? "vblank" : "timer");
+        return f;
+    }
 
     // NGX core: Init is harmless if ngx_nr already did it; the parameter block comes from the core.
     f->path_list[0] = f->dir.c_str();
@@ -357,6 +405,17 @@ void FgDestroy(Fg* f)
 }
 
 bool FgFailed(const Fg* f) { return f->failed; }
+int  FgMultiplier(const Fg* f) { return f->count + 1; }
+double FgEvalMs(Fg* f, double* p95)
+{
+    std::vector<double> v;
+    { std::lock_guard<std::mutex> lk(f->mu); v.assign(f->eval_ring, f->eval_ring + std::min(f->eval_n, 256u)); }
+    if (p95) *p95 = -1;
+    if (v.empty()) return -1;
+    std::sort(v.begin(), v.end());
+    if (p95) *p95 = v[std::min(v.size() - 1, (size_t)(v.size() * 0.95))];
+    return v[v.size() / 2];
+}
 void FgSetTiming(Fg* f, double phase_ms, int anchor_delay_slots)
 {
     f->phase.store(std::clamp(phase_ms, -50.0, 50.0), std::memory_order_relaxed);
@@ -402,6 +461,7 @@ bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* composed, ID
     GpuBarrier(cl, s->real, CSRC, CDST);
     cl->CopyResource(s->real, composed);
     GpuBarrier(cl, s->real, CDST, CSRC);
+    if (!f->count) return true;   // passthrough: no mv
     GpuBarrier(cl, mv, NPSR, CSRC);
     cl->CopyResource(s->mv, mv);
     GpuBarrier(cl, mv, CSRC, NPSR);

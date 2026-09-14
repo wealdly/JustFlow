@@ -6,7 +6,16 @@
 // queue waits GPU-side on the slot's render fence, the present queue on the evaluate fence),
 // then presents generated frames + the real frame through the overlay's present queue, paced
 // on the monitor's vblank (or a CPU timer). Any failure sets FgFailed; the caller destroys the
-// Fg and presentation returns to the main thread.
+// Fg and recreates it (a generation failure drops to passthrough).
+//
+// The presenter is ALWAYS on (a DXGI Present of a composed layered 4K window costs ~10 ms of CPU;
+// on the main thread that capped capture at ~70 fps). multiplier 1 = passthrough: no NGX, no
+// evaluates, no gen/mv textures; the presenter CPU-waits each slot's render fence and presents the
+// real frame on the next vblank (pacing=vblank) or immediately (timer). It always takes the NEWEST
+// ready slot: older ready ones are dropped (counted in FgStatsOut::drops) - a display slower than
+// the capture never throttles the main thread, and the frames it skips would not have reached the
+// screen anyway. The slot ring, FgRecord's bounded wait and the latency stats are shared with
+// generation mode.
 //
 // Pacing (vblank mode): output slot L = real interval / multiplier. Frame k of a slot is due at
 // anchor + k*L, anchor = max(now, previous real frame's target + L) - a continuous cadence when
@@ -37,9 +46,11 @@ struct Fg;
 
 // vblank_pacing: false = CPU timer schedule (the original path, for comparison).
 // mv_dilated: value of NVSDK_NGX_DLSSG_Opt_Eval_Params::motionVectorsDilated (see Evaluate).
-Fg*  FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier /* 2..4 */,
+Fg*  FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier /* 1 = passthrough, 2..4 */,
               bool vblank_pacing, bool mv_dilated);
 void FgDestroy(Fg* f);   // stops the presenter (drains the GPU), releases the feature and textures
+int  FgMultiplier(const Fg* f);   // as created (1 = passthrough)
+// mv may be nullptr in passthrough (never read).
 bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* composed_rgba8, ID3D12Resource* mv);
 void FgSubmit(Fg* f, UINT64 render_fence_value, bool reset, LONGLONG cap_qpc, LONGLONG acq_qpc);
 // Live pacing knobs (no rebuild): phase_ms shifts every scheduled present target (negative = earlier);
@@ -56,3 +67,6 @@ struct FgStatsOut
 };
 // Everything since the last call (the vectors are handed over, not copied).
 void FgStats(Fg* f, FgStatsOut& out);
+// GPU ms of DLSS-G generation per real frame (the slot's multiplier-1 evaluates, FG queue timestamps),
+// median of the last 256; *p95 optional. -1 while nothing has been measured (passthrough, warm-up).
+double FgEvalMs(Fg* f, double* p95);

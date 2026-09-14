@@ -39,7 +39,7 @@ struct Pipeline
     Nr*      nr = nullptr;
     Ofa*     ofa = nullptr;
     Overlay* ov = nullptr;
-    Fg*      fg = nullptr;        // frame generation presenter; exists while cfg.fg_enabled and it works
+    Fg*      fg = nullptr;        // the presenter thread: always exists with an overlay (passthrough, or generation while cfg.fg_enabled works)
     ID3D12Resource *color4k = nullptr, *gray = nullptr, *out4k = nullptr;   // rest: NPSR, UAV, COPY_SOURCE
     ID3D12Resource *sharp4k = nullptr;                                     // out4k sharpened ([nr] sharpen > 0), rest COPY_SOURCE
     ID3D12Resource *shown = nullptr;                                       // the texture handed onward last frame (out4k or sharp4k)
@@ -60,8 +60,7 @@ struct Pipeline
     LONGLONG cap_qpc = 0, acq_qpc = 0;
     // stats (GPU timestamps by stage), cleared by the reader
     StageStats st[PS_COUNT];
-    StageStats cpu_wait[4];   // 0 GpuBegin(list1) 1 OfaExecute 2 GpuBegin(list2) 3 Present
-    StageStats age_ms, pipe_ms;   // non-FG presents: present - cap_qpc, present - acq_qpc (FG: FgStats)
+    StageStats cpu_wait[4];   // 0 GpuBegin(list1) 1 OfaExecute 2 GpuBegin(list2) 3 FgSubmit (age/pipe latency: FgStats)
     UINT64     last_stamp_fence = 0;
     UINT64     last_stamp_fence_slot[3] = {};
     int        ofa_cur = 0;       // per-frame OFA input ping-pong (slots 0/1); 2..4 are the model track's held grays

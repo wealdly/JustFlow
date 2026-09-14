@@ -16,6 +16,20 @@ set(CPPWINRT_INC "${WINSDK_ROOT}/Include/${WINSDK_VER}/cppwinrt")
 # ---- shaders: fxc -> gen/<name>.h with g_cs_<name> byte array ----------------------------------
 set(SHADERS swizzle gray downscale expand compose residual compose_residual text sharpen artcnn)
 set(SHADER_HEADERS)
+# ponytail: artcnn is a ~250 KB generated blob. Embedding it made the unsigned exe look like a
+# packer to Smart App Control (it blocked the binary outright), so it ships as a .cso data file.
+set(SHADER_BLOBS artcnn)
+list(REMOVE_ITEM SHADERS ${SHADER_BLOBS})
+foreach(s ${SHADER_BLOBS})
+    set(src ${CMAKE_SOURCE_DIR}/shaders/${s}.hlsl)
+    set(out ${CMAKE_BINARY_DIR}/${s}.cso)
+    add_custom_command(
+        OUTPUT ${out}
+        COMMAND "${FXC}" /nologo /T cs_5_0 /E CSMain /O3 /Fo ${out} ${src}
+        DEPENDS ${src}
+        COMMENT "fxc ${s}.hlsl -> ${s}.cso")
+    list(APPEND SHADER_HEADERS ${out})
+endforeach()
 foreach(s ${SHADERS})
     set(src ${CMAKE_SOURCE_DIR}/shaders/${s}.hlsl)
     set(out ${CMAKE_BINARY_DIR}/gen/cs_${s}.h)

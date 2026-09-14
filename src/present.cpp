@@ -256,7 +256,7 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
         const LONG ex = GetWindowLongW(o->hwnd, GWL_EXSTYLE);
         SetWindowLongW(o->hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED | WS_EX_TRANSPARENT);
         if (!SetLayeredWindowAttributes(o->hwnd, 0, 255, LWA_ALPHA)) Log("[present] SetLayeredWindowAttributes failed, err=%lu", GetLastError());
-        SetWindowPos(o->hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        SetWindowPos(o->hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);   // never activate: the game drops to its background fps cap when it loses focus
     }
     if (target) OverlayFollow(o, 0);
     const char* mode = o->direct ? (o->layered ? "direct_layered" : "direct") : "composed";
