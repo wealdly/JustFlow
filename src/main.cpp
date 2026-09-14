@@ -335,7 +335,7 @@ int main(int argc, char** argv)
             if (OverlayHotkey(p->ov, 2)) { p->wipe = (p->wipe + 1) % 3; p->wipe_t0 = NowMs(); Log("[main] wipe %d", p->wipe); }
             if (OverlayHotkey(p->ov, 3))
             {
-                Config nc; ConfigLoad((dir + L"\\nrfilter.ini").c_str(), nc);
+                Config nc; ConfigLoad(ini_path.c_str(), nc);
                 ResolveWork(nc, dir);
                 PipelineReload(p, nc); cfg = nc;
                 Log("[main] config reloaded");
