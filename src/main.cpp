@@ -290,16 +290,19 @@ int main(int argc, char** argv)
 {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     int dump = 0;
+    std::wstring ini_name = L"nrfilter.ini";   // --ini <file>: a per-game profile next to the exe
     for (int i = 1; i < argc; ++i)
     {
         if (!strcmp(argv[i], "--bench")) return RunBench(argc, argv);
         if (!strcmp(argv[i], "--dump") && i + 1 < argc) dump = atoi(argv[++i]);
+        if (!strcmp(argv[i], "--ini") && i + 1 < argc) { const char* a = argv[++i]; ini_name.assign(a, a + strlen(a)); }
     }
     const std::wstring dir = ExeDir();
     Config cfg;
-    const bool have_ini = ConfigLoad((dir + L"\\nrfilter.ini").c_str(), cfg);
+    const std::wstring ini_path = ini_name.find(L'\\') != std::wstring::npos ? ini_name : dir + L"\\" + ini_name;
+    const bool have_ini = ConfigLoad(ini_path.c_str(), cfg);
     LogInit(JoinPath(dir, cfg.log_file).c_str());
-    if (!have_ini) Log("[main] nrfilter.ini not found next to the exe - defaults in use");
+    if (!have_ini) Log("[main] %ls not found - defaults in use", ini_path.c_str());
     Gpu g;
     if (!GpuInit(g, -1)) return 1;
     ResolveWork(cfg, dir);

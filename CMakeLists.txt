@@ -59,6 +59,6 @@ set_target_properties(nrfilter PROPERTIES WIN32_EXECUTABLE OFF)   # console: log
 
 add_custom_command(TARGET nrfilter POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:nvngx_dll_nrfilter> $<TARGET_FILE_DIR:nrfilter>
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/nrfilter.ini $<TARGET_FILE_DIR:nrfilter>
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/nrfilter.ini ${CMAKE_SOURCE_DIR}/nrfilter.dawnwalker.ini $<TARGET_FILE_DIR:nrfilter>
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll $<TARGET_FILE_DIR:nrfilter>)
 endif()
