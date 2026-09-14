@@ -676,7 +676,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         FILE* f = nullptr;
         freopen_s(&f, "CONOUT$", "w", stdout); freopen_s(&f, "CONOUT$", "w", stderr);
     }
-    return RealMain(__argc, __argv);
+    // __argv is NULL under a wide entry point (the UCRT only builds __wargv): make a narrow copy.
+    int argc = 0; wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    std::vector<std::string> args; std::vector<char*> argv;
+    for (int i = 0; i < argc; ++i) { std::string a; for (const wchar_t* w = wargv[i]; *w; ++w) a.push_back((char)*w); args.push_back(a); }   // ponytail: ASCII args only
+    for (auto& a : args) argv.push_back(&a[0]);
+    argv.push_back(nullptr);
+    if (wargv) LocalFree(wargv);
+    return RealMain(argc, argv.data());
 }
 
 static int RealMain(int argc, char** argv)
