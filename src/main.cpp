@@ -389,8 +389,15 @@ int main(int argc, char** argv)
             const double t0 = NowMs();
             // max_fps: a GPU-bound game (Dawnwalker with 3X FG presents ~135 fps) would otherwise get a
             // full pipeline pass per presented frame and lose the GPU time. Drop frames above the cap.
-            if (cfg.max_fps > 0 && t0 - last_processed_ms < 1000.0 / cfg.max_fps) { ++rate_drops; continue; }
-            last_processed_ms = t0;
+            // Tolerant limiter: a frame that arrives a little early on capture jitter is still taken, and the
+            // schedule advances by whole periods so 90 fps in stays 90 fps through (a strict "< period"
+            // test rejected every early frame and turned a 90 fps capture into ~60).
+            if (cfg.max_fps > 0)
+            {
+                const double period = 1000.0 / cfg.max_fps;
+                if (t0 - last_processed_ms < period * 0.6) { ++rate_drops; continue; }
+                last_processed_ms = (t0 - last_processed_ms < period * 1.5) ? last_processed_ms + period : t0;
+            }
             // > 250 ms gap (DDA: raw QPC ticks; WGC: 100 ns) -> scene reset
             const bool dda = CaptureIsDda(cap);
             if (last_sysrel && sysrel - last_sysrel > (dda ? qpf.QuadPart / 4 : 2500000)) reset = true;
