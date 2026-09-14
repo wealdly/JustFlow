@@ -1,4 +1,4 @@
-// nvngx.dll_nrfilter.dll - the caller-gate forwarder.
+// nvngx.dll_justflow.dll - the caller-gate forwarder.
 //
 // nvngx_dlssnr.dll identifies its caller by the return address and refuses the call with
 // FAIL_PlatformError (0xBAD00002) unless the path of the CALLING module contains the substring

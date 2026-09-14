@@ -82,7 +82,7 @@ static std::vector<std::wstring> ListPngs(const std::wstring& path)
 
 int RunBench(int argc, char** argv)
 {
-    std::wstring input, ini = L"nrfilter.ini"; int frames = 120; UINT work_w = 0, work_h = 0; bool present = true;
+    std::wstring input, ini; int frames = 120; UINT work_w = 0, work_h = 0; bool present = true;
     for (int i = 1; i < argc; ++i)
     {
         if (!strcmp(argv[i], "--bench") && i + 1 < argc) { const char* s = argv[++i]; input.assign(s, s + strlen(s)); }
@@ -92,8 +92,11 @@ int RunBench(int argc, char** argv)
         else if (!strcmp(argv[i], "--ini") && i + 1 < argc) { const char* s = argv[++i]; ini.assign(s, s + strlen(s)); }   // profile next to the exe, or a path
     }
     const std::wstring dir = ExeDir();
-    Config cfg; ConfigLoad((ini.find(L'\\') != std::wstring::npos ? ini : dir + L"\\" + ini).c_str(), cfg);
+    std::vector<std::wstring> names; int idx;
+    const std::wstring ini_path = PickProfile(dir, ini, names, idx);   // no --ini: the same auto-pick as live mode
+    Config cfg; const bool have_ini = ConfigLoad(ini_path.c_str(), cfg);
     LogInit((dir + L"\\bench.log").c_str());
+    Log("[bench] profile %ls%s", ini_path.c_str(), have_ini ? "" : " (not found - defaults)");
     if (work_w && work_h) { cfg.work_w = work_w; cfg.work_h = work_h; }
 
     const std::vector<std::wstring> files = ListPngs(input);
@@ -113,6 +116,7 @@ int RunBench(int argc, char** argv)
 
     Gpu g;
     if (!GpuInit(g, -1)) return 1;
+    if (cfg.selftest) ComposeSelfTest(g);
     ResolveWork(cfg, dir);
     Pipeline* p = PipelineCreate(g, cfg, w, h, present, nullptr);
     if (!p) { GpuShutdown(g); return 1; }
@@ -129,7 +133,8 @@ int RunBench(int argc, char** argv)
 
     int evaluated = 0, rc = 0;
     const double t0 = NowMs();
-    for (int i = 0; evaluated < frames && i < frames + 64; ++i)
+    const int slack = cfg.nr_async ? 256 : 64;   // async: feature create + warm-up happen on the model thread while frames keep flowing
+    for (int i = 0; evaluated < frames && i < frames + slack; ++i)
     {
         if (!PipelineFrame(p, tex[i % tex.size()], nullptr, 0, i == 0)) { Log("[bench] frame %d failed", i); GpuLogDeviceRemoved(g, "bench"); rc = 2; break; }
         // ponytail: idle after each frame so both lists of the frame retire and get sampled (the
@@ -158,6 +163,14 @@ int RunBench(int argc, char** argv)
         if (csv) fprintf(csv, "%s,%.3f,%.3f,%zu\n", kPipeStageName[s], st.med(), st.p95(), st.v.size());
     }
     printf("%d frames in %.1f ms (%.1f fps)\n", evaluated, wall, evaluated * 1000.0 / wall);
+    if (cfg.nr_async)
+    {
+        StageStats mm; { std::lock_guard<std::mutex> lk(p->pub_mu); mm.v.swap(p->model_ms.v); }
+        const UINT me = p->model_evals.exchange(0);
+        printf("model (async): %u evals in %.1f ms (%.1f fps), eval %.3f/%.3f ms (med/p95), residual_age_frames %.1f/%.1f (med/p95, %zu samples)\n",
+               me, wall, me * 1000.0 / wall, mm.med(), mm.p95(), p->residual_age.med(), p->residual_age.p95(), p->residual_age.v.size());
+        if (csv) fprintf(csv, "model_evals,%u,model_ms,%.3f,model_p95_ms,%.3f,residual_age_frames,%.1f\n", me, mm.med(), mm.p95(), p->residual_age.med());
+    }
     fflush(stdout);   // the NGX runtime's teardown can end the process before the CRT flushes
     if (csv) { fprintf(csv, "frames,%d,wall_ms,%.1f\n", evaluated, wall); fclose(csv); Log("[bench] wrote bench.csv"); }
 

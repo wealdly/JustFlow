@@ -136,28 +136,31 @@ void GpuLogDeviceRemoved(Gpu& g, const char* where)
     dred->Release();
 }
 
-bool GpuWait(Gpu& g, ID3D12Fence* f, UINT64 v, DWORD ms)
+static bool WaitFence(ID3D12Fence* f, UINT64 v, HANDLE ev, DWORD ms, bool& failed)
 {
     if (v == 0) return true;
     UINT64 done = f->GetCompletedValue();
-    if (done == UINT64_MAX) { g.failed = true; return false; }
+    if (done == UINT64_MAX) { failed = true; return false; }
     if (done >= v) return true;
     // One auto-reset event serves every wait; a stale registration can wake us early, so re-check
     // the value on every wake and keep waiting until the deadline (NeuralScreen issue #33 lesson).
-    ResetEvent(g.fence_event);
+    ResetEvent(ev);
     if (f->GetCompletedValue() >= v) return true;
-    if (FAILED(f->SetEventOnCompletion(v, g.fence_event))) return false;
+    if (FAILED(f->SetEventOnCompletion(v, ev))) return false;
     const ULONGLONG deadline = GetTickCount64() + ms;
     for (;;)
     {
         const ULONGLONG now = GetTickCount64();
         const DWORD left = now >= deadline ? 0 : (DWORD)(deadline - now);
-        if (WaitForSingleObject(g.fence_event, left) != WAIT_OBJECT_0) return false;
+        if (WaitForSingleObject(ev, left) != WAIT_OBJECT_0) return false;
         done = f->GetCompletedValue();
-        if (done == UINT64_MAX) { g.failed = true; return false; }
+        if (done == UINT64_MAX) { failed = true; return false; }
         if (done >= v) return true;
     }
 }
+
+bool GpuWait(Gpu& g, ID3D12Fence* f, UINT64 v, DWORD ms) { return WaitFence(f, v, g.fence_event, ms, g.failed); }
+bool GpuCtxWait(GpuCtx& c, ID3D12Fence* f, UINT64 v, DWORD ms) { return WaitFence(f, v, c.event, ms, c.failed); }
 
 bool GpuBegin(Gpu& g)
 {
@@ -186,6 +189,81 @@ UINT64 GpuEnd(Gpu& g)
     if (FAILED(g.queue->Signal(g.fence, v))) { Log("[gpu] Signal failed"); g.failed = true; return 0; }
     g.alloc_fence[g.slot] = v;
     g.slot = (g.slot + 1) % Gpu::kFrames;
+    return v;
+}
+
+// ---------------------------------------------------------------------------------------------
+bool GpuCtxInit(Gpu& g, GpuCtx& c, D3D12_COMMAND_QUEUE_PRIORITY priority, const wchar_t* name)
+{
+    int reg = -1;
+    for (int i = 0; i < Gpu::kCtx; ++i) if (!g.ctx[i]) { reg = i; break; }
+    if (reg < 0) { Log("[gpu] ctx %ls: no free registry slot", name); return false; }
+    D3D12_COMMAND_QUEUE_DESC qd = {}; qd.Priority = priority;
+    if (FAILED(g.dev->CreateCommandQueue(&qd, __uuidof(ID3D12CommandQueue), (void**)&c.queue))) { Log("[gpu] ctx %ls: queue failed", name); return false; }
+    c.queue->SetName(name);
+    for (int i = 0; i < Gpu::kFrames; ++i)
+        g.dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, __uuidof(ID3D12CommandAllocator), (void**)&c.alloc[i]);
+    g.dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, c.alloc[0], nullptr, __uuidof(ID3D12GraphicsCommandList), (void**)&c.list);
+    if (!c.list) { Log("[gpu] ctx %ls: list failed", name); return false; }
+    c.list->Close();
+    g.dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), (void**)&c.fence);
+    c.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    hd.NumDescriptors = Gpu::kFrames * Gpu::kDescPerSlot;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(g.dev->CreateDescriptorHeap(&hd, __uuidof(ID3D12DescriptorHeap), (void**)&c.desc_heap))) { Log("[gpu] ctx %ls: desc heap failed", name); return false; }
+    D3D12_QUERY_HEAP_DESC qh = {};
+    qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    qh.Count = Gpu::kFrames * Gpu::kStamps;
+    g.dev->CreateQueryHeap(&qh, __uuidof(ID3D12QueryHeap), (void**)&c.ts_heap);
+    c.ts_readback = GpuMakeBuffer(g, (UINT64)Gpu::kFrames * Gpu::kStamps * 8, D3D12_HEAP_TYPE_READBACK,
+                                  D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE, L"ctx_ts_readback");
+    c.queue->GetTimestampFrequency(&c.ts_freq);
+    g.ctx[reg] = &c;
+    Log("[gpu] ctx %ls ready (priority %d)", name, (int)priority);
+    return true;
+}
+
+void GpuCtxShutdown(Gpu& g, GpuCtx& c)
+{
+    if (c.queue && c.fence) GpuCtxWaitIdle(c, 5000);
+    for (int i = 0; i < Gpu::kCtx; ++i) if (g.ctx[i] == &c) g.ctx[i] = nullptr;
+#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
+    REL(c.ts_readback); REL(c.ts_heap); REL(c.desc_heap); REL(c.list);
+    for (int i = 0; i < Gpu::kFrames; ++i) REL(c.alloc[i]);
+    REL(c.fence); REL(c.queue);
+#undef REL
+    if (c.event) { CloseHandle(c.event); c.event = nullptr; }
+}
+
+bool GpuCtxBegin(Gpu& g, GpuCtx& c)
+{
+    if (c.failed || !c.list) return false;
+    const UINT64 retire = c.alloc_fence[c.slot];
+    if (retire && !GpuCtxWait(c, c.fence, retire, 2000)) { Log("[gpu] ctx slot %d did not retire", c.slot); return false; }
+    if (FAILED(c.alloc[c.slot]->Reset())) { GpuLogDeviceRemoved(g, "ctx allocator reset"); c.failed = true; return false; }
+    if (FAILED(c.list->Reset(c.alloc[c.slot], nullptr))) { GpuLogDeviceRemoved(g, "ctx list reset"); c.failed = true; return false; }
+    c.desc_used = 0;
+    memset(c.ts_written[c.slot], 0, sizeof c.ts_written[c.slot]);
+    ID3D12DescriptorHeap* heaps[] = { c.desc_heap };
+    c.list->SetDescriptorHeaps(1, heaps);
+    return true;
+}
+
+UINT64 GpuCtxEnd(GpuCtx& c)
+{
+    if (c.ts_heap)
+        c.list->ResolveQueryData(c.ts_heap, D3D12_QUERY_TYPE_TIMESTAMP, c.slot * Gpu::kStamps, Gpu::kStamps,
+                                 c.ts_readback, (UINT64)c.slot * Gpu::kStamps * 8);
+    const HRESULT closed = c.list->Close();
+    if (FAILED(closed)) { Log("[gpu] ctx Close failed 0x%08X", closed); c.failed = true; return 0; }
+    ID3D12CommandList* lists[] = { c.list };
+    c.queue->ExecuteCommandLists(1, lists);
+    const UINT64 v = ++c.fence_value;
+    if (FAILED(c.queue->Signal(c.fence, v))) { Log("[gpu] ctx Signal failed"); c.failed = true; return 0; }
+    c.alloc_fence[c.slot] = v;
+    c.slot = (c.slot + 1) % Gpu::kFrames;
     return v;
 }
 
@@ -330,14 +408,14 @@ bool GpuMakeCompute(Gpu& g, const void* cso, size_t cso_len, UINT num_srv, UINT 
     return true;
 }
 
-void GpuDispatch(Gpu& g, ID3D12GraphicsCommandList* cl, const ComputePso& p, const GpuView* srvs, const GpuView* uavs,
-                 const void* consts, UINT gx, UINT gy, UINT gz)
+static void Dispatch(Gpu& g, ID3D12DescriptorHeap* heap, int slot, UINT& used, bool& failed, ID3D12GraphicsCommandList* cl,
+                     const ComputePso& p, const GpuView* srvs, const GpuView* uavs, const void* consts, UINT gx, UINT gy, UINT gz)
 {
     const UINT need = p.num_srv + p.num_uav;
-    if (g.desc_used + need > Gpu::kDescPerSlot) { Log("[gpu] descriptor ring exhausted"); g.failed = true; return; }
-    const UINT base = g.slot * Gpu::kDescPerSlot + g.desc_used;
-    D3D12_CPU_DESCRIPTOR_HANDLE cpu = g.desc_heap->GetCPUDescriptorHandleForHeapStart();
-    D3D12_GPU_DESCRIPTOR_HANDLE gpu = g.desc_heap->GetGPUDescriptorHandleForHeapStart();
+    if (used + need > Gpu::kDescPerSlot) { Log("[gpu] descriptor ring exhausted"); failed = true; return; }
+    const UINT base = slot * Gpu::kDescPerSlot + used;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = heap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu = heap->GetGPUDescriptorHandleForHeapStart();
     cpu.ptr += (SIZE_T)base * g.desc_size; gpu.ptr += (UINT64)base * g.desc_size;
     const D3D12_GPU_DESCRIPTOR_HANDLE srv_table = gpu;
     for (UINT i = 0; i < p.num_srv; ++i)
@@ -358,7 +436,7 @@ void GpuDispatch(Gpu& g, ID3D12GraphicsCommandList* cl, const ComputePso& p, con
         g.dev->CreateUnorderedAccessView(uavs[i].res, nullptr, &d, cpu);
         cpu.ptr += g.desc_size; gpu.ptr += g.desc_size;
     }
-    g.desc_used += need;
+    used += need;
     cl->SetComputeRootSignature(p.root);
     cl->SetPipelineState(p.pso);
     if (p.num_consts) cl->SetComputeRoot32BitConstants(0, p.num_consts, consts, 0);
@@ -368,7 +446,44 @@ void GpuDispatch(Gpu& g, ID3D12GraphicsCommandList* cl, const ComputePso& p, con
     cl->Dispatch(gx, gy, gz);
 }
 
+void GpuDispatch(Gpu& g, ID3D12GraphicsCommandList* cl, const ComputePso& p, const GpuView* srvs, const GpuView* uavs,
+                 const void* consts, UINT gx, UINT gy, UINT gz)
+{
+    for (GpuCtx* c : g.ctx)
+        if (c && c->list == cl) { Dispatch(g, c->desc_heap, c->slot, c->desc_used, c->failed, cl, p, srvs, uavs, consts, gx, gy, gz); return; }
+    Dispatch(g, g.desc_heap, g.slot, g.desc_used, g.failed, cl, p, srvs, uavs, consts, gx, gy, gz);
+}
+
 // ---------------------------------------------------------------------------------------------
+// Shared by Gpu and GpuCtx: ts_written is [kFrames][kStamps] flattened.
+static bool ReadStamps(ID3D12Resource* rb, const bool* written, UINT64 freq, int s, double* ms, int pairs)
+{
+    UINT64* data = nullptr;
+    D3D12_RANGE rr = { (SIZE_T)s * Gpu::kStamps * 8, (SIZE_T)(s + 1) * Gpu::kStamps * 8 };
+    if (FAILED(rb->Map(0, &rr, (void**)&data))) return false;
+    const UINT64* st = data + s * Gpu::kStamps;
+    const bool* wr = written + s * Gpu::kStamps;
+    for (int i = 0; i < pairs; ++i)
+    {
+        const int a = 2 * i, b = 2 * i + 1;
+        ms[i] = (b < Gpu::kStamps && wr[a] && wr[b] && st[b] >= st[a]) ? (double)(st[b] - st[a]) * 1000.0 / (double)freq : -1.0;
+    }
+    D3D12_RANGE none = { 0, 0 }; rb->Unmap(0, &none);
+    return true;
+}
+
+// most recently retired slot = the one before the current, if its fence completed; -1 if none
+static int RetiredSlot(int cur, const UINT64* alloc_fence, ID3D12Fence* fence)
+{
+    int s = (cur + Gpu::kFrames - 1) % Gpu::kFrames;
+    for (int tries = 0; tries < Gpu::kFrames; ++tries, s = (s + Gpu::kFrames - 1) % Gpu::kFrames)
+    {
+        const UINT64 v = alloc_fence[s];
+        if (v && fence->GetCompletedValue() >= v) return s;
+    }
+    return -1;
+}
+
 void GpuStamp(Gpu& g, ID3D12GraphicsCommandList* cl, int i)
 {
     if (!g.ts_heap || i < 0 || i >= Gpu::kStamps) return;
@@ -378,42 +493,33 @@ void GpuStamp(Gpu& g, ID3D12GraphicsCommandList* cl, int i)
 
 bool GpuStampsMs(Gpu& g, double* ms, int pairs)
 {
-    // most recently retired slot = the one before the current, if its fence completed
-    int s = (g.slot + Gpu::kFrames - 1) % Gpu::kFrames;
-    for (int tries = 0; tries < Gpu::kFrames; ++tries, s = (s + Gpu::kFrames - 1) % Gpu::kFrames)
-    {
-        const UINT64 v = g.alloc_fence[s];
-        if (v && g.fence->GetCompletedValue() >= v) break;
-        if (tries == Gpu::kFrames - 1) return false;
-    }
-    UINT64* data = nullptr;
-    D3D12_RANGE rr = { (SIZE_T)s * Gpu::kStamps * 8, (SIZE_T)(s + 1) * Gpu::kStamps * 8 };
-    if (FAILED(g.ts_readback->Map(0, &rr, (void**)&data))) return false;
-    const UINT64* st = data + s * Gpu::kStamps;
-    for (int i = 0; i < pairs; ++i)
-    {
-        const int a = 2 * i, b = 2 * i + 1;
-        ms[i] = (b < Gpu::kStamps && g.ts_written[s][a] && g.ts_written[s][b] && st[b] >= st[a])
-                    ? (double)(st[b] - st[a]) * 1000.0 / (double)g.ts_freq : -1.0;
-    }
-    D3D12_RANGE none = { 0, 0 }; g.ts_readback->Unmap(0, &none);
-    return true;
+    const int s = RetiredSlot(g.slot, g.alloc_fence, g.fence);
+    return s >= 0 && ReadStamps(g.ts_readback, &g.ts_written[0][0], g.ts_freq, s, ms, pairs);
 }
 
 bool GpuStampsMsSlot(Gpu& g, int s, double* ms, int pairs)
 {
     const UINT64 v = g.alloc_fence[s];
     if (!v || g.fence->GetCompletedValue() < v) return false;
-    UINT64* data = nullptr;
-    D3D12_RANGE rr = { (SIZE_T)s * Gpu::kStamps * 8, (SIZE_T)(s + 1) * Gpu::kStamps * 8 };
-    if (FAILED(g.ts_readback->Map(0, &rr, (void**)&data))) return false;
-    const UINT64* st = data + s * Gpu::kStamps;
-    for (int i = 0; i < pairs; ++i)
-    {
-        const int a = 2 * i, b = 2 * i + 1;
-        ms[i] = (b < Gpu::kStamps && g.ts_written[s][a] && g.ts_written[s][b] && st[b] >= st[a])
-                    ? (double)(st[b] - st[a]) * 1000.0 / (double)g.ts_freq : -1.0;
-    }
-    D3D12_RANGE none = { 0, 0 }; g.ts_readback->Unmap(0, &none);
-    return true;
+    return ReadStamps(g.ts_readback, &g.ts_written[0][0], g.ts_freq, s, ms, pairs);
+}
+
+void GpuCtxStamp(GpuCtx& c, int i)
+{
+    if (!c.ts_heap || i < 0 || i >= Gpu::kStamps) return;
+    c.list->EndQuery(c.ts_heap, D3D12_QUERY_TYPE_TIMESTAMP, c.slot * Gpu::kStamps + i);
+    c.ts_written[c.slot][i] = true;
+}
+
+bool GpuCtxStampsMs(GpuCtx& c, double* ms, int pairs)
+{
+    const int s = RetiredSlot(c.slot, c.alloc_fence, c.fence);
+    return s >= 0 && ReadStamps(c.ts_readback, &c.ts_written[0][0], c.ts_freq, s, ms, pairs);
+}
+
+bool GpuCtxStampsMsSlot(GpuCtx& c, int s, double* ms, int pairs)
+{
+    const UINT64 v = c.alloc_fence[s];
+    if (!v || c.fence->GetCompletedValue() < v) return false;
+    return ReadStamps(c.ts_readback, &c.ts_written[0][0], c.ts_freq, s, ms, pairs);
 }

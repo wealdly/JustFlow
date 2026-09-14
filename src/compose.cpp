@@ -6,10 +6,14 @@
 #include "cs_downscale.h"
 #include "cs_expand.h"
 #include "cs_compose.h"
+#include "cs_residual.h"
+#include "cs_compose_residual.h"
+#include <cstdlib>
+#include <vector>
 
 struct Shaders
 {
-    ComputePso swizzle, gray, downscale, expand, compose;
+    ComputePso swizzle, gray, downscale, expand, compose, residual, compose_residual;
     // UI rects for compose: 64x1 R32_SINT texture, refilled from a per-slot upload buffer inside
     // CsCompose (recorded into the caller's list; nothing blocks).
     ID3D12Resource* rect_tex = nullptr;
@@ -27,6 +31,8 @@ Shaders* ShadersCreate(Gpu& g)
     ok &= GpuMakeCompute(g, g_cs_downscale, sizeof g_cs_downscale, 1, 1, 4,  s->downscale, L"cs_downscale");
     ok &= GpuMakeCompute(g, g_cs_expand,    sizeof g_cs_expand,    2, 1, 11, s->expand,    L"cs_expand");
     ok &= GpuMakeCompute(g, g_cs_compose,   sizeof g_cs_compose,   4, 1, 9,  s->compose,   L"cs_compose");
+    ok &= GpuMakeCompute(g, g_cs_residual,  sizeof g_cs_residual,  2, 1, 2,  s->residual,  L"cs_residual");
+    ok &= GpuMakeCompute(g, g_cs_compose_residual, sizeof g_cs_compose_residual, 4, 1, 10, s->compose_residual, L"cs_compose_residual");
     s->rect_tex = GpuMakeTex(g, 64, 1, DXGI_FORMAT_R32_SINT, D3D12_RESOURCE_FLAG_NONE,
                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"ui_rects");
     ok &= s->rect_tex != nullptr;
@@ -43,7 +49,7 @@ Shaders* ShadersCreate(Gpu& g)
 void ShadersDestroy(Shaders* s)
 {
     if (!s) return;
-    ComputePso* p[] = { &s->swizzle, &s->gray, &s->downscale, &s->expand, &s->compose };
+    ComputePso* p[] = { &s->swizzle, &s->gray, &s->downscale, &s->expand, &s->compose, &s->residual, &s->compose_residual };
     for (ComputePso* x : p) { if (x->pso) x->pso->Release(); if (x->root) x->root->Release(); }
     if (s->rect_tex) s->rect_tex->Release();
     for (ID3D12Resource* r : s->rect_up) if (r) r->Release();
@@ -83,8 +89,9 @@ void CsExpand(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource*
     GpuDispatch(g, cl, s->expand, srv, &uav, &c, GpuGroups(mw, 8), GpuGroups(mh, 8));
 }
 
-void CsCompose(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* native, ID3D12Resource* nr_in, ID3D12Resource* nr_out,
-               UINT ww, UINT wh, ID3D12Resource* out, UINT w, UINT h, const ComposeParams& p)
+// Refill rect_tex from this slot's upload buffer (recorded into cl). Returns the clamped rect count.
+// Main-queue lists only (uses g.slot); both compose variants run there.
+static UINT UploadRects(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, const ComposeParams& p)
 {
     // ponytail: rects re-uploaded every frame (256 B copy, ~free); no change tracking.
     const int n = p.nrects < 0 ? 0 : p.nrects > 16 ? 16 : p.nrects;
@@ -105,11 +112,91 @@ void CsCompose(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource
     dst.pResource = s->rect_tex; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     GpuBarrier(cl, s->rect_tex, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    return (UINT)n;
+}
 
+void CsCompose(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* native, ID3D12Resource* nr_in, ID3D12Resource* nr_out,
+               UINT ww, UINT wh, ID3D12Resource* out, UINT w, UINT h, const ComposeParams& p)
+{
+    const UINT n = UploadRects(g, s, cl, p);
     struct { float strength; UINT wipe_mode; float wipe_x; int feather; UINT nrects, w, h, ww, wh; } c =
-        { p.residual_strength, (UINT)p.wipe_mode, p.wipe_x, p.feather, (UINT)n, w, h, ww, wh };
+        { p.residual_strength, (UINT)p.wipe_mode, p.wipe_x, p.feather, n, w, h, ww, wh };
     const GpuView srv[4] = { { native, DXGI_FORMAT_R8G8B8A8_UNORM }, { nr_in, DXGI_FORMAT_R8G8B8A8_UNORM },
                              { nr_out, DXGI_FORMAT_R8G8B8A8_UNORM }, { s->rect_tex, DXGI_FORMAT_R32_SINT } };
     const GpuView uav = { out, DXGI_FORMAT_R8G8B8A8_UNORM };
     GpuDispatch(g, cl, s->compose, srv, &uav, &c, GpuGroups(w, 8), GpuGroups(h, 8));
+}
+
+// ---------------------------------------------------------------------------------------------
+void CsResidual(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* nr_in, ID3D12Resource* nr_out, UINT ww, UINT wh,
+                ID3D12Resource* dst_residual)
+{
+    const UINT c[2] = { ww, wh };
+    const GpuView srv[2] = { { nr_in, DXGI_FORMAT_R8G8B8A8_UNORM }, { nr_out, DXGI_FORMAT_R8G8B8A8_UNORM } };
+    const GpuView uav = { dst_residual, DXGI_FORMAT_R16G16B16A16_FLOAT };
+    GpuDispatch(g, cl, s->residual, srv, &uav, c, GpuGroups(ww, 8), GpuGroups(wh, 8));
+}
+
+void CsComposeResidual(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* native, ID3D12Resource* residual, UINT ww, UINT wh,
+                       ID3D12Resource* mv, ID3D12Resource* out, UINT w, UINT h, const ComposeParams& p)
+{
+    const UINT n = UploadRects(g, s, cl, p);
+    struct { float strength; UINT wipe_mode; float wipe_x; int feather; UINT nrects, w, h, ww, wh; float warp; } c =
+        { p.residual_strength, (UINT)p.wipe_mode, p.wipe_x, p.feather, n, w, h, ww, wh, p.warp };
+    const GpuView srv[4] = { { native, DXGI_FORMAT_R8G8B8A8_UNORM }, { residual, DXGI_FORMAT_R16G16B16A16_FLOAT },
+                             { mv, DXGI_FORMAT_R16G16_FLOAT }, { s->rect_tex, DXGI_FORMAT_R32_SINT } };
+    const GpuView uav = { out, DXGI_FORMAT_R8G8B8A8_UNORM };
+    GpuDispatch(g, cl, s->compose_residual, srv, &uav, &c, GpuGroups(w, 8), GpuGroups(h, 8));
+}
+
+bool ComposeSelfTest(Gpu& g)
+{
+    const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    const D3D12_RESOURCE_FLAGS RW = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    const UINT w = 16, h = 16, ww = 8, wh = 8;
+    Shaders* s = ShadersCreate(g);
+    if (!s) return false;
+    ID3D12Resource* native = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, RW, NPSR, L"st_native");
+    ID3D12Resource* nr_in  = GpuMakeTex(g, ww, wh, DXGI_FORMAT_R8G8B8A8_UNORM, RW, NPSR, L"st_nr_in");
+    ID3D12Resource* nr_out = GpuMakeTex(g, ww, wh, DXGI_FORMAT_R8G8B8A8_UNORM, RW, NPSR, L"st_nr_out");
+    ID3D12Resource* mv     = GpuMakeTex(g, ww, wh, DXGI_FORMAT_R16G16_FLOAT, RW, NPSR, L"st_mv");
+    ID3D12Resource* resid  = GpuMakeTex(g, ww, wh, DXGI_FORMAT_R16G16B16A16_FLOAT, RW, UAV, L"st_residual");
+    ID3D12Resource* out    = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, RW, UAV, L"st_out");
+    bool ok = native && nr_in && nr_out && mv && resid && out;
+    // native: gradient (read by index in the shader, so exact); nr_in/nr_out: constants -> residual (+30, -20, 0)
+    std::vector<uint8_t> nat(w * h * 4), a(ww * wh * 4), b(ww * wh * 4), zero(ww * wh * 4, 0), got(w * h * 4);
+    for (UINT y = 0; y < h; ++y) for (UINT x = 0; x < w; ++x)
+    { uint8_t* p = &nat[(y * w + x) * 4]; p[0] = (uint8_t)(x * 16); p[1] = (uint8_t)(y * 16); p[2] = 128; p[3] = 255; }
+    for (UINT i = 0; i < ww * wh; ++i) { a[i * 4] = 50; a[i * 4 + 1] = 120; a[i * 4 + 2] = 200; a[i * 4 + 3] = 255;
+                                         b[i * 4] = 80; b[i * 4 + 1] = 100; b[i * 4 + 2] = 200; b[i * 4 + 3] = 255; }
+    ok = ok && GpuUploadTex(g, native, nat.data(), w, h, 4, NPSR) && GpuUploadTex(g, nr_in, a.data(), ww, wh, 4, NPSR) &&
+         GpuUploadTex(g, nr_out, b.data(), ww, wh, 4, NPSR) && GpuUploadTex(g, mv, zero.data(), ww, wh, 4, NPSR);
+    if (ok && GpuBegin(g))
+    {
+        ComposeParams cp;   // strength 1, no rects, no wipe, warp 1 (mv = 0)
+        CsResidual(g, s, g.list, nr_in, nr_out, ww, wh, resid);
+        GpuBarrier(g.list, resid, UAV, NPSR);
+        CsComposeResidual(g, s, g.list, native, resid, ww, wh, mv, out, w, h, cp);
+        const UINT64 v = GpuEnd(g);
+        ok = v && GpuWait(g, g.fence, v, 5000) && GpuReadbackTex(g, out, got.data(), w, h, 4, UAV);
+    }
+    else ok = false;
+    int bad = 0;
+    if (ok)
+        for (UINT i = 0; i < w * h; ++i)
+        {
+            const int d[3] = { 30, -20, 0 };
+            for (int ch = 0; ch < 3; ++ch)
+            {
+                int e = (int)nat[i * 4 + ch] + d[ch]; e = e < 0 ? 0 : e > 255 ? 255 : e;
+                if (abs(e - (int)got[i * 4 + ch]) > 1 && bad++ < 4)
+                    Log("[cs] selftest px %u ch %d: expected %d got %d", i, ch, e, (int)got[i * 4 + ch]);
+            }
+        }
+    ok = ok && bad == 0;
+    Log("[cs] compose self-test %s", ok ? "PASS" : "FAIL");
+    ID3D12Resource* rs[] = { native, nr_in, nr_out, mv, resid, out };
+    for (ID3D12Resource* r : rs) if (r) r->Release();
+    ShadersDestroy(s);
+    return ok;
 }

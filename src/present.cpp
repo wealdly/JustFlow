@@ -11,6 +11,7 @@
 #endif
 
 static const int kMaxHot = 16;
+static const UINT WM_SET_HOTKEYS = WM_APP + 1;   // wp = const HotkeyDef*, lp = count; returns the number of RegisterHotKey failures
 
 struct Overlay
 {
@@ -23,7 +24,10 @@ struct Overlay
     IDXGISwapChain3* swap = nullptr;
     ID3D12Resource*  bb[2] = {};
     UINT   w = 0, h = 0, flags = 0, present_flags = 0;
-    bool   revealed = false, shown = false, exclude = false;
+    bool   revealed = false, shown = false, exclude = false, direct = false;
+    bool   layered = true;              // WS_EX_LAYERED|WS_EX_TRANSPARENT added after the swapchain (composed, or direct after a FAILed self-test)
+    RECT   mon = {};                    // direct: the monitor rect the window covers
+    HWND   probe_hit = nullptr;         // cross-thread WindowFromPoint result of the self-test
     HotkeyDef keys[kMaxHot] = {};
     int    nkeys = 0;
     volatile LONG hot[kMaxHot] = {};
@@ -52,6 +56,19 @@ static void Drain(Overlay* o)
     if (o->pq && o->fence && SUCCEEDED(o->pq->Signal(o->fence, ++o->fence_value))) WaitPq(o, o->fence_value, 5000);
 }
 
+// window thread only (RegisterHotKey binds to the calling thread)
+static int RegisterKeys(Overlay* o)
+{
+    int failed = 0;
+    for (int i = 0; i < o->nkeys; ++i)
+    {
+        const HotkeyDef& k = o->keys[i];
+        if (!RegisterHotKey(o->hwnd, k.id, k.mods | MOD_NOREPEAT, k.vk)) { ++failed; Log("[present] RegisterHotKey id %d mods 0x%X vk 0x%X failed, err=%lu", k.id, k.mods, k.vk, GetLastError()); }
+    }
+    return failed;
+}
+static void UnregisterKeys(Overlay* o) { for (int i = 0; i < o->nkeys; ++i) UnregisterHotKey(o->hwnd, o->keys[i].id); }
+
 static LRESULT CALLBACK WndProc(HWND w, UINT m, WPARAM wp, LPARAM lp)
 {
     Overlay* o = (Overlay*)GetWindowLongPtrW(w, GWLP_USERDATA);
@@ -62,36 +79,104 @@ static LRESULT CALLBACK WndProc(HWND w, UINT m, WPARAM wp, LPARAM lp)
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
     case WM_ERASEBKGND:    return 1;
     case WM_HOTKEY:        if (o && wp < (WPARAM)kMaxHot) InterlockedExchange(&o->hot[wp], 1); return 0;
+    case WM_SET_HOTKEYS:
+        if (!o || o->hwnd != w) return 0;
+        UnregisterKeys(o);
+        o->nkeys = (int)lp < kMaxHot ? (int)lp : kMaxHot;
+        for (int i = 0; i < o->nkeys; ++i) o->keys[i] = ((const HotkeyDef*)wp)[i];
+        return RegisterKeys(o);
     case WM_CLOSE:         DestroyWindow(w); return 0;
     case WM_DESTROY:
-        if (o) for (int i = 0; i < o->nkeys; ++i) UnregisterHotKey(w, o->keys[i].id);
-        PostQuitMessage(0);
+        if (o && o->hwnd == w) UnregisterKeys(o);
+        if (!o || o->hwnd == w) PostQuitMessage(0);   // not for the direct-mode window torn down by the fallback
         return 0;
     default: break;
     }
     return DefWindowProcW(w, m, wp, lp);
 }
 
+// direct: monitor-sized (target's monitor, else the primary) with no redirection surface.
+static HWND MakeWindow(Overlay* o, HINSTANCE hi, bool direct)
+{
+    int x = 0, y = 0, w = (int)o->w, h = (int)o->h;
+    if (direct) { x = o->mon.left; y = o->mon.top; w = o->mon.right - o->mon.left; h = o->mon.bottom - o->mon.top; }
+    return CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | (direct ? WS_EX_NOREDIRECTIONBITMAP : 0),
+                           L"JustFlowPresent", L"JustFlowPresent", WS_POPUP, x, y, w, h, nullptr, nullptr, hi, o);
+}
+
+// Click-through self-test for a window without WS_EX_LAYERED: shown for the duration of one
+// WindowFromPoint at its centre (nothing is painted - no redirection surface, no swapchain yet).
+// The probe runs on ANOTHER thread while this one pumps: from the owner thread WindowFromPoint
+// honours our HTTRANSPARENT and always misses (measured), from a foreign thread it reports what
+// real mouse input sees (a non-layered HTTRANSPARENT window is hit and the click is dropped).
+static DWORD WINAPI ProbeThread(LPVOID p)
+{
+    Overlay* o = (Overlay*)p;
+    o->probe_hit = WindowFromPoint(POINT{ (o->mon.left + o->mon.right) / 2, (o->mon.top + o->mon.bottom) / 2 });
+    return 0;
+}
+static bool ClickThroughOk(Overlay* o)
+{
+    ShowWindow(o->hwnd, SW_SHOWNOACTIVATE);
+    const bool visible = IsWindowVisible(o->hwnd) != FALSE;   // a hidden window is never hit: no false PASS
+    o->probe_hit = o->hwnd;                                    // a probe that never answers counts as FAIL
+    HANDLE t = CreateThread(nullptr, 0, ProbeThread, o, 0, nullptr);
+    if (t)
+    {
+        while (MsgWaitForMultipleObjects(1, &t, FALSE, 3000, QS_ALLINPUT) == WAIT_OBJECT_0 + 1)   // dispatch the probe's WM_NCHITTEST
+        { MSG m; while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageW(&m); } }
+        CloseHandle(t);
+    }
+    ShowWindow(o->hwnd, SW_HIDE);
+    const bool ok = visible && o->probe_hit != o->hwnd;
+    Log("[present] direct-mode click-through self-test %s (cross-thread WindowFromPoint(centre) -> %p, overlay %p%s)", ok ? "PASS" : "FAIL", (void*)o->probe_hit, (void*)o->hwnd, visible ? "" : ", not visible");
+    return ok;
+}
+
 static DWORD WINAPI WindowThread(LPVOID p)
 {
     Overlay* o = (Overlay*)p;
     WNDCLASSEXW wc = {};
-    wc.cbSize = sizeof wc; wc.lpfnWndProc = WndProc; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"NrfPresent";
+    wc.cbSize = sizeof wc; wc.lpfnWndProc = WndProc; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"JustFlowPresent";
     RegisterClassExW(&wc);   // duplicate registration just fails
-    o->hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT, wc.lpszClassName, L"NrfPresent",
-                              WS_POPUP, 0, 0, (int)o->w, (int)o->h, nullptr, nullptr, wc.hInstance, o);
+    if (o->direct)
+    {
+        MONITORINFO mi = { sizeof mi };
+        const HMONITOR mon = o->target ? MonitorFromWindow(o->target, MONITOR_DEFAULTTONEAREST) : MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+        GetMonitorInfoW(mon, &mi); o->mon = mi.rcMonitor;
+        const UINT mw = (UINT)(mi.rcMonitor.right - mi.rcMonitor.left), mh = (UINT)(mi.rcMonitor.bottom - mi.rcMonitor.top);
+        if (mw != o->w || mh != o->h) { Log("[present] direct mode needs the capture to cover the monitor (%ux%u vs monitor %ux%u) - composed", o->w, o->h, mw, mh); o->direct = false; }
+    }
+    o->hwnd = MakeWindow(o, wc.hInstance, o->direct);
+    if (o->hwnd && o->direct)
+    {
+        // WDA_EXCLUDEFROMCAPTURE on a NOREDIRECTIONBITMAP window: verified here, not assumed. Refused
+        // while exclusion is required (DDA would capture the overlay) -> composed window instead.
+        if (o->exclude && !SetWindowDisplayAffinity(o->hwnd, WDA_EXCLUDEFROMCAPTURE))
+        {
+            Log("[present] WDA_EXCLUDEFROMCAPTURE refused on the direct-mode window, err=%lu - falling back to composed", GetLastError());
+            HWND dead = o->hwnd; o->hwnd = nullptr; DestroyWindow(dead);
+            o->direct = false;
+            o->hwnd = MakeWindow(o, wc.hInstance, false);
+        }
+        else if (o->exclude) Log("[present] WDA_EXCLUDEFROMCAPTURE accepted on the direct-mode window");
+    }
+    if (o->hwnd && o->direct)
+    {
+        // Self-test FAIL: keep the monitor-sized window without a redirection bitmap and add the
+        // layered style after the swapchain like composed does (direct_layered) - click-through is
+        // then guaranteed; whether DWM still grants independent flip is for PresentMon to say.
+        o->layered = !ClickThroughOk(o);
+        if (o->layered) Log("[present] direct mode continues as direct_layered (monitor-sized, no redirection bitmap, layered click-through)");
+    }
     if (!o->hwnd)
     {
         Log("[present] CreateWindowEx failed, err=%lu", GetLastError());
         InterlockedExchange(&o->state, -1); SetEvent(o->ready);
         return 0;
     }
-    if (o->exclude && !SetWindowDisplayAffinity(o->hwnd, WDA_EXCLUDEFROMCAPTURE)) Log("[present] SetWindowDisplayAffinity failed, err=%lu", GetLastError());
-    for (int i = 0; i < o->nkeys; ++i)
-    {
-        const HotkeyDef& k = o->keys[i];
-        if (!RegisterHotKey(o->hwnd, k.id, k.mods | MOD_NOREPEAT, k.vk)) Log("[present] RegisterHotKey id %d mods 0x%X vk 0x%X failed, err=%lu", k.id, k.mods, k.vk, GetLastError());
-    }
+    if (!o->direct && o->exclude && !SetWindowDisplayAffinity(o->hwnd, WDA_EXCLUDEFROMCAPTURE)) Log("[present] SetWindowDisplayAffinity failed, err=%lu", GetLastError());
+    RegisterKeys(o);
     // hidden until the first Present
     SetWindowPos(o->hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_HIDEWINDOW);
     InterlockedExchange(&o->state, 1); SetEvent(o->ready);
@@ -115,10 +200,12 @@ static void ReleaseBuffers(Overlay* o)
     for (int i = 0; i < 2; ++i) if (o->bb[i]) { o->bb[i]->Release(); o->bb[i] = nullptr; }
 }
 
-Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture)
+bool OverlayIsDirect(const Overlay* o) { return o->direct; }
+
+Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, bool direct)
 {
     Overlay* o = new Overlay();
-    o->g = &g; o->target = target; o->w = w; o->h = h; o->exclude = exclude_from_capture;
+    o->g = &g; o->target = target; o->w = w; o->h = h; o->exclude = exclude_from_capture; o->direct = direct;
     o->nkeys = nkeys < kMaxHot ? nkeys : kMaxHot;
     for (int i = 0; i < o->nkeys; ++i) o->keys[i] = keys[i];
     o->ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -163,14 +250,18 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
     if (FAILED(hr) || !o->swap) { Log("[present] IDXGISwapChain3 unavailable 0x%08X", hr); OverlayDestroy(o); return nullptr; }
     if (!GetBuffers(o)) { OverlayDestroy(o); return nullptr; }
 
-    // Layered + transparent AFTER the swapchain exists: flip model refuses a layered window at create.
-    const LONG ex = GetWindowLongW(o->hwnd, GWL_EXSTYLE);
-    SetWindowLongW(o->hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED | WS_EX_TRANSPARENT);
-    if (!SetLayeredWindowAttributes(o->hwnd, 0, 255, LWA_ALPHA)) Log("[present] SetLayeredWindowAttributes failed, err=%lu", GetLastError());
-    SetWindowPos(o->hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+    if (o->layered)
+    {
+        // Layered + transparent AFTER the swapchain exists: flip model refuses a layered window at create.
+        const LONG ex = GetWindowLongW(o->hwnd, GWL_EXSTYLE);
+        SetWindowLongW(o->hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED | WS_EX_TRANSPARENT);
+        if (!SetLayeredWindowAttributes(o->hwnd, 0, 255, LWA_ALPHA)) Log("[present] SetLayeredWindowAttributes failed, err=%lu", GetLastError());
+        SetWindowPos(o->hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+    }
     if (target) OverlayFollow(o, 0);
-    Log("[present] overlay %ux%u ready (flip-discard%s, layered click-through%s, own present queue)", w, h, tearing ? ", tearing" : "",
-        exclude_from_capture ? ", excluded from capture" : "");
+    const char* mode = o->direct ? (o->layered ? "direct_layered" : "direct") : "composed";
+    Log("[present] overlay %ux%u ready (flip-discard%s, %s%s, own present queue)", w, h, tearing ? ", tearing" : "", mode, exclude_from_capture ? ", excluded from capture" : "");
+    Log("[stats] present_mode=%s", mode);
     return o;
 }
 
@@ -282,6 +373,7 @@ void OverlayFollow(Overlay* o, int reassert_every)
     if (!o->shown && o->revealed) { ShowWindow(o->hwnd, SW_SHOWNOACTIVATE); o->shown = true; Log("[present] target restored - overlay shown"); }
     const bool moved = r.left != o->last.left || r.top != o->last.top || r.right != o->last.right || r.bottom != o->last.bottom;
     const bool reassert = reassert_every > 0 && (++o->follow_calls % reassert_every) == 0;
+    if (o->direct) { if (reassert) SetWindowPos(o->hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); return; }   // stays monitor-sized
     if (!moved && !reassert) return;
     o->last = r;
     // Follow the size only when the buffer matches it; otherwise keep the buffer size clamped
@@ -308,6 +400,8 @@ bool OverlayResize(Overlay* o, UINT w, UINT h)
     o->w = w; o->h = h; o->last = RECT{};
     if (!GetBuffers(o)) return false;
     Log("[present] overlay resized to %ux%u", w, h);
+    if (o->direct && ((int)w != o->mon.right - o->mon.left || (int)h != o->mon.bottom - o->mon.top))
+        Log("[present] direct mode: buffer no longer matches the monitor - DWM scales it, independent flip unlikely");
     return true;
 }
 
@@ -315,4 +409,10 @@ bool OverlayHotkey(Overlay* o, int id)
 {
     if (!o || id < 0 || id >= kMaxHot) return false;
     return InterlockedExchange(&o->hot[id], 0) != 0;
+}
+
+bool OverlaySetHotkeys(Overlay* o, const HotkeyDef* keys, int nkeys)
+{
+    if (!o || !o->hwnd) return false;
+    return SendMessageW(o->hwnd, WM_SET_HOTKEYS, (WPARAM)keys, (LPARAM)nkeys) == 0;   // the window thread is pumping: synchronous
 }

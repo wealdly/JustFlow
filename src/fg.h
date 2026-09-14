@@ -37,6 +37,9 @@ Fg*  FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, U
 void FgDestroy(Fg* f);   // stops the presenter (drains the GPU), releases the feature and textures
 bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* composed_rgba8, ID3D12Resource* mv);
 void FgSubmit(Fg* f, UINT64 render_fence_value, bool reset, LONGLONG cap_qpc, LONGLONG acq_qpc);
+// Live pacing knobs (no rebuild): phase_ms shifts every scheduled present target (negative = earlier);
+// anchor_delay_slots = 1 anchors the generated frames one slot later (a full slot after the model pass).
+void FgSetTiming(Fg* f, double phase_ms, int anchor_delay_slots);
 bool FgFailed(const Fg* f);
 
 struct FgStatsOut

@@ -1,4 +1,4 @@
-// nrfilter D3D12 primitives shared by every module: device + queue, a 3-deep allocator ring with
+// JustFlow D3D12 primitives shared by every module: device + queue, a 3-deep allocator ring with
 // one fence, texture creation, barriers, a shader-visible descriptor ring, compute PSO helpers and
 // GPU timestamps. Everything is plain C-style over raw COM pointers; no smart pointers on purpose.
 #pragma once
@@ -7,11 +7,14 @@
 #include <dxgi1_6.h>
 #include <cstdint>
 
+struct GpuCtx;
+
 struct Gpu
 {
     static const int kFrames = 3;
     static const int kStamps = 32;             // timestamp slots per frame (pairs: even=begin, odd=end)
     static const UINT kDescPerSlot = 1024;     // shader-visible CBV/SRV/UAV descriptors per ring slot
+    static const int kCtx = 4;                 // secondary contexts (GpuCtxInit registers here)
 
     IDXGIFactory4*             factory = nullptr;
     IDXGIAdapter3*             adapter = nullptr;
@@ -38,6 +41,30 @@ struct Gpu
     ID3D12Resource*            ts_readback = nullptr;   // kFrames * kStamps * 8 bytes
     UINT64                     ts_freq = 0;
     bool                       ts_written[kFrames][kStamps] = {};
+
+    GpuCtx*                    ctx[kCtx] = {};          // GpuDispatch / GpuStamp route by command list
+};
+
+// A secondary queue with its own allocator ring, fence + event (so another thread can wait without
+// sharing Gpu::fence_event), shader-visible descriptor heap and timestamp heap. Same slot/fence
+// discipline as Gpu; GpuDispatch(g, ctx.list, ...) lands in the ctx's descriptor region.
+struct GpuCtx
+{
+    ID3D12CommandQueue*        queue = nullptr;
+    ID3D12GraphicsCommandList* list = nullptr;
+    ID3D12CommandAllocator*    alloc[Gpu::kFrames] = {};
+    UINT64                     alloc_fence[Gpu::kFrames] = {};
+    int                        slot = 0;
+    ID3D12Fence*               fence = nullptr;
+    HANDLE                     event = nullptr;
+    UINT64                     fence_value = 0;
+    bool                       failed = false;
+    ID3D12DescriptorHeap*      desc_heap = nullptr;     // own heap, kFrames * kDescPerSlot
+    UINT                       desc_used = 0;
+    ID3D12QueryHeap*           ts_heap = nullptr;
+    ID3D12Resource*            ts_readback = nullptr;
+    UINT64                     ts_freq = 0;
+    bool                       ts_written[Gpu::kFrames][Gpu::kStamps] = {};
 };
 
 // ---- lifecycle -------------------------------------------------------------------------------
@@ -50,6 +77,16 @@ UINT64 GpuEnd(Gpu& g);
 bool   GpuWait(Gpu& g, ID3D12Fence* f, UINT64 v, DWORD ms);
 inline bool GpuWaitIdle(Gpu& g, DWORD ms = 5000) { return GpuWait(g, g.fence, g.fence_value, ms); }
 void   GpuLogDeviceRemoved(Gpu& g, const char* where);
+
+// ---- secondary context ------------------------------------------------------------------------
+// Direct-type queue (NGX evaluate wants a graphics list) at `priority`. Registers in g.ctx[].
+bool   GpuCtxInit(Gpu& g, GpuCtx& c, D3D12_COMMAND_QUEUE_PRIORITY priority, const wchar_t* name);
+void   GpuCtxShutdown(Gpu& g, GpuCtx& c);
+bool   GpuCtxBegin(Gpu& g, GpuCtx& c);
+UINT64 GpuCtxEnd(GpuCtx& c);            // returns the ctx fence value (0 on failure)
+// Wait on any fence using the ctx's own event (safe from the ctx's thread).
+bool   GpuCtxWait(GpuCtx& c, ID3D12Fence* f, UINT64 v, DWORD ms);
+inline bool GpuCtxWaitIdle(GpuCtx& c, DWORD ms = 5000) { return GpuCtxWait(c, c.fence, c.fence_value, ms); }
 
 // ---- resources -------------------------------------------------------------------------------
 ID3D12Resource* GpuMakeTex(Gpu& g, UINT w, UINT h, DXGI_FORMAT fmt, D3D12_RESOURCE_FLAGS flags,
@@ -80,6 +117,7 @@ struct GpuView { ID3D12Resource* res; DXGI_FORMAT fmt; };   // fmt = DXGI_FORMAT
 bool GpuMakeCompute(Gpu& g, const void* cso, size_t cso_len, UINT num_srv, UINT num_uav, UINT num_consts,
                     ComputePso& out, const wchar_t* name);
 // Allocates descriptors from the current slot, creates the views, binds everything, dispatches.
+// `cl` == a registered GpuCtx's list -> that ctx's heap/slot; otherwise Gpu's.
 void GpuDispatch(Gpu& g, ID3D12GraphicsCommandList* cl, const ComputePso& p, const GpuView* srvs, const GpuView* uavs,
                  const void* consts, UINT groups_x, UINT groups_y, UINT groups_z = 1);
 inline UINT GpuGroups(UINT n, UINT size) { return (n + size - 1) / size; }
@@ -92,6 +130,10 @@ void GpuStamp(Gpu& g, ID3D12GraphicsCommandList* cl, int i);
 bool GpuStampsMs(Gpu& g, double* ms, int pairs);
 // Same for one specific ring slot; false if that slot's fence has not completed.
 bool GpuStampsMsSlot(Gpu& g, int slot, double* ms, int pairs);
+// Same three for a secondary context (stamps go into c.list's current slot).
+void GpuCtxStamp(GpuCtx& c, int i);
+bool GpuCtxStampsMs(GpuCtx& c, double* ms, int pairs);
+bool GpuCtxStampsMsSlot(GpuCtx& c, int slot, double* ms, int pairs);
 
 // ---- misc ------------------------------------------------------------------------------------
 double NowMs();   // QPC milliseconds

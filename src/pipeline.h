@@ -9,7 +9,11 @@
 #include "ngx_nr.h"
 #include "nvofa.h"
 #include "present.h"
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 struct StageStats
@@ -57,11 +61,43 @@ struct Pipeline
     StageStats age_ms, pipe_ms;   // non-FG presents: present - cap_qpc, present - acq_qpc (FG: FgStats)
     UINT64     last_stamp_fence = 0;
     UINT64     last_stamp_fence_slot[3] = {};
+    int        ofa_cur = 0;       // per-frame OFA input ping-pong (slots 0/1); 2/3 are the model track's held grays
+    UINT       frame_index = 0;   // frames fed (main thread)
+
+    // ---- decoupled model track ([nr] mode=async) --------------------------------------------------
+    // Main hands one native frame at a time to the model thread (model_src copy + gray in a held OFA
+    // slot, completed by main fence `fence`) whenever the thread asks (model_wants_frame). The thread
+    // downscales, runs its own flow (pair 1, held slot vs the previous model frame's), evaluates NR on
+    // its own queue and publishes residual[idx] (= nr_out - nr_in at work res) with its ctx fence
+    // value; main composes native + warped residual each frame (CsComposeResidual).
+    struct ModelFrame { int held = 2; UINT64 fence = 0; UINT index = 0; bool reset = true; };
+    struct ModelParams { float zero_below = 0.5f; UINT cost_reject = 0; float exposure = 1.0f; int max_fps = 0, warmup = 8; };
+    GpuCtx     model_ctx;
+    std::thread model_thread;
+    std::mutex model_mu; std::condition_variable model_cv;   // guards model_stop/model_frame_ready/model_frame/model_params
+    bool       model_stop = false, model_frame_ready = false;
+    ModelFrame model_frame; ModelParams model_params;
+    std::atomic<bool> model_wants_frame{ true }, model_failed{ false };
+    std::atomic<UINT> model_evals{ 0 };
+    std::atomic<UINT64> residual_read_fence[2] = { 0, 0 };   // main fence value of the last list that read residual[i]
+    bool       model_reset_pending = true;             // main: reset flags accumulated since the last hand-off
+    ID3D12Resource* model_src = nullptr;               // RGBA8 native, COPY_DEST at rest
+    ID3D12Resource *nr_in_m = nullptr, *nr_out_m = nullptr, *mv_m = nullptr;   // work res: NPSR, UAV, NPSR
+    ID3D12Resource* residual[2] = {};                  // RGBA16F work res, NPSR at rest
+    std::mutex pub_mu;                                 // guards pub_* and model_ms
+    int        pub_idx = -1; UINT64 pub_fence = 0; UINT pub_frame = 0;
+    StageStats model_ms;                               // model evaluate GPU ms (drained by the stats reader)
+    int        cmp_idx = -1; UINT64 cmp_fence = 0;     // residual the main queue last waited for
+    StageStats residual_age;                           // per composed frame: frame_index - residual's frame index
 };
 
 std::wstring ExeDir();
-// work_w/h == 0 -> nrfilter.spike.ini [spike] work=WxH (+create_style/param_block) else 2560x1440.
+// work_w/h == 0 -> justflow.spike.ini [spike] work=WxH (+create_style/param_block) else 2560x1440.
 void ResolveWork(Config& c, const std::wstring& dir);
+// Profiles: profiles\*.ini next to the exe, `names` = the sorted stems. `ini` (--ini) wins when non-empty
+// (index = its stem's slot in names, -1 if none); otherwise the first profile whose [capture] window
+// exists right now, else "wow", else the first. Returns the ini path ("" when there is no profile at all).
+std::wstring PickProfile(const std::wstring& dir, const std::wstring& ini, std::vector<std::wstring>& names, int& index);
 
 Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_overlay, HWND target);
 // One frame. capture_bgra is BGRA8 w x h in COMMON; the queue first waits on wait_fence/wait_value

@@ -1,5 +1,5 @@
 // DLSS 5 neural rendering (nvngx_dlssnr.dll, NGX feature 18) on D3D12 through the caller-gate
-// forwarder (nvngx.dll_nrfilter.dll). Owns the parameter block, the float-slot probe, the feature
+// forwarder (nvngx.dll_justflow.dll). Owns the parameter block, the float-slot probe, the feature
 // handle, and a retire ring for replaced features (each ~420 MB; freed ~32 evaluates later).
 #pragma once
 #include "d3d.h"
@@ -35,7 +35,7 @@ struct NrConfig
 
 struct Nr;
 
-// Loads forwarder + runtime from `dir` (nvngx.dll_nrfilter.dll and nvngx_dlssnr.dll next to the
+// Loads forwarder + runtime from `dir` (nvngx.dll_justflow.dll and nvngx_dlssnr.dll next to the
 // exe), inits NGX core (per `block`), calls Init_Ext through the forwarder, probes the float slot.
 Nr*  NrInit(Gpu& g, const wchar_t* dir, NrParamBlock block);
 void NrShutdown(Nr* n);

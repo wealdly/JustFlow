@@ -2,8 +2,8 @@
 // works, and what does one evaluate cost? One child process per cell so a hang cannot poison
 // the next cell; the parent is the watchdog.
 //
-//   nrfilter_spike                      run the whole grid, print a table, write spike_results.txt
-//   nrfilter_spike --cell W H A|B 1|2|3 [--png file]   one cell (what the parent spawns)
+//   justflow_spike                      run the whole grid, print a table, write spike_results.txt
+//   justflow_spike --cell W H A|B 1|2|3 [--png file]   one cell (what the parent spawns)
 #include "d3d.h"
 #include "log.h"
 #include "ngx_nr.h"
@@ -104,7 +104,7 @@ int main(int argc, char** argv)
     struct Size { UINT w, h; } sizes[] = { {1920, 1080}, {2560, 1440}, {3200, 1800}, {3840, 2160} };
     const char styles[] = { 'B', 'A' };
     const int blocks[] = { 1, 2, 3 };
-    FILE* table = nullptr; fopen_s(&table, (std::string(std::string(dir.begin(), dir.end())) + "\\spike_results.txt").c_str(), "w");
+    FILE* table = nullptr; _wfopen_s(&table, (dir + L"\\spike_results.txt").c_str(), L"w");
     wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
     for (const Size& sz : sizes) for (char st : styles) for (int bl : blocks)
     {

@@ -1,4 +1,4 @@
-// nrfilter logging: one file + stderr, timestamped. Log() is printf-style and thread-safe.
+// JustFlow logging: one file + stderr, timestamped. Log() is printf-style and thread-safe.
 #pragma once
 #include <windows.h>
 #include <cstdarg>

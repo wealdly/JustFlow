@@ -16,7 +16,7 @@ static float F(const wchar_t* path, const wchar_t* sec, const wchar_t* key, floa
     return buf[0] ? (float)wcstod(buf, nullptr) : def;
 }
 
-static HotkeySpec ParseHotkey(std::wstring s, UINT def_vk)
+HotkeySpec ParseHotkey(std::wstring s, UINT def_vk)
 {
     HotkeySpec h; h.vk = def_vk;
     for (auto& c : s) c = (wchar_t)towupper(c);
@@ -29,6 +29,17 @@ static HotkeySpec ParseHotkey(std::wstring s, UINT def_vk)
     if (s.size() >= 2 && s[0] == L'F') { const int n = _wtoi(s.c_str() + 1); if (n >= 1 && n <= 24) h.vk = VK_F1 + n - 1; }
     else if (s.size() == 1) h.vk = (UINT)s[0];
     return h;
+}
+
+std::wstring FormatHotkey(const HotkeySpec& h)
+{
+    std::wstring s;
+    if (h.mods & MOD_CONTROL) s += L"Ctrl+";
+    if (h.mods & MOD_ALT) s += L"Alt+";
+    if (h.mods & MOD_SHIFT) s += L"Shift+";
+    if (h.vk >= VK_F1 && h.vk <= VK_F24) s += L"F" + std::to_wstring(h.vk - VK_F1 + 1);
+    else if (h.vk) s += (wchar_t)h.vk;   // letters/digits: vk == the character
+    return s;
 }
 
 bool ConfigLoad(const wchar_t* path, Config& c)
@@ -58,6 +69,9 @@ bool ConfigLoad(const wchar_t* path, Config& c)
     c.warmup = I(path, L"nr", L"warmup", c.warmup);
     c.rebuild_debounce_frames = I(path, L"nr", L"rebuild_debounce_frames", c.rebuild_debounce_frames);
     c.max_fps = I(path, L"nr", L"max_fps", c.max_fps);
+    c.nr_async = S(path, L"nr", L"mode", c.nr_async ? L"async" : L"sync") == L"async";
+    c.warp = F(path, L"nr", L"warp", c.warp);
+    c.model_max_fps = I(path, L"nr", L"model_max_fps", c.model_max_fps);
 
     const std::wstring in = S(path, L"ofa", L"input", L"960x540");
     if (swscanf_s(in.c_str(), L"%ux%u", &c.ofa_w, &c.ofa_h) != 2) { c.ofa_w = 960; c.ofa_h = 540; }
@@ -81,7 +95,10 @@ bool ConfigLoad(const wchar_t* path, Config& c)
     c.fg_multiplier = I(path, L"fg", L"multiplier", c.fg_multiplier);
     c.fg_pacing_vblank = S(path, L"fg", L"pacing", c.fg_pacing_vblank ? L"vblank" : L"timer") != L"timer";
     c.fg_mv_dilated = B(path, L"fg", L"mv_dilated", c.fg_mv_dilated);
+    c.fg_phase_ms = F(path, L"fg", L"phase_ms", c.fg_phase_ms);
+    c.fg_anchor_delay_slots = I(path, L"fg", L"anchor_delay_slots", c.fg_anchor_delay_slots);
 
+    c.overlay_direct = S(path, L"overlay", L"mode", c.overlay_direct ? L"direct" : L"composed") == L"direct";
     c.exclude_from_capture = B(path, L"overlay", L"exclude_from_capture", c.exclude_from_capture);
     c.reassert_topmost_every = I(path, L"overlay", L"reassert_topmost_every", c.reassert_topmost_every);
 
@@ -94,6 +111,7 @@ bool ConfigLoad(const wchar_t* path, Config& c)
     c.log_file = S(path, L"log", L"file", c.log_file);
     c.stats_every = I(path, L"log", L"stats_every", c.stats_every);
     c.gpu_timestamps = B(path, L"log", L"gpu_timestamps", c.gpu_timestamps);
+    c.selftest = B(path, L"log", L"selftest", c.selftest);
     return true;
 }
 

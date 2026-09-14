@@ -31,7 +31,21 @@ struct ComposeParams
     int   feather = 12;               // px
     int   nrects = 0;
     UiRect rects[16];
+    float warp = 1.0f;                // CsComposeResidual only: residual sampled at uv + mv_uv * warp
 };
 // native RGBA8 (w x h) + nr_in / nr_out RGBA8 (ww x wh) -> out RGBA8 (w x h).
 void CsCompose(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* native, ID3D12Resource* nr_in, ID3D12Resource* nr_out,
                UINT ww, UINT wh, ID3D12Resource* out, UINT w, UINT h, const ComposeParams& p);
+
+// ---- decoupled model track ------------------------------------------------------------------
+// nr_in / nr_out RGBA8 (ww x wh) -> residual R16G16B16A16_FLOAT (ww x wh) = nr_out - nr_in (signed).
+void CsResidual(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* nr_in, ID3D12Resource* nr_out, UINT ww, UINT wh,
+                ID3D12Resource* dst_residual);
+// native RGBA8 (w x h) + residual RGBA16F (ww x wh) warped by mv R16G16_FLOAT (this frame's
+// current -> previous motion in work-res pixels; any size, sampled by uv) -> out RGBA8 (w x h).
+// Rects / feather / wipe as CsCompose; p.warp scales the warp (0 = no warp).
+void CsComposeResidual(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* native, ID3D12Resource* residual, UINT ww, UINT wh,
+                       ID3D12Resource* mv, ID3D12Resource* out, UINT w, UINT h, const ComposeParams& p);
+// Blocking round trip on g.list (not inside GpuBegin/GpuEnd): residual + compose_residual with mv=0
+// against a CPU reference within 1/255. Logs PASS/FAIL.
+bool ComposeSelfTest(Gpu& g);

@@ -1,0 +1,39 @@
+JustFlow includes code derived from the following projects:
+
+== NeuralScreen (perseval-BLR/DLSS5-NeuralScreen) - MIT ==
+Capture bridge, overlay window recipe, NVOFA session, DLSS-G desktop path, caller-gate forwarder.
+MIT License
+
+Copyright (c) 2026 perseval-BLR
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Note: the bundled `native/nvngx_dlssnr.dll` is NVIDIA's property, not covered
+
+== NVIDIA Optical Flow SDK 5.0 interface headers (third_party/nvofa) - MIT, NVIDIA Corporation ==
+Unmodified headers from the public mirror mbucchia/Optical-Flow-SDK; the licence is in each header.
+
+== NVIDIA NGX / DLSS SDK headers and nvsdk_ngx_d.lib (third_party/ngx) ==
+Copyright NVIDIA Corporation. Distributed under the NVIDIA DLSS SDK licence (see third_party/ngx/LICENSE.txt);
+not covered by the MIT licence above.
+
+== Runtimes (not distributed) ==
+nvngx_dlssnr.dll (DLSS neural rendering) and nvngx_dlssg.dll (DLSS frame generation) are NVIDIA binaries and are NOT part of this repository. Bring your own; see README.

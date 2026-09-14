@@ -100,7 +100,7 @@ static void ProbeFloatSlot(Nr* n)
 Nr* NrInit(Gpu& g, const wchar_t* dir, NrParamBlock block)
 {
     Nr* n = new Nr; n->g = &g; n->dir = dir; n->block = block;
-    std::wstring fwd = n->dir + L"\\nvngx.dll_nrfilter.dll", rt = n->dir + L"\\nvngx_dlssnr.dll";
+    std::wstring fwd = n->dir + L"\\nvngx.dll_justflow.dll", rt = n->dir + L"\\nvngx_dlssnr.dll";
     n->fwd = LoadLibraryW(fwd.c_str());
     if (!n->fwd) { Log("[ngx] forwarder %ls did not load (err %lu)", fwd.c_str(), GetLastError()); delete n; return nullptr; }
     auto load = (int(*)(const wchar_t*))GetProcAddress(n->fwd, "NrfFwdLoad");

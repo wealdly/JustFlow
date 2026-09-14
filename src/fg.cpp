@@ -50,6 +50,7 @@ struct Fg
     UINT     w = 0, h = 0, mw = 0, mh = 0;
     int      count = 1;                      // generated frames per real frame
     bool     vblank = true, mv_dilated = true;
+    std::atomic<double> phase{ 0.0 }; std::atomic<int> anchor_delay{ 0 };   // FgSetTiming (main) -> Presenter
     std::wstring dir;
     const wchar_t* path_list[1] = {};
     NVSDK_NGX_FeatureCommonInfo common = {};
@@ -249,14 +250,17 @@ static void Presenter(Fg* f)
         if (ok)
         {
             const double L = s->interval / (f->count + 1);
-            const double anchor = std::max(NowMs(), prev_real_target + L);
+            const bool gen = interp && allow;
+            // phase shifts every present target; the cadence (prev_real_target) stays unshifted so it never accumulates.
+            const double ph = f->phase.load(std::memory_order_relaxed);
+            const double anchor = std::max(NowMs() + (gen ? f->anchor_delay.load(std::memory_order_relaxed) * L : 0.0), prev_real_target + L);
             double real_target = anchor;
             bool preempted = false;
-            if (interp && allow)
+            if (gen)
             {
                 for (int i = 0; i < f->count; ++i)
                 {
-                    const double target = anchor + i * L;
+                    const double target = anchor + i * L + ph;
                     if (!wait_until(target, s->seq)) { preempted = true; break; }
                     if (NowMs() - target > L * 0.5 + vb * 0.5) { ++f->drops; continue; }   // stale: skip, never burst
                     if (!Present(f, s->gen[i], nullptr)) { ok = false; break; }
@@ -264,7 +268,7 @@ static void Presenter(Fg* f)
                 real_target = preempted ? NowMs() : anchor + f->count * L;
             }
             // The real frame is never skipped for lateness: only `stop` interrupts (seq MAX = no pre-emption).
-            if (ok && wait_until(real_target, UINT64_MAX)) ok = Present(f, s->real, s);
+            if (ok && wait_until(real_target + ph, UINT64_MAX)) ok = Present(f, s->real, s);
             prev_real_target = real_target;
         }
         prev = s->seq;
@@ -377,6 +381,11 @@ void FgDestroy(Fg* f)
 }
 
 bool FgFailed(const Fg* f) { return f->failed; }
+void FgSetTiming(Fg* f, double phase_ms, int anchor_delay_slots)
+{
+    f->phase.store(std::clamp(phase_ms, -50.0, 50.0), std::memory_order_relaxed);
+    f->anchor_delay.store(std::clamp(anchor_delay_slots, 0, 3), std::memory_order_relaxed);
+}
 void FgStats(Fg* f, FgStatsOut& out)
 {
     out.presented = f->presented.exchange(0); out.drops = f->drops.exchange(0);
