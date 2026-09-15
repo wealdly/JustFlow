@@ -212,7 +212,7 @@ static void Presenter(Fg* f)
 {
     using clock = std::chrono::steady_clock;
     double vb = f->vblank ? OverlayVBlankMs(f->ov) : 0;   // 0 = timer pacing
-    UINT64 prev = 0; double prev_real_target = 0;
+    UINT64 prev = 0; double prev_real_target = 0; LONGLONG prev_cap = 0;
     auto newer_ready = [&](UINT64 seq) { for (auto& x : f->slots) if (x.state == 2 && x.seq > seq) return true; return false; };
     // Pre-emption is gone, and it is only safe to remove it BECAUSE the pick above now takes the
     // newest slot and frees the rest. Under the old oldest-first FIFO it was load-bearing - the
@@ -271,11 +271,22 @@ static void Presenter(Fg* f)
         }
         bool ok = true;
         bool allow = false;
-        const bool interp = s->interpolate && s->seq == prev + 1;   // a dropped frame breaks the pair
+        // Pace from CONTENT time. cap_qpc is the game's own present timestamp, so the gap to the
+        // last frame we evaluated is exactly the span DLSS-G interpolates across, and it is immune
+        // to anything happening on our threads. s->interval is submit-to-submit and therefore
+        // carries our own stalls back into the cadence that caused them. Fall back to it only when
+        // the capture gave us no timestamp.
+        const double content_ms = (s->cap_qpc && prev_cap) ? QpcToMs(s->cap_qpc - prev_cap) : 0.0;
+        const double span = (content_ms > 0.5 && content_ms < 100.0) ? content_ms : s->interval;
+        // A slot we dropped does NOT invalidate the pair. DLSS-G's history holds the last frame we
+        // EVALUATED, and we evaluate every slot we pick, so a gap only widens the motion delta -
+        // which `span` has just measured. Requiring seq == prev + 1 spent a generated frame on
+        // every dropped one: fg_drops and fg_nopair came back equal on every single line.
+        const bool interp = s->interpolate && prev != 0 && span < 100.0;
         if (ok) ok = Evaluate(f, s, interp, allow);
         if (ok)
         {
-            const double L = s->interval / (f->count + 1);
+            const double L = span / (f->count + 1);
             const bool gen = interp && allow;
             if (!interp) ++f->no_pair; else if (!allow) ++f->disabled;
             // phase shifts every present target; the cadence (prev_real_target) stays unshifted so it never accumulates.
@@ -299,7 +310,7 @@ static void Presenter(Fg* f)
             if (ok && wait_until(real_target + ph)) ok = Present(f, s->real, s, true);
             prev_real_target = real_target;
         }
-        prev = s->seq;
+        prev = s->seq; prev_cap = s->cap_qpc;
         { std::lock_guard<std::mutex> lk(f->mu); s->state = 0; }
         f->cv.notify_all();   // FgRecord may be waiting for a free slot
     }
