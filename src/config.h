@@ -14,6 +14,8 @@ struct Config
 {
     // [app] (justflow.ini)
     std::wstring profile = L"auto";        // startup profile: auto (first whose window is up, else wow, else first) | <name>
+    // [gpu] (app layer: which card, not which game)
+    int   gpu_adapter = -1;                // -1 = the first usable NVIDIA adapter; else the index the log prints
     // [capture]
     std::wstring window_class = L"";      // profiles name the game; the binary carries no game-specific strings
     std::wstring window_title = L"";

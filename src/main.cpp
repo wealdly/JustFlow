@@ -778,7 +778,10 @@ static int RealMain(int argc, char** argv)
     LogConfigFiles(app_path, ini_path, have);
     Log("[main] profile %ls (%zu in profiles\\)", ini_path.c_str(), profiles.size());
     Gpu g;
-    if (!GpuInit(g, -1)) return 1;
+    // [gpu] adapter: a second card can host the whole filter. Desktop Duplication can only capture
+    // an output its OWN adapter owns, and the present has to reach the display, so the monitor must
+    // be plugged into whichever card this names - the capture device follows the same LUID.
+    if (!GpuInit(g, cfg.gpu_adapter)) return 1;
     if (cfg.selftest) { ComposeSelfTest(g); ArtCnnSelfTest(g); }
     ResolveWork(cfg, dir);
     LARGE_INTEGER qpf; QueryPerformanceFrequency(&qpf);
@@ -866,6 +869,12 @@ static int RealMain(int argc, char** argv)
             LogConfigFiles(app_path, ini_path, have);
             Log("[main] config reloaded (no pipeline yet)");
             return;
+        }
+        // The device is created once at startup, so this one cannot be applied by any reload.
+        if (nc.gpu_adapter != cfg.gpu_adapter)
+        {
+            Log("[gpu] [gpu] adapter %d -> %d takes effect when JustFlow restarts", cfg.gpu_adapter, nc.gpu_adapter);
+            PipelineToast(p, "GPU change applies on restart");
         }
         if (ok && profile >= 0 && ConfigNeedsRestart(cfg, nc))
         {

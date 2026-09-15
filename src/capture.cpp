@@ -136,7 +136,7 @@ static bool OpenDda(Gpu& g, Capture* c)
         if (d.Monitor == mon) { c->out_rect = d.DesktopCoordinates; break; }
         out->Release(); out = nullptr;
     }
-    if (!out) { Log("[cap] DDA: the window's monitor is not on the NGX adapter"); return false; }
+    if (!out) { Log("[cap] DDA: the game's monitor is not on adapter %d - plug the display into that card, or change [gpu] adapter in justflow.ini (the startup log lists them)", g.adapter_index); return false; }
     IDXGIOutput1* out1 = nullptr;
     out->QueryInterface(__uuidof(IDXGIOutput1), (void**)&out1);
     out->Release();

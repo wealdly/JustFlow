@@ -58,6 +58,7 @@ const Setting kSettings[] = {
     { 3, L"nr", L"mode",              L"Model mode",         Enum,  L"sync|async", L"sync" },
     { 3, L"nr", L"model_max_fps",     L"Async model cap",    Int,   nullptr, L"0" },
     { 3, L"nr", L"warp",              L"Async warp",         Float, nullptr, L"1.0" },
+    { 3, L"gpu", L"adapter",          L"GPU (-1 = auto)",    Int,   nullptr, L"-1" },
     { 3, L"capture", L"mode",         L"Capture",            Enum,  L"dda|wgc", L"dda" },
     { 3, L"ofa", L"input",            L"Flow resolution",    Enum,  L"640x360|960x540|1280x720", L"960x540" },
 

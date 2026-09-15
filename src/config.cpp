@@ -13,6 +13,7 @@ static const AppKey kAppKeys[] = {
     { L"overlay", nullptr },
     { L"ui", L"toast" }, { L"ui", L"toast_scale" }, { L"ui", L"hud" }, { L"ui", L"hud_corner" }, { L"ui", L"hud_scale" },
     { L"log", L"stats_every" }, { L"log", L"gpu_timestamps" }, { L"log", L"selftest" },
+    { L"gpu", nullptr },
     { L"ofa", L"dll_path" },
     { L"nr", L"create_style" }, { L"nr", L"param_block" },
 };
@@ -88,6 +89,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     auto F = [&](const wchar_t* sec, const wchar_t* key, float def) { const std::wstring s = S(sec, key, L""); return s.empty() ? def : (float)wcstod(s.c_str(), nullptr); };
 
     c.profile = S(L"app", L"profile", c.profile);
+    c.gpu_adapter = I(L"gpu", L"adapter", c.gpu_adapter);
 
     c.window_class = S(L"capture", L"window_class", c.window_class);
     c.window_title = S(L"capture", L"window_title", c.window_title);

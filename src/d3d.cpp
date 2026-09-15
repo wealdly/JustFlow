@@ -64,7 +64,12 @@ bool GpuInit(Gpu& g, int want)
         if (pick == nullptr && usable && (want < 0 || (int)i == want)) { pick = a; g.adapter_index = (int)i; g.luid = d.AdapterLuid; continue; }
         a->Release();
     }
-    if (!pick) { Log("[gpu] no usable NVIDIA adapter"); return false; }
+    if (!pick)
+    {
+        if (want >= 0) Log("[gpu] [gpu] adapter=%d is not a usable NVIDIA adapter - see the indices listed above", want);
+        else Log("[gpu] no usable NVIDIA adapter");
+        return false;
+    }
     pick->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&g.adapter);
     hr = D3D12CreateDevice(pick, D3D_FEATURE_LEVEL_12_0, __uuidof(ID3D12Device), (void**)&g.dev);
     pick->Release();
