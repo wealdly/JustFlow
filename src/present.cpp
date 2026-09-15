@@ -13,6 +13,11 @@
 static const int kMaxHot = 16;
 static const UINT WM_SET_HOTKEYS = WM_APP + 1;   // wp = const HotkeyDef*, lp = count; returns the number of RegisterHotKey failures
 
+// 3 buffers + MaximumFrameLatency(1): the compositor releases one a vblank before the previous
+// frame scans out, so a present paced on the waitable lands on a refresh boundary. WaitForVBlank
+// alone drifts against DWM and puts frames mid-scanline (upstream measured 115 -> 168 fps).
+static const int kBuffers = 3;
+
 struct Overlay
 {
     Gpu*   g = nullptr;
@@ -22,7 +27,7 @@ struct Overlay
     DWORD  tid = 0;
     volatile LONG state = 0;            // 0 starting, 1 up, -1 failed
     IDXGISwapChain3* swap = nullptr;
-    ID3D12Resource*  bb[2] = {};
+    ID3D12Resource*  bb[kBuffers] = {};
     UINT   w = 0, h = 0, flags = 0, present_flags = 0;
     bool   revealed = false, shown = false, exclude = false, direct = false;
     bool   layered = true;              // WS_EX_LAYERED|WS_EX_TRANSPARENT added after the swapchain (composed, or direct after a FAILed self-test)
@@ -39,6 +44,7 @@ struct Overlay
     ID3D12CommandAllocator* alloc = nullptr; ID3D12GraphicsCommandList* list = nullptr;
     ID3D12Fence* fence = nullptr; HANDLE event = nullptr; UINT64 fence_value = 0;
     IDXGIOutput* output = nullptr; bool output_looked_up = false;
+    HANDLE waitable = nullptr;          // DWM releases a back buffer a vblank before the last one scans out
     double vblank_ms = 1000.0 / 60.0;
 };
 
@@ -187,17 +193,18 @@ static DWORD WINAPI WindowThread(LPVOID p)
 
 static bool GetBuffers(Overlay* o)
 {
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < kBuffers; ++i)
     {
         if (FAILED(o->swap->GetBuffer(i, __uuidof(ID3D12Resource), (void**)&o->bb[i]))) { Log("[present] GetBuffer %d failed", i); return false; }
-        o->bb[i]->SetName(i ? L"backbuffer1" : L"backbuffer0");
+        wchar_t name[16]; swprintf_s(name, L"backbuffer%d", i);
+        o->bb[i]->SetName(name);
     }
     return true;
 }
 
 static void ReleaseBuffers(Overlay* o)
 {
-    for (int i = 0; i < 2; ++i) if (o->bb[i]) { o->bb[i]->Release(); o->bb[i] = nullptr; }
+    for (int i = 0; i < kBuffers; ++i) if (o->bb[i]) { o->bb[i]->Release(); o->bb[i] = nullptr; }
 }
 
 bool OverlayIsDirect(const Overlay* o) { return o->direct; }
@@ -224,7 +231,7 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
         if (FAILED(f5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearing, sizeof tearing))) tearing = FALSE;
         f5->Release();
     }
-    o->flags = tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    o->flags = (tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     o->present_flags = tearing ? DXGI_PRESENT_ALLOW_TEARING : 0;
 
     D3D12_COMMAND_QUEUE_DESC qd = {}; qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -239,7 +246,7 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
 
     DXGI_SWAP_CHAIN_DESC1 sd = {};
     sd.Width = w; sd.Height = h; sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count = 1;
-    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount = 2;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount = kBuffers;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE; sd.Flags = o->flags;
     IDXGISwapChain1* sc1 = nullptr;
     HRESULT hr = g.factory->CreateSwapChainForHwnd(o->pq, o->hwnd, &sd, nullptr, nullptr, &sc1);
@@ -248,6 +255,9 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
     hr = sc1->QueryInterface(__uuidof(IDXGISwapChain3), (void**)&o->swap);
     sc1->Release();
     if (FAILED(hr) || !o->swap) { Log("[present] IDXGISwapChain3 unavailable 0x%08X", hr); OverlayDestroy(o); return nullptr; }
+    o->swap->SetMaximumFrameLatency(1);
+    o->waitable = o->swap->GetFrameLatencyWaitableObject();
+    if (!o->waitable) Log("[present] no frame-latency waitable - pacing falls back to WaitForVBlank");
     if (!GetBuffers(o)) { OverlayDestroy(o); return nullptr; }
 
     if (o->layered)
@@ -270,6 +280,7 @@ void OverlayDestroy(Overlay* o)
     if (!o) return;
     Drain(o);
     ReleaseBuffers(o);
+    if (o->waitable) { CloseHandle(o->waitable); o->waitable = nullptr; }
     if (o->swap) { o->swap->Release(); o->swap = nullptr; }
     if (o->output) { o->output->Release(); o->output = nullptr; }
     if (o->list) { o->list->Release(); o->list = nullptr; }
@@ -357,7 +368,13 @@ static IDXGIOutput* Output(Overlay* o)
     return nullptr;
 }
 
-bool   OverlayWaitVBlank(Overlay* o) { IDXGIOutput* out = Output(o); return out && SUCCEEDED(out->WaitForVBlank()); }
+// Pace on the compositor's own signal when we have it; WaitForVBlank is the pre-8.1 fallback.
+bool OverlayWaitVBlank(Overlay* o)
+{
+    if (o->waitable) return WaitForSingleObjectEx(o->waitable, 100, TRUE) == WAIT_OBJECT_0;
+    IDXGIOutput* out = Output(o);
+    return out && SUCCEEDED(out->WaitForVBlank());
+}
 double OverlayVBlankMs(Overlay* o) { Output(o); return o->vblank_ms; }
 
 void OverlayFollow(Overlay* o, int reassert_every)
@@ -395,7 +412,7 @@ bool OverlayResize(Overlay* o, UINT w, UINT h)
 {
     Drain(o);
     ReleaseBuffers(o);
-    const HRESULT hr = o->swap->ResizeBuffers(2, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, o->flags);
+    const HRESULT hr = o->swap->ResizeBuffers(kBuffers, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, o->flags);
     if (FAILED(hr)) { Log("[present] ResizeBuffers %ux%u failed 0x%08X", w, h, (unsigned)hr); return false; }
     o->w = w; o->h = h; o->last = RECT{};
     if (!GetBuffers(o)) return false;
