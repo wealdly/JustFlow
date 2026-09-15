@@ -16,7 +16,7 @@
 int  RunBench(int argc, char** argv);                                             // bench.cpp
 bool SavePngRgba(const wchar_t* path, const uint8_t* rgba, UINT w, UINT h);       // bench.cpp
 
-const char* const kPipeStageName[PS_COUNT] = { "swizzle", "gray+downscale", "ofa", "expand", "eval", "compose", "ofa2", "artcnn" };
+const char* const kPipeStageName[PS_COUNT] = { "swizzle", "gray+downscale", "ofa", "expand", "eval", "compose", "ofa2", "artcnn", "filter" };
 
 double StageStats::pct(double p) const
 {
@@ -387,10 +387,10 @@ void PipelineReadStamps(Pipeline* p)
     {
         const UINT64 v = g.alloc_fence[s];
         if (!v || v == p->last_stamp_fence_slot[s]) continue;
-        double ms[6];
-        if (!GpuStampsMsSlot(g, s, ms, 6)) continue;
+        double ms[7];
+        if (!GpuStampsMsSlot(g, s, ms, 7)) continue;
         p->last_stamp_fence_slot[s] = v;
-        p->st[PS_SWIZZLE].add(ms[0]); p->st[PS_GRAYDS].add(ms[1]); p->st[PS_EVAL].add(ms[2]); p->st[PS_COMPOSE].add(ms[3]); p->st[PS_EXPAND].add(ms[4]); p->st[PS_ARTCNN].add(ms[5]);
+        p->st[PS_SWIZZLE].add(ms[0]); p->st[PS_GRAYDS].add(ms[1]); p->st[PS_EVAL].add(ms[2]); p->st[PS_COMPOSE].add(ms[3]); p->st[PS_EXPAND].add(ms[4]); p->st[PS_ARTCNN].add(ms[5]); p->st[PS_FILTER].add(ms[6]);
     }
 }
 
@@ -619,7 +619,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     {
         GpuBarrier(cl, p->out4k, UAV, NPSR);
         GpuBarrier(cl, p->sharp4k, CSRC, UAV);
-        CsSharpen(g, p->sh, cl, p->out4k, p->sharp4k, p->w, p->h, c.sharpen, c.saturation, (UINT)cp.nrects);   // rect_tex holds this frame's rects (compose above)
+        stamp(12); CsSharpen(g, p->sh, cl, p->out4k, p->sharp4k, p->w, p->h, c.sharpen, c.saturation, (UINT)cp.nrects); stamp(13);   // rect_tex holds this frame's rects (compose above)
         GpuBarrier(cl, p->out4k, NPSR, CSRC);
         shown = p->sharp4k;
     }
@@ -1125,8 +1125,8 @@ static int RealMain(int argc, char** argv)
                 swprintf_s(status, L"%ls  cap %.0f  out %.0f fps  age %.0f ms", profile_name().c_str(), cap_fps, fg_fps, std::max(0.0, age.med()));
                 tray_state();
                 p->residual_age.v.clear();
-                Log("[stats] gpu: swz=%.2f gray+ds=%.2f expand=%.2f eval=%.2f compose=%.2f | cpu waits: begin1=%.1f ofa=%.1f begin2=%.1f present=%.1f",
-                    p->st[PS_SWIZZLE].med(), p->st[PS_GRAYDS].med(), p->st[PS_EXPAND].med(), p->st[PS_EVAL].med(), p->st[PS_COMPOSE].med(),
+                Log("[stats] gpu: swz=%.2f gray+ds=%.2f expand=%.2f eval=%.2f compose=%.2f filter=%.2f | cpu waits: begin1=%.1f ofa=%.1f begin2=%.1f present=%.1f",
+                    p->st[PS_SWIZZLE].med(), p->st[PS_GRAYDS].med(), p->st[PS_EXPAND].med(), p->st[PS_EVAL].med(), p->st[PS_COMPOSE].med(), p->st[PS_FILTER].med(),
                     p->cpu_wait[0].med(), p->cpu_wait[1].med(), p->cpu_wait[2].med(), p->cpu_wait[3].med());
                 for (auto& s : p->cpu_wait) s.v.clear();
                 frames = 0; skips = 0; rate_drops = 0; win_t0 = NowMs(); cpu_ms.clear(); acq_ms.v.clear();

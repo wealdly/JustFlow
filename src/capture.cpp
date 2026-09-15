@@ -57,6 +57,7 @@ struct Capture
     bool  dup_frame_held = false;        // released right before the next acquire (the copy has long executed)
     RECT  out_rect = {};                 // monitor rect in desktop coords
     RECT  win_rect = {};                 // captured region (window bounds clamped to the monitor)
+    ULONGLONG region_at = 0;             // last DwmGetWindowAttribute: throttled, it calls into dwm.exe
     UINT  accum_last = 0; UINT64 accum_sum = 0, accum_n = 0;   // DDA AccumulatedFrames telemetry
 };
 
@@ -166,17 +167,26 @@ static bool AcquireDda(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG&
     c->dup_frame_held = true;
     c->accum_last = info.AccumulatedFrames; c->accum_sum += info.AccumulatedFrames; ++c->accum_n;
     if (info.LastPresentTime.QuadPart == 0) { res->Release(); return false; }   // only the cursor / metadata moved
-    RECT region;
-    if (WindowRegion(c->target, c->out_rect, region))
+    // DwmGetWindowAttribute is a call into dwm.exe. On the acquire path that is one cross-process
+    // round trip per captured frame - 90 a second - to re-read a rectangle that changes almost
+    // never (a borderless game never moves). Poll it at 10 Hz and reuse the last rect in between;
+    // a size change is still caught well inside the 250 ms settle deadband below.
+    const ULONGLONG now_ms = GetTickCount64();
+    if (now_ms - c->region_at >= 100)
     {
-        const UINT nw = (UINT)(region.right - region.left), nh = (UINT)(region.bottom - region.top);
-        if (nw != c->w || nh != c->h)
+        c->region_at = now_ms;
+        RECT region;
+        if (WindowRegion(c->target, c->out_rect, region))
         {
-            if (nw != c->pend_w || nh != c->pend_h) { c->pend_w = nw; c->pend_h = nh; c->pend_since = GetTickCount64(); }
-            res->Release(); return false;
+            const UINT nw = (UINT)(region.right - region.left), nh = (UINT)(region.bottom - region.top);
+            if (nw != c->w || nh != c->h)
+            {
+                if (nw != c->pend_w || nh != c->pend_h) { c->pend_w = nw; c->pend_h = nh; c->pend_since = GetTickCount64(); }
+                res->Release(); return false;
+            }
+            c->pend_w = c->pend_h = 0;
+            c->win_rect = region;
         }
-        c->pend_w = c->pend_h = 0;
-        c->win_rect = region;
     }
     ID3D11Texture2D* tex = nullptr;
     res->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&tex);

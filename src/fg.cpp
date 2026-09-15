@@ -115,7 +115,7 @@ static bool Present(Fg* f, ID3D12Resource* src, const FgSlot* s, bool real)
     const bool ok = f->count ? OverlayPresent(f->ov, src, f->ctx.fence, s->eval_fence) : OverlayPresent(f->ov, src, f->g->fence, s->fence);
     if (!ok) return Fail(f, "Present failed");
     const FgSlot* real_of = real ? s : nullptr;
-    LONGLONG pq = 0, sq = 0; OverlayTimes(f->ov, pq, sq);
+    const LONGLONG pq = OverlayPresentQpc(f->ov);
     const double t = QpcToMs(pq);
     ++f->presented;
     std::lock_guard<std::mutex> lk(f->mu);

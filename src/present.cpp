@@ -39,7 +39,7 @@ struct Overlay
     volatile LONG hot[kMaxHot] = {};
     int    follow_calls = 0;
     RECT   last = {};
-    LONGLONG present_qpc = 0, scanout_qpc = 0;
+    LONGLONG present_qpc = 0;
     // present queue: swapchain + backbuffer copies, decoupled from the pipeline queue
     ID3D12CommandQueue* pq = nullptr;
     ID3D12CommandAllocator* alloc = nullptr; ID3D12GraphicsCommandList* list = nullptr;
@@ -338,8 +338,6 @@ bool OverlayPresent(Overlay* o, ID3D12Resource* src, ID3D12Fence* after, UINT64 
         o->revealed = o->shown = true;
         Log("[present] window revealed on the first Present");
     }
-    DXGI_FRAME_STATISTICS fs = {};
-    o->scanout_qpc = SUCCEEDED(o->swap->GetFrameStatistics(&fs)) ? fs.SyncQPCTime.QuadPart : 0;
     o->pres_total_us += (UINT64)UsSince(t0);
     ++o->pres_n;
     return true;
@@ -355,9 +353,9 @@ void OverlayPresentStats(Overlay* o, double& prev_ms, double& call_ms, double& t
     if (!n) { o->pres_prev_us = 0; o->pres_call_us = 0; o->pres_total_us = 0; }
 }
 
-void OverlayTimes(Overlay* o, LONGLONG& present_qpc, LONGLONG& scanout_qpc)
+LONGLONG OverlayPresentQpc(Overlay* o)
 {
-    present_qpc = o->present_qpc; scanout_qpc = o->scanout_qpc;
+    return o->present_qpc;
 }
 
 void OverlayGuard(Overlay* o, ID3D12CommandQueue* q) { if (o->fence_value) q->Wait(o->fence, o->fence_value); }

@@ -51,7 +51,9 @@ bool OverlaySetHotkeys(Overlay* o, const HotkeyDef* keys, int nkeys);
 // Quit requested (WM_CLOSE / quit hotkey handled by main via OverlayHotkey).
 HWND OverlayHwnd(Overlay* o);
 // QPC of the last successful Present call and DXGI frame statistics scanout QPC (0 if unknown).
-void OverlayTimes(Overlay* o, LONGLONG& present_qpc, LONGLONG& scanout_qpc);
+// QPC at the last Present. (The scan-out time went with GetFrameStatistics: it was a DXGI call
+// on every present, up to 180 a second, and nothing ever read the answer.)
+LONGLONG OverlayPresentQpc(Overlay* o);
 // Mean wall time of one OverlayPresent since the last call, split into: waiting for the previous
 // copy to retire, the Present() call itself, and the whole function. -1 = nothing presented.
 void OverlayPresentStats(Overlay* o, double& prev_ms, double& call_ms, double& total_ms);

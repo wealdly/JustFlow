@@ -25,7 +25,7 @@ struct StageStats
     double p95() const { return pct(0.95); }
 };
 
-enum PipeStage { PS_SWIZZLE, PS_GRAYDS, PS_OFA, PS_EXPAND, PS_EVAL, PS_COMPOSE, PS_OFA2, PS_ARTCNN, PS_COUNT };   // PS_OFA/PS_OFA2: bench only (CPU round trip); PS_ARTCNN: sync path only
+enum PipeStage { PS_SWIZZLE, PS_GRAYDS, PS_OFA, PS_EXPAND, PS_EVAL, PS_COMPOSE, PS_OFA2, PS_ARTCNN, PS_FILTER, PS_COUNT };   // PS_OFA/PS_OFA2: bench only (CPU round trip); PS_ARTCNN: sync path only
 extern const char* const kPipeStageName[PS_COUNT];
 
 struct Pipeline
