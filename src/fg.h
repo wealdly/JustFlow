@@ -60,6 +60,11 @@ bool FgFailed(const Fg* f);
 struct FgStatsOut
 {
     UINT presented = 0, drops = 0;     // presented frames (real + generated), skipped/overwritten frames
+    UINT gen_shown = 0;                // generated frames that actually reached the screen
+    // why a real frame generated nothing: these three plus gen_shown account for every real frame
+    UINT no_pair = 0;                  // sequence gap or reset: nothing to interpolate against
+    UINT disabled = 0;                 // DLSS-G raised pOutputDisableInterpolation for the pair
+    UINT preempts = 0;                 // a newer slot arrived before the generated frame was due
     std::vector<double> spacing_ms;    // present-to-present spacing of everything shown
     std::vector<double> age_ms;        // real frames: our present - capture timestamp
     std::vector<double> pipe_ms;       // real frames: our present - capture acquire

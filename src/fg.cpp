@@ -71,6 +71,9 @@ struct Fg
     std::mutex mu; std::condition_variable cv;
     std::atomic<bool> stop{ false }, failed{ false };
     std::atomic<UINT> presented{ 0 }, drops{ 0 };
+    // why a real frame produced no generated frame: no pair (sequence gap / reset),
+    // DLSS-G raised its disable flag, or a newer slot pre-empted the schedule
+    std::atomic<UINT> no_pair{ 0 }, disabled{ 0 }, preempts{ 0 }, gen_shown{ 0 };
     std::vector<double> spacing, age, pipe;   // guarded by mu; handed over by FgStats
     double eval_ring[256] = {}; unsigned eval_n = 0;   // guarded by mu; generation GPU ms per real frame (FgEvalMs)
     double last_present = 0;
@@ -247,6 +250,7 @@ static void Presenter(Fg* f)
         {
             const double L = s->interval / (f->count + 1);
             const bool gen = interp && allow;
+            if (!interp) ++f->no_pair; else if (!allow) ++f->disabled;
             // phase shifts every present target; the cadence (prev_real_target) stays unshifted so it never accumulates.
             const double ph = f->phase.load(std::memory_order_relaxed);
             const double anchor = std::max(NowMs(), prev_real_target + L);
@@ -257,9 +261,10 @@ static void Presenter(Fg* f)
                 for (int i = 0; i < f->count; ++i)
                 {
                     const double target = anchor + i * L + ph;
-                    if (!wait_until(target, s->seq)) { preempted = true; break; }
+                    if (!wait_until(target, s->seq)) { preempted = true; ++f->preempts; break; }
                     if (NowMs() - target > L * 0.5 + vb * 0.5) { ++f->drops; continue; }   // stale: skip, never burst
                     if (!Present(f, s->gen[i], s, false)) { ok = false; break; }
+                    ++f->gen_shown;
                 }
                 real_target = preempted ? NowMs() : anchor + f->count * L;
             }
@@ -423,6 +428,8 @@ void FgSetTiming(Fg* f, double phase_ms)
 void FgStats(Fg* f, FgStatsOut& out)
 {
     out.presented = f->presented.exchange(0); out.drops = f->drops.exchange(0);
+    out.no_pair = f->no_pair.exchange(0); out.disabled = f->disabled.exchange(0);
+    out.preempts = f->preempts.exchange(0); out.gen_shown = f->gen_shown.exchange(0);
     std::lock_guard<std::mutex> lk(f->mu);
     out.spacing_ms.swap(f->spacing); out.age_ms.swap(f->age); out.pipe_ms.swap(f->pipe);
     f->spacing.clear(); f->age.clear(); f->pipe.clear();
