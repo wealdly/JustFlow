@@ -13,6 +13,12 @@ no injection, no input. The same mechanisms OBS and overlay apps use, nothing mo
 - **Capture** by DXGI Desktop Duplication at the monitor's refresh rate (window capture fallback).
 - **Per-game profiles**, global hotkeys, a tray menu, a live before/after wipe.
 
+Out of the box it runs as a frame generator: **frame generation on, neural rendering off**
+(`[fg] enabled=1`, `[nr] enabled=0`). FG is the cheap half - about 1.8 ms of GPU per frame at
+4K - while the model costs 6.5 ms at 1440p and wants a frame-rate budget of its own. F9 turns
+the model on when you want it, and it is created on demand rather than at startup, so leaving
+it off costs no VRAM. Both toggles are remembered.
+
 Tested on an RTX 5080 at 4K 240 Hz with World of Warcraft, Valheim and The Blood of Dawnwalker.
 
 ## Requirements

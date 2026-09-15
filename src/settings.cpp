@@ -32,7 +32,7 @@ const int kTabCount = (int)(sizeof kTabs / sizeof *kTabs);
 const wchar_t* const kWork = L"auto|1920x1080|2560x1440|3200x1800|3840x2160";
 
 const Setting kSettings[] = {
-    { 0, L"nr", L"enabled",           L"Neural rendering",   Bool,  nullptr, L"1" },
+    { 0, L"nr", L"enabled",           L"Neural rendering",   Bool,  nullptr, L"0" },
     { 0, L"nr", L"work",              L"Model resolution",   Enum,  kWork,   L"auto" },
     { 0, L"nr", L"artcnn",            L"ArtCNN pre-pass",    Bool,  nullptr, L"0" },
     { 0, L"nr", L"sharpen",           L"Sharpen",            Float, nullptr, L"0.0" },
@@ -49,7 +49,7 @@ const Setting kSettings[] = {
     { 1, L"nr", L"ui_correction",     L"UI correction",      Bool,  nullptr, L"1" },
     { 1, L"nr", L"exposure_scale",    L"Exposure scale",     Float, nullptr, L"1.0" },
 
-    { 2, L"fg", L"enabled",           L"Frame generation",   Bool,  nullptr, L"0" },
+    { 2, L"fg", L"enabled",           L"Frame generation",   Bool,  nullptr, L"1" },
     { 2, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4", L"2" },
     { 2, L"fg", L"mv_dilated",        L"Dilated motion",     Bool,  nullptr, L"1" },
     { 2, L"fg", L"phase_ms",          L"Present phase (ms)", Float, nullptr, L"0.0" },

@@ -20,7 +20,7 @@ struct Config
     bool cursor = false, border = false;
     bool dda = true;                       // capture.mode: dda (monitor refresh rate) | wgc (60 Hz ceiling)
     // [nr]
-    bool  nr_enabled = true;
+    bool  nr_enabled = false;              // the app starts as a frame generator; F9 brings the model up
     UINT  work_w = 0, work_h = 0;          // 0 = auto (from spike results / default 2560x1440)
     int   create_style = 1;                // 0 = A (NeuralScreen set), 1 = B (plain)   [app layer]
     int   param_block = 1;                 // 1 Allocate, 2 Capability, 3 Own           [app layer]
@@ -54,7 +54,7 @@ struct Config
     int   hud_corner = 0;                  // 0 tl, 1 tr, 2 bl, 3 br
     int   hud_scale = 3;
     // [fg]
-    bool  fg_enabled = false;
+    bool  fg_enabled = true;
     int   fg_multiplier = 2;               // presented frames per rendered frame, 2..4
     bool  fg_pacing_vblank = true;         // pacing=vblank | timer
     bool  fg_mv_dilated = true;            // DLSS-G motionVectorsDilated (see fg.cpp Evaluate)
