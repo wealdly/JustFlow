@@ -1017,7 +1017,14 @@ static int RealMain(int argc, char** argv)
             {
                 ++skips;
                 if ((++follow_tick % 10) == 0) OverlayFollow(p->ov, cfg.reassert_topmost_every);
-                Sleep(1);
+                // No sleep here. CaptureAcquire already blocks on its own timeout (AcquireNextFrame /
+                // the frame event), and every early return runs after that wait, so this cannot spin.
+                // The Sleep(1) that was here stalled the capture loop on every MOUSE MOVE: Desktop
+                // Duplication reports a cursor-only update (LastPresentTime == 0), we skip it, and without
+                // timeBeginPeriod a Sleep(1) waits for the next 15.6 ms scheduler tick - so the real game
+                // frame behind it sat waiting. Moving the mouse is exactly when FG matters, and it turned
+                // into irregular capture, a jittery content interval, drops and warping. The stall was
+                // after acq_ms and before cpu_ms, so no stat ever showed it.
                 continue;
             }
             if (CaptureIsFloat(cap)) { Log("[main] FP16 (HDR) capture is not supported in phase 1 - exiting"); quit = true; rc = 2; break; }
