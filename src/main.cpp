@@ -611,13 +611,15 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         GpuBarrier(cl, p->nr_out, NPSR, UAV);
     }
     if (!native && p->model_toast_pending) { p->model_toast_pending = false; PipelineToast(p, "Model ready"); }
-    // sharpen (out4k -> sharp4k, UI rects untouched) before the text so the text stays crisp
+    // Filter layer (out4k -> sharp4k, UI rects untouched): sharpen then vibrance, before the text
+    // so the text stays crisp. Runs when either filter is asked for - vibrance used to live inside
+    // the neural compose, which meant it died with the neural layer while sharpen carried on.
     ID3D12Resource* shown = p->out4k;
-    if (c.sharpen > 0)
+    if (c.sharpen > 0 || c.saturation != 1.0f)
     {
         GpuBarrier(cl, p->out4k, UAV, NPSR);
         GpuBarrier(cl, p->sharp4k, CSRC, UAV);
-        CsSharpen(g, p->sh, cl, p->out4k, p->sharp4k, p->w, p->h, c.sharpen, (UINT)cp.nrects);   // rect_tex holds this frame's rects (compose above)
+        CsSharpen(g, p->sh, cl, p->out4k, p->sharp4k, p->w, p->h, c.sharpen, c.saturation, (UINT)cp.nrects);   // rect_tex holds this frame's rects (compose above)
         GpuBarrier(cl, p->out4k, NPSR, CSRC);
         shown = p->sharp4k;
     }

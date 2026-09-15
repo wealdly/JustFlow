@@ -3,10 +3,13 @@
 // cross kernel scales with it, so flat detail sharpens fully while edges that already span the range
 // get little (no ringing, no clipping). strength 0..1 -> lobe -1/8 .. -1/5. Pixels inside a UI rect
 // (the compose's rect texture, nrects entries) pass through.
+// This is the whole FILTER layer, and the order inside it is deliberate: sharpen first on the
+// image the neural layer produced, THEN vibrance. Grading before sharpening would have the
+// sharpener amplify colour it had just pushed. Both honour the UI rects the same way.
 Texture2D<float4>   src   : register(t0);
 Texture2D<int>      rects : register(t1);
 RWTexture2D<float4> dst   : register(u0);
-cbuffer C : register(b0) { uint w, h; float strength; uint nrects; };
+cbuffer C : register(b0) { uint w, h; float strength, saturation; uint nrects; };
 
 float3 Px(int2 p) { return src[clamp(p, int2(0, 0), int2(w - 1, h - 1))].rgb; }
 
@@ -28,5 +31,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     mn += min(min(a, c), min(g, i)); mx += max(max(a, c), max(g, i));
     const float3 amp = sqrt(saturate(min(mn, 2.0 - mx) / max(mx, 1e-4)));
     const float3 wgt = amp * (-1.0 / lerp(8.0, 5.0, saturate(strength)));
-    dst[id.xy] = float4(saturate(((b + d + f + hh) * wgt + e) / (1.0 + 4.0 * wgt)), 1);
+    float3 res = saturate(((b + d + f + hh) * wgt + e) / (1.0 + 4.0 * wgt));
+    const float l = dot(res, float3(0.2126, 0.7152, 0.0722));
+    res = saturate(lerp(float3(l, l, l), res, saturation));
+    dst[id.xy] = float4(res, 1);
 }

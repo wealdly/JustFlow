@@ -12,7 +12,6 @@ cbuffer C : register(b0)
 {
     float strength;
     float chroma;
-    float saturation;
     uint  wipe_mode;
     float wipe_x;
     int   feather;
@@ -42,10 +41,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         res = saturate(nat + d);
     }
     {
-        // Vibrance is a FILTER, not part of the model: it runs with the neural layer off too, so a
-        // model-off profile still gets it. Before the UI rects, so the interface is never saturated.
-        const float rl = dot(res, float3(0.2126, 0.7152, 0.0722));
-        res = saturate(lerp(float3(rl, rl, rl), res, saturation));
+        // Vibrance is NOT here: it is the filter layer's job (shaders/sharpen.hlsl), which runs on
+        // whatever this produced, model or no model, and after the sharpen.
         const float2 p = float2(q);
         const float f = max(feather, 1);
         [loop] for (uint i = 0; i < min(nrects, 64u); ++i)
