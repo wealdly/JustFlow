@@ -364,7 +364,6 @@ void PipelineReload(Pipeline* p, const Config& c)
     const bool rebuild = ConfigNeedsRebuild(p->cfg, c);
     // recreated next frame (a multiplier change is caught there: the presenter is rebuilt only when it differs)
     if (c.fg_pacing_vblank != p->cfg.fg_pacing_vblank || (c.fg_enabled && c.fg_mv_dilated != p->cfg.fg_mv_dilated)) DropFg(p);
-    if (c.overlay_direct != p->cfg.overlay_direct) Log("[overlay] mode=%s takes effect on the next capture open / restart (window recreate)", c.overlay_direct ? "direct" : "composed");
     if (c.nr_async != p->cfg.nr_async) { StopModel(p); p->model_failed = false; p->force_reset = true; Log("[nr] mode=%s", c.nr_async ? "async" : "sync"); }
     p->cfg = c;
     SetModelParams(p, c);   // live keys for the model thread (zero_below, exposure, model_max_fps, warmup)
@@ -823,6 +822,15 @@ static int RealMain(int argc, char** argv)
         if (!p) return;
         Config nc; const int have = ConfigLoad(app_path.c_str(), ini_path.c_str(), nc); const bool ok = (have & 2) != 0;
         ResolveWork(nc, dir);
+        if (ok && profile >= 0 && ConfigNeedsRestart(cfg, nc))
+        {
+            // Capture and overlay read these only at create: rebuild the pipeline the way a profile
+            // switch does (break the frame loop, destroy, come back round the top with the new ini).
+            Log("[main] capture/overlay key changed - rebuilding the pipeline");
+            PipelineToast(p, "Applying...");
+            pending_profile = profile;
+            return;
+        }
         const bool cap_changed = nc.max_fps != cfg.max_fps || nc.model_max_fps != cfg.model_max_fps;
         PipelineReload(p, nc); cfg = nc;
         apply_hotkeys();

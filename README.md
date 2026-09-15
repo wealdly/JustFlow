@@ -43,7 +43,9 @@ justflow.exe --bench frame.png --frames 120   pipeline timing on a PNG, no game 
 
 Nothing has to be edited by hand: **Settings...** in the tray menu opens a tabbed window over the
 same keys (Quality, Look, Frame gen, Performance, Display), writes each one to the file it belongs
-in, and reloads. **Quality** in the same menu sets the four cost dials at once - High performance,
+in, and applies it on OK - live keys immediately, create-latched ones (model size, look) as one
+debounced rebuild, and the handful the capture and overlay only read when they are created
+(capture mode, window match, cursor, border, overlay mode) by rebuilding the pipeline in place. **Quality** in the same menu sets the four cost dials at once - High performance,
 Performance, Balanced, Quality (model resolution, ArtCNN, sharpen, flow resolution). No preset
 touches the look dials, and none sets a frame-rate cap.
 

@@ -176,6 +176,12 @@ bool ConfigNeedsRebuild(const Config& a, const Config& b)
            x.local_structure != y.local_structure || x.skin_structure != y.skin_structure || x.auto_mask != y.auto_mask || x.ui_correction != y.ui_correction;
 }
 
+bool ConfigNeedsRestart(const Config& a, const Config& b)
+{
+    return a.dda != b.dda || a.overlay_direct != b.overlay_direct || a.cursor != b.cursor ||
+           a.border != b.border || a.window_class != b.window_class || a.window_title != b.window_title;
+}
+
 NrConfig ConfigToNr(const Config& c)
 {
     NrConfig n; n.work_w = c.work_w; n.work_h = c.work_h;

@@ -81,6 +81,11 @@ std::wstring ConfigStrayKeys(const wchar_t* profile);
 bool ConfigIsAppKey(const wchar_t* sec, const wchar_t* key);
 // True if a key that is latched at CreateFeature differs (work size, style, block, tuning).
 bool ConfigNeedsRebuild(const Config& a, const Config& b);
+// True if a key that is only read when the capture and the overlay are created differs, so a
+// reload has to tear the pipeline down and build it again. Deliberately NOT exclude_from_capture:
+// opening a DDA capture forces it on in the live config, and comparing that against the ini would
+// restart on every reload.
+bool ConfigNeedsRestart(const Config& a, const Config& b);
 // Fills an NrConfig from the config (work size must already be resolved).
 NrConfig ConfigToNr(const Config& c);
 // "[Ctrl+][Alt+][Shift+]Key" (Key = F1..F24 or a letter/digit) <-> HotkeySpec. Unparsable key -> def_vk.
