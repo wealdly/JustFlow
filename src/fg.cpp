@@ -29,9 +29,7 @@ static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_
 static const D3D12_RESOURCE_STATES UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 static const D3D12_RESOURCE_STATES CSRC = D3D12_RESOURCE_STATE_COPY_SOURCE;
 static const D3D12_RESOURCE_STATES CDST = D3D12_RESOURCE_STATE_COPY_DEST;
-// 5 slots: with 3, one slot presenting plus two ready left nothing free and the main thread
-// blocked in FgRecord waiting for the presenter to retire one (measured ~7 ms per frame).
-static const int kSlots = 5, kMaxGen = 3;
+static const int kSlots = 3, kMaxGen = 3;
 
 // Rest states: real CSRC, mv CDST, gen[] CSRC, depth NPSR, disable UAV. state: 0 free, 1 writing
 // (producer), 2 ready, 3 presenting; guarded by Fg::mu.
@@ -215,15 +213,14 @@ static void Presenter(Fg* f)
     double vb = f->vblank ? OverlayVBlankMs(f->ov) : 0;   // 0 = timer pacing
     UINT64 prev = 0; double prev_real_target = 0;
     auto newer_ready = [&](UINT64 seq) { for (auto& x : f->slots) if (x.state == 2 && x.seq > seq) return true; return false; };
-    // Pre-emption is gone. Cancelling a generated frame because another slot is ready threw away a
-    // frame DLSS-G had already been paid to make, and it bought nothing: a present costs 0.20 ms
-    // (measured pres_ms), so showing it does not delay the real frame in any way that matters. It
-    // was the entire FG deficit - fg_preempt sat at ~180 per window, one per real frame, while
-    // fg_gen sat at 0. Falling behind is handled where it belongs, by the staleness gate below,
-    // which skips a generated frame that is already later than half a slot.
+    // Pre-emption is load-bearing and removing it was a mistake: the presenter takes the OLDEST
+    // ready slot and never skips a real frame, so without a way to abandon this slot's generated
+    // frames it must walk a whole backlog in order. Latency then runs away instead of recovering -
+    // measured age_ms 168-260, output 10 fps, spacing p95 220 ms. The staleness gate only skips
+    // frames WITHIN a slot; this is what skips ahead BETWEEN slots.
     // Blocks until `target` (NowMs clock): vblank mode returns right after the vblank nearest the
-    // target, timer mode at the target. False = stop only.
-    auto wait_until = [&](double target) -> bool
+    // target, timer mode at the target. False = pre-empted (stop, or a slot newer than `seq` is ready).
+    auto wait_until = [&](double target, UINT64 seq) -> bool
     {
         for (;;)
         {
@@ -232,19 +229,18 @@ static void Presenter(Fg* f)
                 if (vb <= 0)
                 {
                     const auto deadline = clock::now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double, std::milli>(target - NowMs()));
-                    return !f->cv.wait_until(lk, deadline, [&] { return (bool)f->stop; });
+                    return !f->cv.wait_until(lk, deadline, [&] { return f->stop || newer_ready(seq); });
                 }
-                if (f->stop) return false;
+                if (f->stop || newer_ready(seq)) return false;
             }
             LARGE_INTEGER vt0, vt1, vf; QueryPerformanceCounter(&vt0);
             const bool vok = OverlayWaitVBlank(f->ov);
             QueryPerformanceCounter(&vt1); QueryPerformanceFrequency(&vf);
             f->vbw_us += (UINT64)((vt1.QuadPart - vt0.QuadPart) * 1000000 / vf.QuadPart); ++f->vbw_n;
-            // A failed wait is almost always transient (the waitable only signals when a present
-            // retires, so a skipped frame or a hidden overlay starves it). Demoting the whole
-            // session to timer pacing on the first one was silent and never recovered; just fall
-            // through to the target check and try again next time.
-            if (!vok) { if (++f->vbw_fail % 240 == 1) Log("[fg] vblank wait timed out (%u so far) - pacing on the target clock this frame", (unsigned)f->vbw_fail); }
+            // WaitForVBlank only fails structurally (no DXGI output under the overlay), so this one
+            // IS permanent and the timer schedule is the right answer. It is logged now rather than
+            // silent - a run that quietly lost vblank pacing looked like a pacing bug for hours.
+            if (!vok) { Log("[fg] no DXGI output under the overlay - pacing on the CPU timer from here"); vb = 0; continue; }
             if (NowMs() + vb * 0.5 >= target) return true;
         }
     };
@@ -279,7 +275,7 @@ static void Presenter(Fg* f)
                 for (int i = 0; i < f->count; ++i)
                 {
                     const double target = anchor + i * L + ph;
-                    if (!wait_until(target)) { preempted = true; ++f->preempts; break; }
+                    if (!wait_until(target, s->seq)) { preempted = true; ++f->preempts; break; }
                     if (NowMs() - target > L * 0.5 + vb * 0.5) { ++f->drops; continue; }   // stale: skip, never burst
                     if (!Present(f, s->gen[i], s, false)) { ok = false; break; }
                     ++f->gen_shown;
@@ -287,7 +283,7 @@ static void Presenter(Fg* f)
                 real_target = preempted ? NowMs() : anchor + f->count * L;
             }
             // The real frame is never skipped for lateness: only `stop` interrupts (seq MAX = no pre-emption).
-            if (ok && wait_until(real_target + ph)) ok = Present(f, s->real, s, true);
+            if (ok && wait_until(real_target + ph, UINT64_MAX)) ok = Present(f, s->real, s, true);
             prev_real_target = real_target;
         }
         prev = s->seq;

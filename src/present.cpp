@@ -14,11 +14,10 @@
 static const int kMaxHot = 16;
 static const UINT WM_SET_HOTKEYS = WM_APP + 1;   // wp = const HotkeyDef*, lp = count; returns the number of RegisterHotKey failures
 
-// 3 buffers, 2 frames in flight: the compositor's waitable paces presents against DWM instead of
-// WaitForVBlank, which drifts and lands frames mid-scanline. Frames in flight must exceed 1 or the
-// present RATE is capped at one per retire, which frame generation cannot live with (it presents
-// multiplier x the real rate). One buffer stays free for the copy.
-static const int kBuffers = 3;
+// 2 buffers, paced on the monitor's vblank. The frame-latency waitable was tried and reverted:
+// it is a semaphore fed by retiring presents, not a free-running tick, and pacing a generator
+// on it starved and then wrecked the cadence.
+static const int kBuffers = 2;
 
 struct Overlay
 {
@@ -48,7 +47,6 @@ struct Overlay
     // Where a present's wall time goes (presenter thread writes, stats reader drains). us, summed.
     std::atomic<UINT64> pres_n{ 0 }, pres_prev_us{ 0 }, pres_call_us{ 0 }, pres_total_us{ 0 };
     IDXGIOutput* output = nullptr; bool output_looked_up = false;
-    HANDLE waitable = nullptr;          // DWM releases a back buffer a vblank before the last one scans out
     double vblank_ms = 1000.0 / 60.0;
 };
 
@@ -236,7 +234,7 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
         if (FAILED(f5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearing, sizeof tearing))) tearing = FALSE;
         f5->Release();
     }
-    o->flags = (tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+    o->flags = tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
     o->present_flags = tearing ? DXGI_PRESENT_ALLOW_TEARING : 0;
 
     D3D12_COMMAND_QUEUE_DESC qd = {}; qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -260,13 +258,6 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
     hr = sc1->QueryInterface(__uuidof(IDXGISwapChain3), (void**)&o->swap);
     sc1->Release();
     if (FAILED(hr) || !o->swap) { Log("[present] IDXGISwapChain3 unavailable 0x%08X", hr); OverlayDestroy(o); return nullptr; }
-    // Frames allowed in flight. 1 paces hard against the compositor but caps the present RATE at one
-    // frame per retire, which is fatal for frame generation: it has to present multiplier x the real
-    // rate. 2 keeps the back-pressure and lets a generated frame be in flight while the real one
-    // retires. kBuffers is 3, so one buffer stays free for the copy.
-    o->swap->SetMaximumFrameLatency(kBuffers - 1);
-    o->waitable = o->swap->GetFrameLatencyWaitableObject();
-    if (!o->waitable) Log("[present] no frame-latency waitable - pacing falls back to WaitForVBlank");
     if (!GetBuffers(o)) { OverlayDestroy(o); return nullptr; }
 
     if (o->layered)
@@ -289,7 +280,6 @@ void OverlayDestroy(Overlay* o)
     if (!o) return;
     Drain(o);
     ReleaseBuffers(o);
-    if (o->waitable) { CloseHandle(o->waitable); o->waitable = nullptr; }
     if (o->swap) { o->swap->Release(); o->swap = nullptr; }
     if (o->output) { o->output->Release(); o->output = nullptr; }
     if (o->list) { o->list->Release(); o->list = nullptr; }
@@ -398,13 +388,7 @@ static IDXGIOutput* Output(Overlay* o)
     return nullptr;
 }
 
-// Pace on the compositor's own signal when we have it; WaitForVBlank is the pre-8.1 fallback.
-bool OverlayWaitVBlank(Overlay* o)
-{
-    if (o->waitable) return WaitForSingleObjectEx(o->waitable, 100, TRUE) == WAIT_OBJECT_0;
-    IDXGIOutput* out = Output(o);
-    return out && SUCCEEDED(out->WaitForVBlank());
-}
+bool OverlayWaitVBlank(Overlay* o) { IDXGIOutput* out = Output(o); return out && SUCCEEDED(out->WaitForVBlank()); }
 double OverlayVBlankMs(Overlay* o) { Output(o); return o->vblank_ms; }
 
 void OverlayFollow(Overlay* o, int reassert_every)
