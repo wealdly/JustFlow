@@ -1,6 +1,7 @@
 // Click-through overlay window on its own thread + flip-model swapchain on the Gpu queue.
 #include "present.h"
 #include "log.h"
+#include <atomic>
 #include <dwmapi.h>
 
 #pragma comment(lib, "dwmapi.lib")
@@ -13,9 +14,10 @@
 static const int kMaxHot = 16;
 static const UINT WM_SET_HOTKEYS = WM_APP + 1;   // wp = const HotkeyDef*, lp = count; returns the number of RegisterHotKey failures
 
-// 3 buffers + MaximumFrameLatency(1): the compositor releases one a vblank before the previous
-// frame scans out, so a present paced on the waitable lands on a refresh boundary. WaitForVBlank
-// alone drifts against DWM and puts frames mid-scanline (upstream measured 115 -> 168 fps).
+// 3 buffers, 2 frames in flight: the compositor's waitable paces presents against DWM instead of
+// WaitForVBlank, which drifts and lands frames mid-scanline. Frames in flight must exceed 1 or the
+// present RATE is capped at one per retire, which frame generation cannot live with (it presents
+// multiplier x the real rate). One buffer stays free for the copy.
 static const int kBuffers = 3;
 
 struct Overlay
@@ -31,6 +33,7 @@ struct Overlay
     UINT   w = 0, h = 0, flags = 0, present_flags = 0;
     bool   revealed = false, shown = false, exclude = false, direct = false;
     bool   layered = true;              // WS_EX_LAYERED|WS_EX_TRANSPARENT added after the swapchain (composed, or direct after a FAILed self-test)
+    bool   flip = false;                // mode=flip: never add the layered style, whatever the self-test says
     RECT   mon = {};                    // direct: the monitor rect the window covers
     HWND   probe_hit = nullptr;         // cross-thread WindowFromPoint result of the self-test
     HotkeyDef keys[kMaxHot] = {};
@@ -43,6 +46,8 @@ struct Overlay
     ID3D12CommandQueue* pq = nullptr;
     ID3D12CommandAllocator* alloc = nullptr; ID3D12GraphicsCommandList* list = nullptr;
     ID3D12Fence* fence = nullptr; HANDLE event = nullptr; UINT64 fence_value = 0;
+    // Where a present's wall time goes (presenter thread writes, stats reader drains). us, summed.
+    std::atomic<UINT64> pres_n{ 0 }, pres_prev_us{ 0 }, pres_call_us{ 0 }, pres_total_us{ 0 };
     IDXGIOutput* output = nullptr; bool output_looked_up = false;
     HANDLE waitable = nullptr;          // DWM releases a back buffer a vblank before the last one scans out
     double vblank_ms = 1000.0 / 60.0;
@@ -172,8 +177,12 @@ static DWORD WINAPI WindowThread(LPVOID p)
         // Self-test FAIL: keep the monitor-sized window without a redirection bitmap and add the
         // layered style after the swapchain like composed does (direct_layered) - click-through is
         // then guaranteed; whether DWM still grants independent flip is for PresentMon to say.
-        o->layered = !ClickThroughOk(o);
-        if (o->layered) Log("[present] direct mode continues as direct_layered (monitor-sized, no redirection bitmap, layered click-through)");
+        // flip: skip the self-test and stay non-layered. WS_EX_LAYERED is what forces DWM to compose
+        // the window, and composing a 4K layered surface is the present-rate ceiling; without it DWM
+        // can grant independent flip. The cost is that clicks may land on the overlay.
+        o->layered = o->flip ? false : !ClickThroughOk(o);
+        if (o->flip) Log("[present] mode=flip: non-layered, independent-flip capable - clicks may NOT pass through to the game");
+        else if (o->layered) Log("[present] direct mode continues as direct_layered (monitor-sized, no redirection bitmap, layered click-through)");
     }
     if (!o->hwnd)
     {
@@ -209,10 +218,11 @@ static void ReleaseBuffers(Overlay* o)
 
 bool OverlayIsDirect(const Overlay* o) { return o->direct; }
 
-Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, bool direct)
+Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, int mode)
 {
     Overlay* o = new Overlay();
-    o->g = &g; o->target = target; o->w = w; o->h = h; o->exclude = exclude_from_capture; o->direct = direct;
+    o->g = &g; o->target = target; o->w = w; o->h = h; o->exclude = exclude_from_capture;
+    o->direct = mode != 0; o->flip = mode == 2;
     o->nkeys = nkeys < kMaxHot ? nkeys : kMaxHot;
     for (int i = 0; i < o->nkeys; ++i) o->keys[i] = keys[i];
     o->ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -255,7 +265,11 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
     hr = sc1->QueryInterface(__uuidof(IDXGISwapChain3), (void**)&o->swap);
     sc1->Release();
     if (FAILED(hr) || !o->swap) { Log("[present] IDXGISwapChain3 unavailable 0x%08X", hr); OverlayDestroy(o); return nullptr; }
-    o->swap->SetMaximumFrameLatency(1);
+    // Frames allowed in flight. 1 paces hard against the compositor but caps the present RATE at one
+    // frame per retire, which is fatal for frame generation: it has to present multiplier x the real
+    // rate. 2 keeps the back-pressure and lets a generated frame be in flight while the real one
+    // retires. kBuffers is 3, so one buffer stays free for the copy.
+    o->swap->SetMaximumFrameLatency(kBuffers - 1);
     o->waitable = o->swap->GetFrameLatencyWaitableObject();
     if (!o->waitable) Log("[present] no frame-latency waitable - pacing falls back to WaitForVBlank");
     if (!GetBuffers(o)) { OverlayDestroy(o); return nullptr; }
@@ -269,9 +283,9 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
         SetWindowPos(o->hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);   // never activate: the game drops to its background fps cap when it loses focus
     }
     if (target) OverlayFollow(o, 0);
-    const char* mode = o->direct ? (o->layered ? "direct_layered" : "direct") : "composed";
-    Log("[present] overlay %ux%u ready (flip-discard%s, %s%s, own present queue)", w, h, tearing ? ", tearing" : "", mode, exclude_from_capture ? ", excluded from capture" : "");
-    Log("[stats] present_mode=%s", mode);
+    const char* mode_name = !o->direct ? "composed" : o->flip ? "flip" : o->layered ? "direct_layered" : "direct";
+    Log("[present] overlay %ux%u ready (flip-discard%s, %s%s, own present queue)", w, h, tearing ? ", tearing" : "", mode_name, exclude_from_capture ? ", excluded from capture" : "");
+    Log("[stats] present_mode=%s", mode_name);
     return o;
 }
 
@@ -305,10 +319,18 @@ void OverlayDestroy(Overlay* o)
 
 HWND OverlayHwnd(Overlay* o) { return o->hwnd; }
 
+static double UsSince(LARGE_INTEGER a)
+{
+    LARGE_INTEGER b, f; QueryPerformanceCounter(&b); QueryPerformanceFrequency(&f);
+    return (double)(b.QuadPart - a.QuadPart) * 1e6 / (double)f.QuadPart;
+}
+
 bool OverlayPresent(Overlay* o, ID3D12Resource* src, ID3D12Fence* after, UINT64 after_value)
 {
+    LARGE_INTEGER t0; QueryPerformanceCounter(&t0);
     // ponytail: one allocator, so wait for the previous copy before reuse (it retired ~a frame ago).
     if (!WaitPq(o, o->fence_value, 2000)) { Log("[present] previous copy did not retire"); return false; }
+    o->pres_prev_us += (UINT64)UsSince(t0);
     if (FAILED(o->alloc->Reset()) || FAILED(o->list->Reset(o->alloc, nullptr))) { Log("[present] list reset failed"); return false; }
     ID3D12Resource* bb = o->bb[o->swap->GetCurrentBackBufferIndex()];
     GpuBarrier(o->list, bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -321,6 +343,7 @@ bool OverlayPresent(Overlay* o, ID3D12Resource* src, ID3D12Fence* after, UINT64 
     o->pq->Signal(o->fence, ++o->fence_value);
     LARGE_INTEGER q; QueryPerformanceCounter(&q);
     const HRESULT hr = o->swap->Present(0, o->present_flags);
+    o->pres_call_us += (UINT64)UsSince(q);
     if (FAILED(hr)) { Log("[present] Present failed 0x%08X", (unsigned)hr); return false; }
     o->present_qpc = q.QuadPart;
     if (!o->revealed)
@@ -332,7 +355,19 @@ bool OverlayPresent(Overlay* o, ID3D12Resource* src, ID3D12Fence* after, UINT64 
     }
     DXGI_FRAME_STATISTICS fs = {};
     o->scanout_qpc = SUCCEEDED(o->swap->GetFrameStatistics(&fs)) ? fs.SyncQPCTime.QuadPart : 0;
+    o->pres_total_us += (UINT64)UsSince(t0);
+    ++o->pres_n;
     return true;
+}
+
+void OverlayPresentStats(Overlay* o, double& prev_ms, double& call_ms, double& total_ms)
+{
+    const UINT64 n = o->pres_n.exchange(0);
+    const double d = n ? 1000.0 * (double)n : 0.0;   // us -> ms, divided by n
+    prev_ms  = n ? (double)o->pres_prev_us.exchange(0) / d : -1.0;
+    call_ms  = n ? (double)o->pres_call_us.exchange(0) / d : -1.0;
+    total_ms = n ? (double)o->pres_total_us.exchange(0) / d : -1.0;
+    if (!n) { o->pres_prev_us = 0; o->pres_call_us = 0; o->pres_total_us = 0; }
 }
 
 void OverlayTimes(Overlay* o, LONGLONG& present_qpc, LONGLONG& scanout_qpc)

@@ -74,6 +74,7 @@ struct Fg
     // why a real frame produced no generated frame: no pair (sequence gap / reset),
     // DLSS-G raised its disable flag, or a newer slot pre-empted the schedule
     std::atomic<UINT> no_pair{ 0 }, disabled{ 0 }, preempts{ 0 }, gen_shown{ 0 };
+    std::atomic<UINT64> vbw_us{ 0 }, vbw_n{ 0 };   // time the presenter sits in OverlayWaitVBlank
     std::vector<double> spacing, age, pipe;   // guarded by mu; handed over by FgStats
     double eval_ring[256] = {}; unsigned eval_n = 0;   // guarded by mu; generation GPU ms per real frame (FgEvalMs)
     double last_present = 0;
@@ -238,7 +239,11 @@ static void Presenter(Fg* f)
                 }
                 if (f->stop || behind(seq)) return false;
             }
-            if (!OverlayWaitVBlank(f->ov)) { vb = 0; continue; }   // no output: timer pacing from here on
+            LARGE_INTEGER vt0, vt1, vf; QueryPerformanceCounter(&vt0);
+            const bool vok = OverlayWaitVBlank(f->ov);
+            QueryPerformanceCounter(&vt1); QueryPerformanceFrequency(&vf);
+            f->vbw_us += (UINT64)((vt1.QuadPart - vt0.QuadPart) * 1000000 / vf.QuadPart); ++f->vbw_n;
+            if (!vok) { vb = 0; continue; }   // no output: timer pacing from here on
             if (NowMs() + vb * 0.5 >= target) return true;
         }
     };
@@ -442,6 +447,8 @@ void FgStats(Fg* f, FgStatsOut& out)
     out.presented = f->presented.exchange(0); out.drops = f->drops.exchange(0);
     out.no_pair = f->no_pair.exchange(0); out.disabled = f->disabled.exchange(0);
     out.preempts = f->preempts.exchange(0); out.gen_shown = f->gen_shown.exchange(0);
+    { const UINT64 n = f->vbw_n.exchange(0); const UINT64 us = f->vbw_us.exchange(0);
+      out.vblank_wait_ms = n ? (double)us / (1000.0 * (double)n) : -1.0; }
     std::lock_guard<std::mutex> lk(f->mu);
     out.spacing_ms.swap(f->spacing); out.age_ms.swap(f->age); out.pipe_ms.swap(f->pipe);
     f->spacing.clear(); f->age.clear(); f->pipe.clear();

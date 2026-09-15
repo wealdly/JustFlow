@@ -66,7 +66,7 @@ const Setting kSettings[] = {
     { 4, L"ui", L"hud_scale",         L"HUD size",           Int,   nullptr, L"3" },
     { 4, L"ui", L"toast",             L"Toasts",             Bool,  nullptr, L"1" },
     { 4, L"ui", L"toast_scale",       L"Toast size",         Int,   nullptr, L"4" },
-    { 4, L"overlay", L"mode",         L"Overlay",            Enum,  L"composed|direct", L"composed" },
+    { 4, L"overlay", L"mode",         L"Overlay",            Enum,  L"composed|direct|flip", L"composed" },
     { 4, L"capture", L"cursor",       L"Capture cursor",     Bool,  nullptr, L"0" },
     { 4, L"capture", L"border",       L"Capture border",     Bool,  nullptr, L"0" },
 

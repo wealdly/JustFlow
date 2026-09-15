@@ -152,7 +152,8 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.fg_mv_dilated = B(L"fg", L"mv_dilated", c.fg_mv_dilated);
     c.fg_phase_ms = F(L"fg", L"phase_ms", c.fg_phase_ms);
 
-    c.overlay_direct = S(L"overlay", L"mode", c.overlay_direct ? L"direct" : L"composed") == L"direct";
+    const std::wstring om = S(L"overlay", L"mode", c.overlay_mode == 2 ? L"flip" : c.overlay_mode == 1 ? L"direct" : L"composed");
+    c.overlay_mode = om == L"flip" ? 2 : om == L"direct" ? 1 : 0;
     c.exclude_from_capture = B(L"overlay", L"exclude_from_capture", c.exclude_from_capture);
     c.reassert_topmost_every = I(L"overlay", L"reassert_topmost_every", c.reassert_topmost_every);
 
@@ -180,7 +181,7 @@ bool ConfigNeedsRebuild(const Config& a, const Config& b)
 
 bool ConfigNeedsRestart(const Config& a, const Config& b)
 {
-    return a.dda != b.dda || a.overlay_direct != b.overlay_direct || a.cursor != b.cursor ||
+    return a.dda != b.dda || a.overlay_mode != b.overlay_mode || a.cursor != b.cursor ||
            a.border != b.border || a.window_class != b.window_class || a.window_title != b.window_title;
 }
 

@@ -20,7 +20,7 @@ struct Overlay;
 
 struct HotkeyDef { int id; UINT mods; UINT vk; };   // mods = MOD_CONTROL|MOD_ALT|MOD_SHIFT (MOD_NOREPEAT added)
 
-Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, bool direct);
+Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, int mode);
 void     OverlayDestroy(Overlay* o);
 bool     OverlayIsDirect(const Overlay* o);   // the mode actually in effect (after fallback)
 
@@ -52,3 +52,6 @@ bool OverlaySetHotkeys(Overlay* o, const HotkeyDef* keys, int nkeys);
 HWND OverlayHwnd(Overlay* o);
 // QPC of the last successful Present call and DXGI frame statistics scanout QPC (0 if unknown).
 void OverlayTimes(Overlay* o, LONGLONG& present_qpc, LONGLONG& scanout_qpc);
+// Mean wall time of one OverlayPresent since the last call, split into: waiting for the previous
+// copy to retire, the Present() call itself, and the whole function. -1 = nothing presented.
+void OverlayPresentStats(Overlay* o, double& prev_ms, double& call_ms, double& total_ms);
