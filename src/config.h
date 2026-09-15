@@ -60,10 +60,8 @@ struct Config
     bool  fg_mv_dilated = true;            // DLSS-G motionVectorsDilated (see fg.cpp Evaluate)
     float fg_phase_ms = 0.0f;              // shifts every scheduled present target (negative = earlier); live (F11)
     // [overlay] (app layer)
-    // mode: 0 composed (layered, DWM-composed) | 1 direct (monitor-sized; falls back to layered if
-    // the click-through self-test fails) | 2 flip (monitor-sized, NEVER layered, so DWM can grant
-    // independent flip - the only mode that can present faster than the compositor composes a
-    // layered 4K surface. Clicks may not pass through in flip.)
+    // mode: 0 composed (layered, DWM-composed) | 1 direct (monitor-sized, no redirection bitmap;
+    // falls back to layered when the click-through self-test fails). Both stay click-through.
     int   overlay_mode = 0;
     bool  exclude_from_capture = false;
     int   reassert_topmost_every = 300;

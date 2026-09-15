@@ -76,6 +76,8 @@ bool   GpuBegin(Gpu& g);
 UINT64 GpuEnd(Gpu& g);
 bool   GpuWait(Gpu& g, ID3D12Fence* f, UINT64 v, DWORD ms);
 inline bool GpuWaitIdle(Gpu& g, DWORD ms = 5000) { return GpuWait(g, g.fence, g.fence_value, ms); }
+// This process's local video memory, MB. False = the adapter would not answer.
+bool GpuVram(Gpu& g, double& used_mb, double& budget_mb);
 void   GpuLogDeviceRemoved(Gpu& g, const char* where);
 
 // ---- secondary context ------------------------------------------------------------------------

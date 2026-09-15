@@ -33,7 +33,6 @@ struct Overlay
     UINT   w = 0, h = 0, flags = 0, present_flags = 0;
     bool   revealed = false, shown = false, exclude = false, direct = false;
     bool   layered = true;              // WS_EX_LAYERED|WS_EX_TRANSPARENT added after the swapchain (composed, or direct after a FAILed self-test)
-    bool   flip = false;                // mode=flip: never add the layered style, whatever the self-test says
     RECT   mon = {};                    // direct: the monitor rect the window covers
     HWND   probe_hit = nullptr;         // cross-thread WindowFromPoint result of the self-test
     HotkeyDef keys[kMaxHot] = {};
@@ -177,12 +176,8 @@ static DWORD WINAPI WindowThread(LPVOID p)
         // Self-test FAIL: keep the monitor-sized window without a redirection bitmap and add the
         // layered style after the swapchain like composed does (direct_layered) - click-through is
         // then guaranteed; whether DWM still grants independent flip is for PresentMon to say.
-        // flip: skip the self-test and stay non-layered. WS_EX_LAYERED is what forces DWM to compose
-        // the window, and composing a 4K layered surface is the present-rate ceiling; without it DWM
-        // can grant independent flip. The cost is that clicks may land on the overlay.
-        o->layered = o->flip ? false : !ClickThroughOk(o);
-        if (o->flip) Log("[present] mode=flip: non-layered, independent-flip capable - clicks may NOT pass through to the game");
-        else if (o->layered) Log("[present] direct mode continues as direct_layered (monitor-sized, no redirection bitmap, layered click-through)");
+        o->layered = !ClickThroughOk(o);
+        if (o->layered) Log("[present] direct mode continues as direct_layered (monitor-sized, no redirection bitmap, layered click-through)");
     }
     if (!o->hwnd)
     {
@@ -222,7 +217,7 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
 {
     Overlay* o = new Overlay();
     o->g = &g; o->target = target; o->w = w; o->h = h; o->exclude = exclude_from_capture;
-    o->direct = mode != 0; o->flip = mode == 2;
+    o->direct = mode != 0;
     o->nkeys = nkeys < kMaxHot ? nkeys : kMaxHot;
     for (int i = 0; i < o->nkeys; ++i) o->keys[i] = keys[i];
     o->ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -283,7 +278,7 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
         SetWindowPos(o->hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);   // never activate: the game drops to its background fps cap when it loses focus
     }
     if (target) OverlayFollow(o, 0);
-    const char* mode_name = !o->direct ? "composed" : o->flip ? "flip" : o->layered ? "direct_layered" : "direct";
+    const char* mode_name = !o->direct ? "composed" : o->layered ? "direct_layered" : "direct";
     Log("[present] overlay %ux%u ready (flip-discard%s, %s%s, own present queue)", w, h, tearing ? ", tearing" : "", mode_name, exclude_from_capture ? ", excluded from capture" : "");
     Log("[stats] present_mode=%s", mode_name);
     return o;

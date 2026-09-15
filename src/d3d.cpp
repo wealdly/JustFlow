@@ -160,6 +160,17 @@ static bool WaitFence(ID3D12Fence* f, UINT64 v, HANDLE ev, DWORD ms, bool& faile
 }
 
 bool GpuWait(Gpu& g, ID3D12Fence* f, UINT64 v, DWORD ms) { return WaitFence(f, v, g.fence_event, ms, g.failed); }
+
+// Driver-reported local (device) video memory for THIS process. CurrentUsage counts every D3D12
+// resource we hold, so a leak shows up here as a number that climbs and never comes back down.
+bool GpuVram(Gpu& g, double& used_mb, double& budget_mb)
+{
+    DXGI_QUERY_VIDEO_MEMORY_INFO vm = {};
+    if (!g.adapter || FAILED(g.adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vm))) return false;
+    used_mb = (double)vm.CurrentUsage / (1024.0 * 1024.0);
+    budget_mb = (double)vm.Budget / (1024.0 * 1024.0);
+    return true;
+}
 bool GpuCtxWait(GpuCtx& c, ID3D12Fence* f, UINT64 v, DWORD ms) { return WaitFence(f, v, c.event, ms, c.failed); }
 
 bool GpuBegin(Gpu& g)
