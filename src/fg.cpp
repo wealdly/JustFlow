@@ -29,7 +29,9 @@ static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_
 static const D3D12_RESOURCE_STATES UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 static const D3D12_RESOURCE_STATES CSRC = D3D12_RESOURCE_STATE_COPY_SOURCE;
 static const D3D12_RESOURCE_STATES CDST = D3D12_RESOURCE_STATE_COPY_DEST;
-static const int kSlots = 3, kMaxGen = 3;
+// 5 slots: with 3, one slot presenting plus two ready left nothing free and the main thread
+// blocked in FgRecord waiting for the presenter to retire one (measured ~7 ms per frame).
+static const int kSlots = 5, kMaxGen = 3;
 
 // Rest states: real CSRC, mv CDST, gen[] CSRC, depth NPSR, disable UAV. state: 0 free, 1 writing
 // (producer), 2 ready, 3 presenting; guarded by Fg::mu.
@@ -75,6 +77,7 @@ struct Fg
     // DLSS-G raised its disable flag, or a newer slot pre-empted the schedule
     std::atomic<UINT> no_pair{ 0 }, disabled{ 0 }, preempts{ 0 }, gen_shown{ 0 };
     std::atomic<UINT64> vbw_us{ 0 }, vbw_n{ 0 };   // time the presenter sits in OverlayWaitVBlank
+    std::atomic<UINT>   vbw_fail{ 0 };            // waitable timeouts (transient: no longer demotes pacing)
     std::vector<double> spacing, age, pipe;   // guarded by mu; handed over by FgStats
     double eval_ring[256] = {}; unsigned eval_n = 0;   // guarded by mu; generation GPU ms per real frame (FgEvalMs)
     double last_present = 0;
@@ -212,21 +215,15 @@ static void Presenter(Fg* f)
     double vb = f->vblank ? OverlayVBlankMs(f->ov) : 0;   // 0 = timer pacing
     UINT64 prev = 0; double prev_real_target = 0;
     auto newer_ready = [&](UINT64 seq) { for (auto& x : f->slots) if (x.state == 2 && x.seq > seq) return true; return false; };
-    // A newer slot is ready in NORMAL steady state - the producer records the next real frame while
-    // we are still evaluating this one - so "newer exists" is not "we are late", and cancelling a
-    // generated frame on it threw away every frame we had just paid to generate (fg_preempt was the
-    // whole deficit). Only a deeper backlog means real lag: kSlots is 3, so two ready slots behind
-    // this one is a full real frame of catch-up owed. Staleness is still caught per frame below.
-    auto behind = [&](UINT64 seq)
-    {
-        if (seq == UINT64_MAX) return false;            // the real frame is never pre-empted
-        int n = 0;
-        for (auto& x : f->slots) if (x.state == 2 && x.seq > seq) ++n;
-        return n >= 2;
-    };
+    // Pre-emption is gone. Cancelling a generated frame because another slot is ready threw away a
+    // frame DLSS-G had already been paid to make, and it bought nothing: a present costs 0.20 ms
+    // (measured pres_ms), so showing it does not delay the real frame in any way that matters. It
+    // was the entire FG deficit - fg_preempt sat at ~180 per window, one per real frame, while
+    // fg_gen sat at 0. Falling behind is handled where it belongs, by the staleness gate below,
+    // which skips a generated frame that is already later than half a slot.
     // Blocks until `target` (NowMs clock): vblank mode returns right after the vblank nearest the
-    // target, timer mode at the target. False = pre-empted (stop, or a slot newer than `seq` is ready).
-    auto wait_until = [&](double target, UINT64 seq) -> bool
+    // target, timer mode at the target. False = stop only.
+    auto wait_until = [&](double target) -> bool
     {
         for (;;)
         {
@@ -235,15 +232,19 @@ static void Presenter(Fg* f)
                 if (vb <= 0)
                 {
                     const auto deadline = clock::now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double, std::milli>(target - NowMs()));
-                    return !f->cv.wait_until(lk, deadline, [&] { return f->stop || behind(seq); });
+                    return !f->cv.wait_until(lk, deadline, [&] { return (bool)f->stop; });
                 }
-                if (f->stop || behind(seq)) return false;
+                if (f->stop) return false;
             }
             LARGE_INTEGER vt0, vt1, vf; QueryPerformanceCounter(&vt0);
             const bool vok = OverlayWaitVBlank(f->ov);
             QueryPerformanceCounter(&vt1); QueryPerformanceFrequency(&vf);
             f->vbw_us += (UINT64)((vt1.QuadPart - vt0.QuadPart) * 1000000 / vf.QuadPart); ++f->vbw_n;
-            if (!vok) { vb = 0; continue; }   // no output: timer pacing from here on
+            // A failed wait is almost always transient (the waitable only signals when a present
+            // retires, so a skipped frame or a hidden overlay starves it). Demoting the whole
+            // session to timer pacing on the first one was silent and never recovered; just fall
+            // through to the target check and try again next time.
+            if (!vok) { if (++f->vbw_fail % 240 == 1) Log("[fg] vblank wait timed out (%u so far) - pacing on the target clock this frame", (unsigned)f->vbw_fail); }
             if (NowMs() + vb * 0.5 >= target) return true;
         }
     };
@@ -278,7 +279,7 @@ static void Presenter(Fg* f)
                 for (int i = 0; i < f->count; ++i)
                 {
                     const double target = anchor + i * L + ph;
-                    if (!wait_until(target, s->seq)) { preempted = true; ++f->preempts; break; }
+                    if (!wait_until(target)) { preempted = true; ++f->preempts; break; }
                     if (NowMs() - target > L * 0.5 + vb * 0.5) { ++f->drops; continue; }   // stale: skip, never burst
                     if (!Present(f, s->gen[i], s, false)) { ok = false; break; }
                     ++f->gen_shown;
@@ -286,7 +287,7 @@ static void Presenter(Fg* f)
                 real_target = preempted ? NowMs() : anchor + f->count * L;
             }
             // The real frame is never skipped for lateness: only `stop` interrupts (seq MAX = no pre-emption).
-            if (ok && wait_until(real_target + ph, UINT64_MAX)) ok = Present(f, s->real, s, true);
+            if (ok && wait_until(real_target + ph)) ok = Present(f, s->real, s, true);
             prev_real_target = real_target;
         }
         prev = s->seq;
