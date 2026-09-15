@@ -36,8 +36,16 @@ builds into `build\`. Shaders are compiled by fxc at build time.
 ```
 justflow.exe                        auto-picks a profile from profiles\ (see below)
 justflow.exe --ini profiles\valheim.ini
+justflow.exe --settings              the settings window on its own, no GPU and no game
+justflow.exe --preset 2              write a quality preset into the profile (0..3) and exit
 justflow.exe --bench frame.png --frames 120   pipeline timing on a PNG, no game needed
 ```
+
+Nothing has to be edited by hand: **Settings...** in the tray menu opens a tabbed window over the
+same keys (Quality, Look, Frame gen, Performance, Display), writes each one to the file it belongs
+in, and reloads. **Quality** in the same menu sets the four cost dials at once - High performance,
+Performance, Balanced, Quality (model resolution, ArtCNN, sharpen, flow resolution). No preset
+touches the look dials, and none sets a frame-rate cap.
 
 Two ini files, both next to the exe:
 
@@ -46,15 +54,15 @@ Two ini files, both next to the exe:
   `gpu_timestamps` / `selftest`, `[app] profile` (startup profile: `auto` or a profile name),
   `[ofa] dll_path`, `[nr] create_style` / `param_block`.
 - `profiles\<game>.ini` — **game settings**: `[capture]` (mode, window match, cursor, border),
-  `[nr]` (work size, look, mode, warp, caps, sharpen...), `[ofa]` input/grid/cost_reject/zero_below,
+  `[nr]` (work size, look, mode, warp, caps, sharpen...), `[ofa]` input/grid/zero_below,
   `[ui]` mask/mask_every/feather/rectN, `[fg]`, and `[log] file`.
 
 Each key is read from its own file only; an app key left in a profile is ignored and the log names
 it. Profiles `wow`, `valheim`, `dawnwalker` ship. Without `--ini` (and with `[app] profile=auto`),
 the first profile whose game window is open right now is used, else `wow`, else the first one.
 The tray menu switches profiles live, toggles the effect and frame generation, sets the FG
-multiplier, opens the profile, the app settings and the log, and edits the hotkeys (written to
-`justflow.ini`).
+multiplier and the quality preset, opens the settings and hotkey windows, and opens either ini
+and the log for hand editing.
 
 Keys (configurable in `justflow.ini` and the tray menu): F9 toggle the effect, F10 cycle the
 before/after wipe, F8 frame generation, F11 reload both files, F7 status HUD, Ctrl+F12 quit.

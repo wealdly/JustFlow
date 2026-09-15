@@ -1,15 +1,14 @@
 // OFA flow grid (R16G16_SINT, S10.5, units = OFA-input pixels) -> motion vectors (R16G16_FLOAT,
-// mw x mh, units = work-resolution pixels). Bilinear over the grid cells; zeroed on reset, below
-// zero_below px, or (use_cost) when any of the 4 cells has cost > cost_reject.
+// mw x mh, units = work-resolution pixels). Bilinear over the grid cells; zeroed on reset or below
+// zero_below px.
 Texture2D<int2>     flow : register(t0);
-Texture2D<uint>     cost : register(t1);   // may be a stand-in when use_cost == 0
 RWTexture2D<float2> mv   : register(u0);
 cbuffer C : register(b0)
 {
     uint  fw, fh, ofa_w, ofa_h;
     uint  mw, mh, grid;
     float zero_below;
-    uint  cost_reject, use_cost, reset;
+    uint  reset;
 };
 
 [numthreads(8, 8, 1)]
@@ -25,8 +24,5 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     float2 v = lerp(lerp(float2(flow[c00]), float2(flow[c10]), t.x),
                     lerp(float2(flow[c01]), float2(flow[c11]), t.x), t.y);
     v = v / 32.0 * float2(mw, mh) / float2(ofa_w, ofa_h);
-    bool zero = reset || length(v) < zero_below;
-    if (use_cost)
-        zero = zero || max(max(cost[c00], cost[c10]), max(cost[c01], cost[c11])) > cost_reject;
-    mv[id.xy] = zero ? float2(0, 0) : v;
+    mv[id.xy] = reset || length(v) < zero_below ? float2(0, 0) : v;
 }

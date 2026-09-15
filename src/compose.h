@@ -17,10 +17,9 @@ void CsGray(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* s
 void CsDownscale(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, UINT w, UINT h, ID3D12Resource* dst, UINT dw, UINT dh);
 // OFA flow R16G16_SINT (fw x fh cells, S10.5, units = OFA-input pixels) -> R16G16_FLOAT motion
 // vectors (mw x mh) in work-resolution pixels: v = flow/32 * (mw/ofa_w, mh/ofa_h), bilinear over
-// the grid, zeroed below `zero_below` px or when `reset`. cost R8_UINT optional (nullptr = none):
-// cells with cost > cost_reject (0 = off) are zeroed.
-void CsExpand(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* flow, ID3D12Resource* cost, UINT fw, UINT fh, UINT ofa_w, UINT ofa_h,
-              ID3D12Resource* dst_mv, UINT mw, UINT mh, float zero_below, UINT cost_reject, bool reset);
+// the grid, zeroed below `zero_below` px or when `reset`.
+void CsExpand(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* flow, UINT fw, UINT fh, UINT ofa_w, UINT ofa_h,
+              ID3D12Resource* dst_mv, UINT mw, UINT mh, float zero_below, bool reset);
 
 struct UiRect { int x0, y0, x1, y1; };
 struct ComposeParams

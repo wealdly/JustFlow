@@ -89,7 +89,7 @@ Shaders* ShadersCreate(Gpu& g)
     ok &= GpuMakeCompute(g, g_cs_swizzle,   sizeof g_cs_swizzle,   1, 1, 2,  s->swizzle,   L"cs_swizzle");
     ok &= GpuMakeCompute(g, g_cs_gray,      sizeof g_cs_gray,      1, 1, 6,  s->gray,      L"cs_gray");
     ok &= GpuMakeCompute(g, g_cs_downscale, sizeof g_cs_downscale, 1, 1, 4,  s->downscale, L"cs_downscale");
-    ok &= GpuMakeCompute(g, g_cs_expand,    sizeof g_cs_expand,    2, 1, 11, s->expand,    L"cs_expand");
+    ok &= GpuMakeCompute(g, g_cs_expand,    sizeof g_cs_expand,    1, 1,  9, s->expand,    L"cs_expand");
     ok &= GpuMakeCompute(g, g_cs_compose,   sizeof g_cs_compose,   4, 1, 11, s->compose,   L"cs_compose");
     ok &= GpuMakeCompute(g, g_cs_residual,  sizeof g_cs_residual,  2, 1, 2,  s->residual,  L"cs_residual");
     ok &= GpuMakeCompute(g, g_cs_compose_residual, sizeof g_cs_compose_residual, 4, 1, 12, s->compose_residual, L"cs_compose_residual");
@@ -156,15 +156,14 @@ void CsDownscale(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resour
     GpuDispatch(g, cl, s->downscale, &srv, &uav, c, GpuGroups(dw, 8), GpuGroups(dh, 8));
 }
 
-void CsExpand(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* flow, ID3D12Resource* cost, UINT fw, UINT fh, UINT ofa_w, UINT ofa_h,
-              ID3D12Resource* dst_mv, UINT mw, UINT mh, float zero_below, UINT cost_reject, bool reset)
+void CsExpand(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* flow, UINT fw, UINT fh, UINT ofa_w, UINT ofa_h,
+              ID3D12Resource* dst_mv, UINT mw, UINT mh, float zero_below, bool reset)
 {
-    struct { UINT fw, fh, ofa_w, ofa_h, mw, mh, grid; float zero_below; UINT cost_reject, use_cost, reset; } c =
-        { fw, fh, ofa_w, ofa_h, mw, mh, (ofa_w + fw - 1) / fw, zero_below, cost_reject, cost && cost_reject ? 1u : 0u, reset ? 1u : 0u };
-    const GpuView srv[2] = { { flow, DXGI_FORMAT_R16G16_SINT },
-                             cost ? GpuView{ cost, DXGI_FORMAT_R8_UINT } : GpuView{ flow, DXGI_FORMAT_R16G16_SINT } };
+    struct { UINT fw, fh, ofa_w, ofa_h, mw, mh, grid; float zero_below; UINT reset; } c =
+        { fw, fh, ofa_w, ofa_h, mw, mh, (ofa_w + fw - 1) / fw, zero_below, reset ? 1u : 0u };
+    const GpuView srv = { flow, DXGI_FORMAT_R16G16_SINT };
     const GpuView uav = { dst_mv, DXGI_FORMAT_R16G16_FLOAT };
-    GpuDispatch(g, cl, s->expand, srv, &uav, &c, GpuGroups(mw, 8), GpuGroups(mh, 8));
+    GpuDispatch(g, cl, s->expand, &srv, &uav, &c, GpuGroups(mw, 8), GpuGroups(mh, 8));
 }
 
 // Refill rect_tex from this slot's upload buffer (recorded into cl). Returns the clamped rect count.

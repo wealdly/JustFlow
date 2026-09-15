@@ -33,6 +33,9 @@ struct Tray;
 Tray* TrayCreate(const wchar_t* app_name, const wchar_t* icon_path_or_null);   // null = generated icon
 void  TrayDestroy(Tray*);
 void  TraySetProfiles(Tray*, const wchar_t* const* names, int count);          // Profiles submenu (radio)
+// The two ini files the Settings dialog and the quality presets write to. Call again on a profile
+// switch; a write is always followed by a TrayReload event.
+void  TraySetPaths(Tray*, const wchar_t* app_ini, const wchar_t* profile_ini);
 void  TraySetState(Tray*, const TrayState&);                                    // check marks + tooltip
 bool  TrayPoll(Tray*, TrayEvent& ev, int& arg);                                 // one event per call
 void  TrayNotify(Tray*, const wchar_t* title, const wchar_t* text);             // balloon (NIIF_INFO)

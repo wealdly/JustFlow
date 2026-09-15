@@ -10,7 +10,7 @@
 
 #pragma comment(lib, "version.lib")
 
-static const int kIn = 5, kOut = 3;   // input slots (0/1 per frame, 2..4 held); reg[] = inputs[0..kIn-1], then flow[i], cost[i] per pair
+static const int kIn = 5, kOut = 3;   // input slots (0/1 per frame, 2..4 held); reg[] = inputs[0..kIn-1], then flow[i]
 struct Ofa
 {
     Gpu* g = nullptr;
@@ -21,7 +21,6 @@ struct Ofa
     UINT64 value = 0;
     ID3D12Resource* inputs[kIn] = {};
     ID3D12Resource* flow[kOut] = {};
-    ID3D12Resource* cost[kOut] = {};
     NvOFGPUBufferHandle reg[kIn + 2 * kOut] = {};
     UINT w = 0, h = 0, grid = 0, fw = 0, fh = 0;
     int current = 0;
@@ -135,8 +134,7 @@ Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid, const wchar_t* dll_override)
         if (w < minw[0] || h < minh[0] || w > maxw[0] || h > maxh[0]) { Log("[ofa] %ux%u out of range", w, h); OfaDestroy(o); return nullptr; }
     }
     if (!FormatSupported(o, NV_OF_BUFFER_USAGE_INPUT, DXGI_FORMAT_R8_UNORM, "input") ||
-        !FormatSupported(o, NV_OF_BUFFER_USAGE_OUTPUT, DXGI_FORMAT_R16G16_SINT, "flow") ||
-        !FormatSupported(o, NV_OF_BUFFER_USAGE_COST, DXGI_FORMAT_R8_UINT, "cost"))
+        !FormatSupported(o, NV_OF_BUFFER_USAGE_OUTPUT, DXGI_FORMAT_R16G16_SINT, "flow"))
     { OfaDestroy(o); return nullptr; }
 
     NV_OF_INIT_PARAMS ip = {};
@@ -144,7 +142,7 @@ Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid, const wchar_t* dll_override)
     ip.outGridSize = (NV_OF_OUTPUT_VECTOR_GRID_SIZE)o->grid;
     ip.mode = NV_OF_MODE_OPTICALFLOW;
     ip.perfLevel = NV_OF_PERF_LEVEL_FAST;
-    ip.enableOutputCost = NV_OF_TRUE;
+    ip.enableOutputCost = NV_OF_FALSE;   // a cost threshold rejects correct motion and misses low-cost errors (docs/)
     ip.predDirection = NV_OF_PRED_DIRECTION_FORWARD;
     ip.inputBufferFormat = NV_OF_BUFFER_FORMAT_GRAYSCALE8;
     st = o->api.nvOFInit(o->session, &ip);
@@ -153,18 +151,15 @@ Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid, const wchar_t* dll_override)
     if (FAILED(g.dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), (void**)&o->fence))) { Log("[ofa] fence failed"); OfaDestroy(o); return nullptr; }
     o->fw = (w + o->grid - 1) / o->grid; o->fh = (h + o->grid - 1) / o->grid;
     const wchar_t* in_names[kIn] = { L"ofa_in0", L"ofa_in1", L"ofa_in2", L"ofa_in3", L"ofa_in4" };
-    const wchar_t* flow_names[kOut] = { L"ofa_flow", L"ofa_flow2", L"ofa_flow3" }, *cost_names[kOut] = { L"ofa_cost", L"ofa_cost2", L"ofa_cost3" };
+    const wchar_t* flow_names[kOut] = { L"ofa_flow", L"ofa_flow2", L"ofa_flow3" };
     for (int i = 0; i < kIn; ++i)
         o->inputs[i] = GpuMakeTex(g, w, h, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, in_names[i]);
     for (int i = 0; i < kOut; ++i)
-    {
         o->flow[i] = GpuMakeTex(g, o->fw, o->fh, DXGI_FORMAT_R16G16_SINT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, flow_names[i]);
-        o->cost[i] = GpuMakeTex(g, o->fw, o->fh, DXGI_FORMAT_R8_UINT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, cost_names[i]);
-    }
-    ID3D12Resource* res[kIn + 2 * kOut];
+    ID3D12Resource* res[kIn + kOut];
     for (int i = 0; i < kIn; ++i) res[i] = o->inputs[i];
-    for (int i = 0; i < kOut; ++i) { res[kIn + 2 * i] = o->flow[i]; res[kIn + 2 * i + 1] = o->cost[i]; }
-    for (int i = 0; i < kIn + 2 * kOut; ++i)
+    for (int i = 0; i < kOut; ++i) res[kIn + i] = o->flow[i];
+    for (int i = 0; i < kIn + kOut; ++i)
     {
         if (!res[i]) { OfaDestroy(o); return nullptr; }
         NV_OF_REGISTER_RESOURCE_PARAMS_D3D12 rp = {};
@@ -175,7 +170,7 @@ Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid, const wchar_t* dll_override)
         if (st != NV_OF_SUCCESS) { --o->value; Fail(o, "nvOFRegisterResourceD3D12", st); OfaDestroy(o); return nullptr; }
         if (!GpuWait(g, o->fence, o->value, 30000)) { Log("[ofa] register fence timeout"); OfaDestroy(o); return nullptr; }
     }
-    Log("[ofa] active %ux%u grid=%u flow=%ux%u R16G16_SINT cost=R8_UINT perf=FAST", w, h, o->grid, o->fw, o->fh);
+    Log("[ofa] active %ux%u grid=%u flow=%ux%u R16G16_SINT perf=FAST", w, h, o->grid, o->fw, o->fh);
     return o;
 }
 
@@ -194,7 +189,6 @@ void OfaDestroy(Ofa* o)
         }
     for (ID3D12Resource*& r : o->inputs) if (r) { r->Release(); r = nullptr; }
     for (ID3D12Resource*& r : o->flow) if (r) { r->Release(); r = nullptr; }
-    for (ID3D12Resource*& r : o->cost) if (r) { r->Release(); r = nullptr; }
     if (o->session) { o->api.nvOFDestroy(o->session); o->session = nullptr; }
     if (o->fence) { o->fence->Release(); o->fence = nullptr; }
     if (o->lib) FreeLibrary(o->lib);
@@ -209,11 +203,8 @@ ID3D12Resource* OfaFlow(Ofa* o)             { return o->flow[0]; }
 UINT            OfaFlowWidth(Ofa* o)        { return o->fw; }
 UINT            OfaFlowHeight(Ofa* o)       { return o->fh; }
 UINT            OfaGrid(Ofa* o)             { return o->grid; }
-ID3D12Resource* OfaCost(Ofa* o)             { return o->cost[0]; }
 ID3D12Resource* OfaFlow2(Ofa* o)            { return o->flow[1]; }
-ID3D12Resource* OfaCost2(Ofa* o)            { return o->cost[1]; }
 ID3D12Resource* OfaFlow3(Ofa* o)            { return o->flow[2]; }
-ID3D12Resource* OfaCost3(Ofa* o)            { return o->cost[2]; }
 
 UINT64 OfaExecuteRef(Ofa* o, ID3D12Fence* in_fence, UINT64 in_value, int input_idx, int ref_idx, int out_pair, bool reset)
 {
@@ -227,7 +218,7 @@ UINT64 OfaExecuteRef(Ofa* o, ID3D12Fence* in_fence, UINT64 in_value, int input_i
     in.disableTemporalHints = NV_OF_TRUE;
     in.numFencePoints = 1; in.fencePoint = &ready;
     NV_OF_EXECUTE_OUTPUT_PARAMS_D3D12 out = {};
-    out.outputBuffer = o->reg[kIn + 2 * out_pair]; out.outputCostBuffer = o->reg[kIn + 2 * out_pair + 1]; out.fencePoint = &done;
+    out.outputBuffer = o->reg[kIn + out_pair]; out.fencePoint = &done;
     const NV_OF_STATUS st = o->api.nvOFExecuteD3D12(o->session, &in, &out);
     if (st != NV_OF_SUCCESS) { --o->value; Fail(o, "nvOFExecuteD3D12", st); return 0; }
     return o->value;

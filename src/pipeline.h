@@ -94,7 +94,7 @@ struct Pipeline
     // nor cmp_held (main's flow reference until it moves to a newer residual); the model thread only
     // reads them, and asks for the next frame once its flow has consumed them.
     struct ModelFrame { int held = 2; UINT64 fence = 0; UINT index = 0; bool reset = true; };
-    struct ModelParams { float zero_below = 0.5f; UINT cost_reject = 0; float exposure = 1.0f; int max_fps = 0, warmup = 8; bool artcnn = false; };
+    struct ModelParams { float zero_below = 0.5f; float exposure = 1.0f; int max_fps = 0, warmup = 8; bool artcnn = false; };
     GpuCtx     model_ctx;
     std::thread model_thread;
     std::mutex model_mu; std::condition_variable model_cv;   // guards model_stop/model_frame_ready/model_frame/model_params

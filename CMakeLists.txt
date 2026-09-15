@@ -63,7 +63,7 @@ add_custom_command(TARGET justflow_spike POST_BUILD
 if(EXISTS ${CMAKE_SOURCE_DIR}/src/main.cpp AND EXISTS ${CMAKE_SOURCE_DIR}/src/compose.cpp)
 add_executable(justflow
     src/main.cpp src/d3d.cpp src/capture.cpp src/present.cpp src/ngx_nr.cpp
-    src/nvofa.cpp src/compose.cpp src/bench.cpp src/config.cpp src/fg.cpp src/tray.cpp)
+    src/nvofa.cpp src/compose.cpp src/bench.cpp src/config.cpp src/fg.cpp src/tray.cpp src/settings.cpp)
 add_dependencies(justflow shaders nvngx_dll_justflow)
 target_include_directories(justflow PRIVATE src ${CMAKE_BINARY_DIR}/gen third_party/ngx/include third_party/nvofa "${CPPWINRT_INC}")
 target_link_directories(justflow PRIVATE third_party/ngx/lib)

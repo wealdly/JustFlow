@@ -23,6 +23,8 @@ static bool IsAppKey(const wchar_t* sec, const wchar_t* key)
     return false;
 }
 
+bool ConfigIsAppKey(const wchar_t* sec, const wchar_t* key) { return IsAppKey(sec, key); }
+
 std::wstring ConfigStrayKeys(const wchar_t* profile)
 {
     std::wstring out;
@@ -121,7 +123,6 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     if (swscanf_s(in.c_str(), L"%ux%u", &c.ofa_w, &c.ofa_h) != 2) { c.ofa_w = 960; c.ofa_h = 540; }
     const std::wstring grid = S(L"ofa", L"grid", L"auto");
     c.ofa_grid = grid == L"auto" ? 0 : _wtoi(grid.c_str());
-    c.cost_reject = (UINT)I(L"ofa", L"cost_reject", (int)c.cost_reject);
     c.zero_below = F(L"ofa", L"zero_below", c.zero_below);
     c.ofa_dll = S(L"ofa", L"dll_path", L"");
 
@@ -148,7 +149,6 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.fg_pacing_vblank = S(L"fg", L"pacing", c.fg_pacing_vblank ? L"vblank" : L"timer") != L"timer";
     c.fg_mv_dilated = B(L"fg", L"mv_dilated", c.fg_mv_dilated);
     c.fg_phase_ms = F(L"fg", L"phase_ms", c.fg_phase_ms);
-    c.fg_anchor_delay_slots = I(L"fg", L"anchor_delay_slots", c.fg_anchor_delay_slots);
 
     c.overlay_direct = S(L"overlay", L"mode", c.overlay_direct ? L"direct" : L"composed") == L"direct";
     c.exclude_from_capture = B(L"overlay", L"exclude_from_capture", c.exclude_from_capture);

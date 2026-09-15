@@ -38,7 +38,6 @@ struct Config
     // [ofa]
     UINT  ofa_w = 960, ofa_h = 540;
     int   ofa_grid = 0;
-    UINT  cost_reject = 0;
     float zero_below = 0.5f;
     std::wstring ofa_dll;                  // [app layer]
     // [ui] (toast*/hud* are app layer, the rest profile)
@@ -58,7 +57,6 @@ struct Config
     bool  fg_pacing_vblank = true;         // pacing=vblank | timer
     bool  fg_mv_dilated = true;            // DLSS-G motionVectorsDilated (see fg.cpp Evaluate)
     float fg_phase_ms = 0.0f;              // shifts every scheduled present target (negative = earlier); live (F11)
-    int   fg_anchor_delay_slots = 0;       // 1 = first generated frame gets a full slot after the model pass; live (F11)
     // [overlay] (app layer)
     bool  overlay_direct = false;         // mode=composed (layered, DWM-composed) | direct (monitor-sized, independent-flip capable)
     bool  exclude_from_capture = false;
@@ -78,6 +76,9 @@ struct Config
 int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c);
 // "sec.key, sec.key" of app-layer keys present in `profile` (ignored by ConfigLoad); empty = none.
 std::wstring ConfigStrayKeys(const wchar_t* profile);
+// Which file a key belongs in: true = justflow.ini, false = profiles\<game>.ini. The settings UI
+// writes through this so the layer split has one authority (kAppKeys in config.cpp).
+bool ConfigIsAppKey(const wchar_t* sec, const wchar_t* key);
 // True if a key that is latched at CreateFeature differs (work size, style, block, tuning).
 bool ConfigNeedsRebuild(const Config& a, const Config& b);
 // Fills an NrConfig from the config (work size must already be resolved).

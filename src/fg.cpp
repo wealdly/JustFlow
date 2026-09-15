@@ -54,7 +54,7 @@ struct Fg
     UINT     w = 0, h = 0, mw = 0, mh = 0;
     int      count = 1;                      // generated frames per real frame (0 = passthrough)
     bool     vblank = true, mv_dilated = true;
-    std::atomic<double> phase{ 0.0 }; std::atomic<int> anchor_delay{ 0 };   // FgSetTiming (main) -> Presenter
+    std::atomic<double> phase{ 0.0 };        // FgSetTiming (main) -> Presenter
     std::wstring dir;
     const wchar_t* path_list[1] = {};
     NVSDK_NGX_FeatureCommonInfo common = {};
@@ -249,7 +249,7 @@ static void Presenter(Fg* f)
             const bool gen = interp && allow;
             // phase shifts every present target; the cadence (prev_real_target) stays unshifted so it never accumulates.
             const double ph = f->phase.load(std::memory_order_relaxed);
-            const double anchor = std::max(NowMs() + (gen ? f->anchor_delay.load(std::memory_order_relaxed) * L : 0.0), prev_real_target + L);
+            const double anchor = std::max(NowMs(), prev_real_target + L);
             double real_target = anchor;
             bool preempted = false;
             if (gen)
@@ -416,10 +416,9 @@ double FgEvalMs(Fg* f, double* p95)
     if (p95) *p95 = v[std::min(v.size() - 1, (size_t)(v.size() * 0.95))];
     return v[v.size() / 2];
 }
-void FgSetTiming(Fg* f, double phase_ms, int anchor_delay_slots)
+void FgSetTiming(Fg* f, double phase_ms)
 {
     f->phase.store(std::clamp(phase_ms, -50.0, 50.0), std::memory_order_relaxed);
-    f->anchor_delay.store(std::clamp(anchor_delay_slots, 0, 3), std::memory_order_relaxed);
 }
 void FgStats(Fg* f, FgStatsOut& out)
 {

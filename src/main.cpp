@@ -5,6 +5,7 @@
 #include "capture.h"
 #include "log.h"
 #include "tray.h"
+#include "settings.h"
 #include <shellapi.h>
 #include <algorithm>
 #include <cmath>
@@ -174,7 +175,7 @@ static void ReleaseModelWork(Pipeline* p) { REL(p->nr_in_m); REL(p->nr_in2_m); R
 static void SetModelParams(Pipeline* p, const Config& c)
 {
     std::lock_guard<std::mutex> lk(p->model_mu);
-    p->model_params = { c.zero_below, c.cost_reject, c.exposure_scale, c.model_max_fps, c.warmup, c.artcnn };
+    p->model_params = { c.zero_below, c.exposure_scale, c.model_max_fps, c.warmup, c.artcnn };
 }
 
 // One iteration per handed-over frame: list A (downscale) -> model flow (OFA pair 1, held gray vs the
@@ -224,12 +225,12 @@ static void ModelThread(Pipeline* p, bool create, NrConfig nc)
         // list B. residual[j] may still be read by an in-flight main list: wait for that fence first.
         c.queue->Wait(g.fence, p->residual_read_fence[j].load());
         if (!GpuCtxBegin(g, c)) return fail("ctx begin B");
-        ID3D12Resource* flow = OfaFlow2(ofa); ID3D12Resource* cost = mp.cost_reject ? OfaCost2(ofa) : nullptr;
-        GpuBarrier(c.list, flow, COMMON, NPSR); if (cost) GpuBarrier(c.list, cost, COMMON, NPSR);
+        ID3D12Resource* flow = OfaFlow2(ofa);
+        GpuBarrier(c.list, flow, COMMON, NPSR);
         GpuBarrier(c.list, p->mv_m, NPSR, UAV);
-        CsExpand(g, p->sh, c.list, flow, cost, OfaFlowWidth(ofa), OfaFlowHeight(ofa), p->gw, p->gh, p->mv_m, p->ww, p->wh, mp.zero_below, mp.cost_reject, reset);
+        CsExpand(g, p->sh, c.list, flow, OfaFlowWidth(ofa), OfaFlowHeight(ofa), p->gw, p->gh, p->mv_m, p->ww, p->wh, mp.zero_below, reset);
         GpuBarrier(c.list, p->mv_m, UAV, NPSR);
-        GpuBarrier(c.list, flow, NPSR, COMMON); if (cost) GpuBarrier(c.list, cost, NPSR, COMMON);
+        GpuBarrier(c.list, flow, NPSR, COMMON);
         bool evaluated = false;
         if (nr && NrReady(nr))
         {
@@ -366,7 +367,7 @@ void PipelineReload(Pipeline* p, const Config& c)
     if (c.overlay_direct != p->cfg.overlay_direct) Log("[overlay] mode=%s takes effect on the next capture open / restart (window recreate)", c.overlay_direct ? "direct" : "composed");
     if (c.nr_async != p->cfg.nr_async) { StopModel(p); p->model_failed = false; p->force_reset = true; Log("[nr] mode=%s", c.nr_async ? "async" : "sync"); }
     p->cfg = c;
-    SetModelParams(p, c);   // live keys for the model thread (zero_below, cost_reject, exposure, model_max_fps, warmup)
+    SetModelParams(p, c);   // live keys for the model thread (zero_below, exposure, model_max_fps, warmup)
     if (rebuild && p->nr)
     {
         p->rebuild_countdown = std::max(1, c.rebuild_debounce_frames);
@@ -420,7 +421,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
             if (!p->fg && want > 1) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, 1, c.fg_pacing_vblank, c.fg_mv_dilated); }
             if (!p->fg) { Log("[fg] passthrough presenter create failed"); return false; }
         }
-        FgSetTiming(p->fg, c.fg_phase_ms, c.fg_anchor_delay_slots);   // ponytail: two atomic stores per frame, no reload plumbing
+        FgSetTiming(p->fg, c.fg_phase_ms);   // ponytail: one atomic store per frame, no reload plumbing
     }
     auto stamp = [&](int i) { if (c.gpu_timestamps) GpuStamp(g, cl, i); };
     // async: the residual composed this frame = the newest published one (the queue waits for it once
@@ -527,24 +528,21 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (!GpuBegin(g)) return false;
     p->cpu_wait[2].add(NowMs() - tw);
     ID3D12Resource* flow = OfaFlow(p->ofa);
-    ID3D12Resource* cost = c.cost_reject ? OfaCost(p->ofa) : nullptr;
     GpuBarrier(cl, flow, D3D12_RESOURCE_STATE_COMMON, NPSR);
-    if (cost) GpuBarrier(cl, cost, D3D12_RESOURCE_STATE_COMMON, NPSR);
     GpuBarrier(cl, p->mv, NPSR, UAV);
     stamp(8);
-    CsExpand(g, p->sh, cl, flow, cost, OfaFlowWidth(p->ofa), OfaFlowHeight(p->ofa), p->gw, p->gh, p->mv, p->ww, p->wh, c.zero_below, c.cost_reject, reset);
+    CsExpand(g, p->sh, cl, flow, OfaFlowWidth(p->ofa), OfaFlowHeight(p->ofa), p->gw, p->gh, p->mv, p->ww, p->wh, c.zero_below, reset);
     stamp(9);
     GpuBarrier(cl, p->mv, UAV, NPSR);
     GpuBarrier(cl, flow, NPSR, D3D12_RESOURCE_STATE_COMMON);
-    if (cost) GpuBarrier(cl, cost, NPSR, D3D12_RESOURCE_STATE_COMMON);
     if (warp_res)
     {
-        ID3D12Resource* flow3 = OfaFlow3(p->ofa); ID3D12Resource* cost3 = c.cost_reject ? OfaCost3(p->ofa) : nullptr;
-        GpuBarrier(cl, flow3, COMMON, NPSR); if (cost3) GpuBarrier(cl, cost3, COMMON, NPSR);
+        ID3D12Resource* flow3 = OfaFlow3(p->ofa);
+        GpuBarrier(cl, flow3, COMMON, NPSR);
         GpuBarrier(cl, p->mv_res, NPSR, UAV);
-        CsExpand(g, p->sh, cl, flow3, cost3, OfaFlowWidth(p->ofa), OfaFlowHeight(p->ofa), p->gw, p->gh, p->mv_res, p->ww, p->wh, c.zero_below, c.cost_reject, reset);
+        CsExpand(g, p->sh, cl, flow3, OfaFlowWidth(p->ofa), OfaFlowHeight(p->ofa), p->gw, p->gh, p->mv_res, p->ww, p->wh, c.zero_below, reset);
         GpuBarrier(cl, p->mv_res, UAV, NPSR);
-        GpuBarrier(cl, flow3, NPSR, COMMON); if (cost3) GpuBarrier(cl, cost3, NPSR, COMMON);
+        GpuBarrier(cl, flow3, NPSR, COMMON);
     }
 
     if (!async && p->nr && !NrReady(p->nr) && p->create_pending)
@@ -737,17 +735,27 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 static int RealMain(int argc, char** argv)
 {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    int dump = 0;
+    int dump = 0, preset = -1; bool settings_only = false;
     std::wstring ini_arg;   // --ini <file>: an explicit profile (next to the exe, or a path); else PickProfile
     for (int i = 1; i < argc; ++i)
     {
         if (!strcmp(argv[i], "--bench")) return RunBench(argc, argv);
+        if (!strcmp(argv[i], "--settings")) settings_only = true;   // edit the ini files and exit; no GPU, no game
+        if (!strcmp(argv[i], "--preset") && i + 1 < argc) preset = atoi(argv[++i]);   // 0..3, written to the profile
         if (!strcmp(argv[i], "--dump") && i + 1 < argc) dump = atoi(argv[++i]);
         if (!strcmp(argv[i], "--ini") && i + 1 < argc) { const char* a = argv[++i]; ini_arg.assign(a, a + strlen(a)); }
     }
     const std::wstring dir = ExeDir(), app_path = dir + L"\\justflow.ini";   // app layer; the profile is the game layer
     std::vector<std::wstring> profiles; int profile = -1;
     std::wstring ini_path = PickProfile(dir, ini_arg, profiles, profile);
+    if (preset >= 0)
+    {
+        PresetApply(ini_path.c_str(), preset);
+        const int now = PresetCurrent(ini_path.c_str());   // re-read: the write is only real if it reads back
+        wprintf(L"%ls -> %ls\n", ini_path.c_str(), now == preset ? PresetName(preset) : L"NOT APPLIED");
+        return now == preset ? 0 : 1;
+    }
+    if (settings_only) return SettingsDialog(nullptr, app_path.c_str(), ini_path.c_str(), L"JustFlow") ? 0 : 1;
     Config cfg;
     const int have = ConfigLoad(app_path.c_str(), ini_path.c_str(), cfg);
     std::wstring log_path = JoinPath(dir, cfg.log_file);
@@ -765,6 +773,7 @@ static int RealMain(int argc, char** argv)
     if (!tray) Log("[tray] not available (no icon; hotkeys still work)");
     std::vector<const wchar_t*> pnames; for (auto& n : profiles) pnames.push_back(n.c_str());
     if (tray) TraySetProfiles(tray, pnames.data(), (int)pnames.size());
+    if (tray) TraySetPaths(tray, app_path.c_str(), ini_path.c_str());
 
     Pipeline* p = nullptr;   // the live pipeline, null while waiting for the window
     bool quit = false; int pending_profile = -1, dumped = 0, rc = 0;
@@ -866,6 +875,7 @@ static int RealMain(int argc, char** argv)
         {
             profile = pending_profile; pending_profile = -1; switched = true;
             ini_path = dir + L"\\profiles\\" + profiles[profile] + L".ini";
+            if (tray) TraySetPaths(tray, app_path.c_str(), ini_path.c_str());
             Config nc; const int have = ConfigLoad(app_path.c_str(), ini_path.c_str(), nc);
             ResolveWork(nc, dir); cfg = nc;
             const std::wstring lp = JoinPath(dir, cfg.log_file);

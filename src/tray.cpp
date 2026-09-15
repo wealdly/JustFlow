@@ -3,6 +3,7 @@
 // through Tray::mu; the menu is rebuilt from the snapshot each time it pops, so there is no
 // check-mark state to keep in sync.
 #include "tray.h"
+#include "settings.h"
 #include <shellapi.h>
 #include <deque>
 #include <mutex>
@@ -17,7 +18,8 @@ const UINT WM_TRAY_STATE = WM_APP + 2;   // TraySetState -> refresh tooltip on t
 const UINT ICON_ID = 1;
 
 enum { IDM_STATUS = 1, IDM_NR, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM_MULT3, IDM_MULT4, IDM_WIPE, IDM_RELOAD,
-       IDM_HOTKEYS, IDM_CONFIG, IDM_APPCONFIG, IDM_LOG, IDM_QUIT, IDM_PROFILE0 = 100 };
+       IDM_SETTINGS, IDM_HOTKEYS, IDM_CONFIG, IDM_APPCONFIG, IDM_LOG, IDM_QUIT,
+       IDM_PRESET0 = 60, IDM_PROFILE0 = 100 };
 const int HK_EDIT0 = 100;   // dialog edit ids HK_EDIT0..HK_EDIT0+4
 const wchar_t* const HK_LABELS[5] = { L"Toggle NR", L"Wipe", L"Reload", L"Frame gen", L"Quit" };
 }
@@ -30,6 +32,8 @@ struct Tray
     HWND   hwnd = nullptr, dlg = nullptr;
     HICON  icon = nullptr;
     UINT   taskbar_created = 0;
+
+    std::wstring app_ini, profile_ini;   // guarded by mu; the dialog copies them before it blocks
 
     std::mutex mu;   // guards everything below
     bool nr_on = true, fg_on = false;
@@ -162,6 +166,15 @@ static void ShowHotkeyDialog(Tray* t)
     t->dlg = nullptr;
 }
 
+// ---- settings dialog ---------------------------------------------------------------------------
+
+static void ShowSettingsDialog(Tray* t)
+{
+    std::wstring app, profile;
+    { std::lock_guard<std::mutex> lk(t->mu); app = t->app_ini; profile = t->profile_ini; }
+    if (SettingsDialog(t->hwnd, app.c_str(), profile.c_str(), t->app.c_str())) Push(t, TrayReload);
+}
+
 // ---- menu --------------------------------------------------------------------------------------
 
 static HMENU BuildMenu(Tray* t)
@@ -188,8 +201,13 @@ static HMENU BuildMenu(Tray* t)
     InsertMenuItemW(m, GetMenuItemCount(m), TRUE, &mi);
 
     AppendMenuW(m, MF_STRING | (t->wipe ? MF_CHECKED : 0), IDM_WIPE, L"Wipe compare");
-    AppendMenuW(m, MF_STRING, IDM_RELOAD, L"Reload config");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+
+    HMENU q = CreatePopupMenu();
+    for (int i = 0; i < kPresetCount; ++i) AppendMenuW(q, MF_STRING, IDM_PRESET0 + i, PresetName(i));
+    const int cur = PresetCurrent(t->profile_ini.c_str());
+    if (cur >= 0) CheckMenuRadioItem(q, IDM_PRESET0, IDM_PRESET0 + kPresetCount - 1, IDM_PRESET0 + cur, MF_BYCOMMAND);
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)q, L"Quality");
 
     HMENU pr = CreatePopupMenu();
     if (t->profiles.empty()) AppendMenuW(pr, MF_STRING | MF_GRAYED, 0, L"(none)");
@@ -199,9 +217,12 @@ static HMENU BuildMenu(Tray* t)
     AppendMenuW(m, MF_POPUP, (UINT_PTR)pr, L"Profiles");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
 
+    AppendMenuW(m, MF_STRING, IDM_SETTINGS, L"Settings...");
     AppendMenuW(m, MF_STRING, IDM_HOTKEYS, L"Hotkeys...");
-    AppendMenuW(m, MF_STRING, IDM_CONFIG, L"Open profile");
-    AppendMenuW(m, MF_STRING, IDM_APPCONFIG, L"Open app settings");
+    AppendMenuW(m, MF_STRING, IDM_RELOAD, L"Reload config");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, IDM_CONFIG, L"Open profile ini");
+    AppendMenuW(m, MF_STRING, IDM_APPCONFIG, L"Open app ini");
     AppendMenuW(m, MF_STRING, IDM_LOG, L"Open log");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_QUIT, L"Quit");
@@ -228,7 +249,17 @@ static void ShowMenu(Tray* t)
     case IDM_LOG:     Push(t, TrayOpenLog); break;
     case IDM_QUIT:    Push(t, TrayQuit); break;
     case IDM_HOTKEYS: ShowHotkeyDialog(t); break;
-    default: if (cmd >= IDM_PROFILE0) Push(t, TraySelectProfile, cmd - IDM_PROFILE0); break;
+    case IDM_SETTINGS: ShowSettingsDialog(t); break;
+    default:
+        if (cmd >= IDM_PROFILE0) Push(t, TraySelectProfile, cmd - IDM_PROFILE0);
+        else if (cmd >= IDM_PRESET0 && cmd < IDM_PRESET0 + kPresetCount)
+        {
+            std::wstring profile;
+            { std::lock_guard<std::mutex> lk(t->mu); profile = t->profile_ini; }
+            PresetApply(profile.c_str(), cmd - IDM_PRESET0);
+            Push(t, TrayReload);
+        }
+        break;
     }
 }
 
@@ -333,6 +364,13 @@ void TraySetProfiles(Tray* t, const wchar_t* const* names, int count)
 {
     std::lock_guard<std::mutex> lk(t->mu);
     t->profiles.assign(names, names + count);
+}
+
+void TraySetPaths(Tray* t, const wchar_t* app_ini, const wchar_t* profile_ini)
+{
+    std::lock_guard<std::mutex> lk(t->mu);
+    t->app_ini = app_ini ? app_ini : L"";
+    t->profile_ini = profile_ini ? profile_ini : L"";
 }
 
 void TraySetState(Tray* t, const TrayState& s)
