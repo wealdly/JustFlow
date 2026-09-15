@@ -27,6 +27,8 @@ struct Config
     NrTuning tuning;
     float exposure_scale = 1.0f;
     float residual_strength = 1.0f;
+    float chroma = 1.0f;                   // 0..1: how much of the model's colour change to keep (0 = its luma only)
+    float saturation = 1.0f;               // vibrance of the composed frame, applied last (1 = untouched)
     int   warmup = 8;
     int   rebuild_debounce_frames = 30;
     int   max_fps = 0;                     // 0 = process every captured frame; else cap the pipeline rate

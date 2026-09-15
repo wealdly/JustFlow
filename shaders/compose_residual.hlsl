@@ -11,6 +11,8 @@ SamplerState        samp     : register(s0);
 cbuffer C : register(b0)
 {
     float strength;
+    float chroma;
+    float saturation;
     uint  wipe_mode;
     float wipe_x;
     int   feather;
@@ -34,7 +36,14 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         const float2 suv = uv + mv.SampleLevel(samp, uv, 0) / float2(ww, wh) * warp;
         float3 r = residual.SampleLevel(samp, suv, 0).rgb;
         if (any(suv < 0) || any(suv > 1)) r = 0;
-        res = saturate(nat + r * strength);
+        float3 d = r * strength;
+        const float dl = dot(d, float3(0.2126, 0.7152, 0.0722));   // colour part scaled on its own (see compose.hlsl)
+        d = lerp(float3(dl, dl, dl), d, chroma);
+        res = saturate(nat + d);
+        // Vibrance last, on the composed colour (before the UI rects blend native back, so the
+        // interface is never saturated). 1 = untouched.
+        const float rl = dot(res, float3(0.2126, 0.7152, 0.0722));
+        res = saturate(lerp(float3(rl, rl, rl), res, saturation));
 
         const float2 p = float2(q);
         const float f = max(feather, 1);

@@ -110,6 +110,8 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.tuning.ui_correction = B(L"nr", L"ui_correction", c.tuning.ui_correction);
     c.exposure_scale = F(L"nr", L"exposure_scale", c.exposure_scale);
     c.residual_strength = F(L"nr", L"residual_strength", c.residual_strength);
+    c.chroma = F(L"nr", L"chroma", c.chroma);
+    c.saturation = F(L"nr", L"saturation", c.saturation);
     c.warmup = I(L"nr", L"warmup", c.warmup);
     c.rebuild_debounce_frames = I(L"nr", L"rebuild_debounce_frames", c.rebuild_debounce_frames);
     c.max_fps = I(L"nr", L"max_fps", c.max_fps);

@@ -25,6 +25,8 @@ struct UiRect { int x0, y0, x1, y1; };
 struct ComposeParams
 {
     float residual_strength = 1.0f;   // res = native + (nr_out^ - nr_in^) * strength
+    float chroma = 1.0f;              // how much of the model's COLOUR change to keep (0 = luma only)
+    float saturation = 1.0f;          // vibrance of the composed colour, applied last (1 = untouched)
     int   wipe_mode = 0;              // 0 off, 1 split at wipe_x, 2 show native only (bypass)
     float wipe_x = 0.5f;              // 0..1 of width
     int   feather = 12;               // px

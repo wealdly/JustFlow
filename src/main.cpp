@@ -568,6 +568,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
 
     ComposeParams cp;
     cp.residual_strength = c.residual_strength; cp.feather = c.feather; cp.warp = c.warp;
+    cp.chroma = c.chroma; cp.saturation = c.saturation;
     if (p->mask_active)   // addon rects first, the strip itself hidden; manual ini rects appended
     {
         cp.nrects = p->mask_n; memcpy(cp.rects, p->mask_rects, (size_t)p->mask_n * sizeof(UiRect));

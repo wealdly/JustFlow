@@ -38,6 +38,8 @@ const Setting kSettings[] = {
     { 0, L"nr", L"sharpen",           L"Sharpen",            Float, nullptr, L"0.0" },
     { 0, L"nr", L"residual_strength", L"Effect strength",    Float, nullptr, L"1.0" },
 
+    { 1, L"nr", L"chroma",            L"Keep model colour",  Float, nullptr, L"0.25" },
+    { 1, L"nr", L"saturation",        L"Vibrance",           Float, nullptr, L"1.10" },
     { 1, L"nr", L"style",             L"Style (0-2)",        Int,   nullptr, L"0" },
     { 1, L"nr", L"intensity",         L"Intensity",          Float, nullptr, L"1.0" },
     { 1, L"nr", L"local_tone",        L"Local tone/colour",  Float, nullptr, L"0.2" },
