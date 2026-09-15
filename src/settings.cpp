@@ -38,9 +38,9 @@ const Setting kSettings[] = {
     { 0, L"nr", L"sharpen",           L"Sharpen",            Float, nullptr, L"0.0" },
     { 0, L"nr", L"residual_strength", L"Effect strength",    Float, nullptr, L"1.0" },
 
-    { 1, L"nr", L"style",             L"Style",              Int,   nullptr, L"1" },
+    { 1, L"nr", L"style",             L"Style (0-2)",        Int,   nullptr, L"0" },
     { 1, L"nr", L"intensity",         L"Intensity",          Float, nullptr, L"1.0" },
-    { 1, L"nr", L"local_tone",        L"Local tone",         Float, nullptr, L"0.5" },
+    { 1, L"nr", L"local_tone",        L"Local tone/colour",  Float, nullptr, L"0.2" },
     { 1, L"nr", L"local_structure",   L"Local structure",    Float, nullptr, L"1.0" },
     { 1, L"nr", L"skin_structure",    L"Skin structure",     Float, nullptr, L"-1" },
     { 1, L"nr", L"auto_mask",         L"Auto skin mask",     Bool,  nullptr, L"1" },

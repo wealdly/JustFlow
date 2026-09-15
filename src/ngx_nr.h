@@ -16,10 +16,10 @@ enum NrParamBlock  { NrBlockAllocate = 1, NrBlockCapability = 2, NrBlockOwn = 3 
 struct NrTuning
 {
     int   preset = 0;              // DLSSNR.Hint.Render.Preset
-    int   style = 1;               // 0 Standard, 1 Natural, 2 Cinematic
+    int   style = 0;               // 0 Standard (least restyling), 1 Natural, 2 Cinematic
     float intensity = 1.0f;
     float local_structure = 1.0f;
-    float local_tone = 0.5f;
+    float local_tone = 0.2f;       // remaps tone and colour: low keeps the game's own look
     float skin_structure = -1.0f;  // -1 = follow local structure
     bool  auto_mask = true;
     bool  ui_correction = true;
