@@ -761,6 +761,18 @@ static int RealMain(int argc, char** argv)
     const int have = ConfigLoad(app_path.c_str(), ini_path.c_str(), cfg);
     // Standalone settings: dodge the game's monitor too, in case it is already running.
     if (settings_only) return SettingsDialog(nullptr, app_path.c_str(), ini_path.c_str(), L"JustFlow", FindTarget(cfg)) ? 0 : 1;
+    // One LIVE instance only. Two of them both open Desktop Duplication, both put a topmost overlay
+    // on the same window and both present to the same display - they fight, and every number in the
+    // log becomes meaningless. Held for the life of the process; --settings / --preset / --bench are
+    // short-lived tools and are deliberately not covered (they return above this).
+    HANDLE only_one = CreateMutexW(nullptr, TRUE, L"Local\\JustFlow.SingleInstance");
+    if (!only_one || GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        MessageBoxW(nullptr, L"JustFlow is already running.\n\nUse its tray icon: right-click the icon to quit, "
+                             L"or press the quit hotkey (Ctrl+F12 by default).", L"JustFlow", MB_ICONINFORMATION | MB_OK);
+        if (only_one) CloseHandle(only_one);
+        return 1;
+    }
     std::wstring log_path = JoinPath(dir, cfg.log_file);
     LogInit(log_path.c_str());
     LogConfigFiles(app_path, ini_path, have);
@@ -957,6 +969,8 @@ static int RealMain(int argc, char** argv)
                 fs_agg.disabled += fs.disabled; fs_agg.preempts += fs.preempts;
                 hud_gen += fs.gen_shown; hud_nopair += fs.no_pair;
                 hud_disabled += fs.disabled; hud_preempt += fs.preempts;
+                fs_agg.vblank_wait_sum_ms += fs.vblank_wait_sum_ms; fs_agg.vblank_waits += fs.vblank_waits;
+                fs_agg.record_wait_sum_ms += fs.record_wait_sum_ms; fs_agg.record_waits += fs.record_waits;
                 fs_agg.spacing_ms.insert(fs_agg.spacing_ms.end(), fs.spacing_ms.begin(), fs.spacing_ms.end());
                 fs_agg.age_ms.insert(fs_agg.age_ms.end(), fs.age_ms.begin(), fs.age_ms.end());
                 fs_agg.pipe_ms.insert(fs_agg.pipe_ms.end(), fs.pipe_ms.begin(), fs.pipe_ms.end());
@@ -1071,7 +1085,8 @@ static int RealMain(int argc, char** argv)
                 char mask[16]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "none");
                 Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f acq_ms=%.2f dda_accum=%.2f static_skips=%u rate_drops=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u fg_gen=%u fg_nopair=%u fg_disabled=%u fg_preempt=%u fg_eval_ms=%.2f/%.2f(med/p95) pres_ms=%.2f(prev %.2f, call %.2f) vbwait_ms=%.2f recwait_ms=%.2f/%u model_fps=%.1f model_ms=%.2f residual_age_frames=%.1f mask=%s vram_mb=%.0f/%.0f",
                     cap_fps, p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), acq_ms.med(), CaptureAccumMean(cap), skips, rate_drops, age.med(), pipe.med(),
-                    fg_fps, spacing.med(), spacing.p95(), fs.drops, fs.gen_shown, fs.no_pair, fs.disabled, fs.preempts, fg_eval, fg_eval_p95, pres_total, pres_prev, pres_call, fs.vblank_wait_ms, fs.record_wait_ms, fs.record_waits,
+                    fg_fps, spacing.med(), spacing.p95(), fs.drops, fs.gen_shown, fs.no_pair, fs.disabled, fs.preempts, fg_eval, fg_eval_p95, pres_total, pres_prev, pres_call, fs.vblank_waits ? fs.vblank_wait_sum_ms / fs.vblank_waits : -1.0,
+                    fs.record_waits ? fs.record_wait_sum_ms / fs.record_waits : -1.0, fs.record_waits,
                     model_evals * 1000.0 / span, mm.med(), p->residual_age.med(), mask, vram_used, vram_budget);
                 swprintf_s(status, L"%ls  cap %.0f  out %.0f fps  age %.0f ms", profile_name().c_str(), cap_fps, fg_fps, std::max(0.0, age.med()));
                 tray_state();

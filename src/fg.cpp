@@ -214,14 +214,17 @@ static void Presenter(Fg* f)
     double vb = f->vblank ? OverlayVBlankMs(f->ov) : 0;   // 0 = timer pacing
     UINT64 prev = 0; double prev_real_target = 0;
     auto newer_ready = [&](UINT64 seq) { for (auto& x : f->slots) if (x.state == 2 && x.seq > seq) return true; return false; };
-    // Pre-emption is load-bearing and removing it was a mistake: the presenter takes the OLDEST
-    // ready slot and never skips a real frame, so without a way to abandon this slot's generated
-    // frames it must walk a whole backlog in order. Latency then runs away instead of recovering -
-    // measured age_ms 168-260, output 10 fps, spacing p95 220 ms. The staleness gate only skips
-    // frames WITHIN a slot; this is what skips ahead BETWEEN slots.
+    // Pre-emption is gone, and it is only safe to remove it BECAUSE the pick above now takes the
+    // newest slot and frees the rest. Under the old oldest-first FIFO it was load-bearing - the
+    // only way to skip ahead in a backlog - and removing it there was a disaster (age 168-260 ms,
+    // 10 fps out). With newest-and-drop no backlog can exist: the queue is emptied at every pick.
+    // Cancelling on "a newer slot is ready" then just discards a frame DLSS-G has already been paid
+    // to make, and it fired constantly for a structural reason - the producer submits every
+    // ~11 ms while the generated frame waits L = interval/2 ~ 5.5 ms, so a new slot lands inside
+    // that window about half the time. That is exactly the measured 50%: gen 90, preempt 90.
     // Blocks until `target` (NowMs clock): vblank mode returns right after the vblank nearest the
-    // target, timer mode at the target. False = pre-empted (stop, or a slot newer than `seq` is ready).
-    auto wait_until = [&](double target, UINT64 seq) -> bool
+    // target, timer mode at the target. False = stop.
+    auto wait_until = [&](double target) -> bool
     {
         for (;;)
         {
@@ -230,9 +233,9 @@ static void Presenter(Fg* f)
                 if (vb <= 0)
                 {
                     const auto deadline = clock::now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double, std::milli>(target - NowMs()));
-                    return !f->cv.wait_until(lk, deadline, [&] { return f->stop || newer_ready(seq); });
+                    return !f->cv.wait_until(lk, deadline, [&] { return (bool)f->stop; });
                 }
-                if (f->stop || newer_ready(seq)) return false;
+                if (f->stop) return false;
             }
             LARGE_INTEGER vt0, vt1, vf; QueryPerformanceCounter(&vt0);
             const bool vok = OverlayWaitVBlank(f->ov);
@@ -285,7 +288,7 @@ static void Presenter(Fg* f)
                 for (int i = 0; i < f->count; ++i)
                 {
                     const double target = anchor + i * L + ph;
-                    if (!wait_until(target, s->seq)) { preempted = true; ++f->preempts; break; }
+                    if (!wait_until(target)) { preempted = true; ++f->preempts; break; }
                     if (NowMs() - target > L * 0.5 + vb * 0.5) { ++f->drops; continue; }   // stale: skip, never burst
                     if (!Present(f, s->gen[i], s, false)) { ok = false; break; }
                     ++f->gen_shown;
@@ -293,7 +296,7 @@ static void Presenter(Fg* f)
                 real_target = preempted ? NowMs() : anchor + f->count * L;
             }
             // The real frame is never skipped for lateness: only `stop` interrupts (seq MAX = no pre-emption).
-            if (ok && wait_until(real_target + ph, UINT64_MAX)) ok = Present(f, s->real, s, true);
+            if (ok && wait_until(real_target + ph)) ok = Present(f, s->real, s, true);
             prev_real_target = real_target;
         }
         prev = s->seq;
@@ -454,10 +457,8 @@ void FgStats(Fg* f, FgStatsOut& out)
     out.presented = f->presented.exchange(0); out.drops = f->drops.exchange(0);
     out.no_pair = f->no_pair.exchange(0); out.disabled = f->disabled.exchange(0);
     out.preempts = f->preempts.exchange(0); out.gen_shown = f->gen_shown.exchange(0);
-    { const UINT64 n = f->vbw_n.exchange(0); const UINT64 us = f->vbw_us.exchange(0);
-      out.vblank_wait_ms = n ? (double)us / (1000.0 * (double)n) : -1.0; }
-    { const UINT64 n = f->rec_n.exchange(0); const UINT64 us = f->rec_us.exchange(0);
-      out.record_wait_ms = n ? (double)us / (1000.0 * (double)n) : -1.0; out.record_waits = (UINT)n; }
+    out.vblank_waits = (UINT)f->vbw_n.exchange(0); out.vblank_wait_sum_ms = (double)f->vbw_us.exchange(0) / 1000.0;
+    out.record_waits = (UINT)f->rec_n.exchange(0); out.record_wait_sum_ms = (double)f->rec_us.exchange(0) / 1000.0;
     std::lock_guard<std::mutex> lk(f->mu);
     out.spacing_ms.swap(f->spacing); out.age_ms.swap(f->age); out.pipe_ms.swap(f->pipe);
     f->spacing.clear(); f->age.clear(); f->pipe.clear();

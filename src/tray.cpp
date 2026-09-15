@@ -133,7 +133,13 @@ static void ShowMenu(Tray* t)
     POINT p; GetCursorPos(&p);
     HMENU m = BuildMenu(t);
     SetForegroundWindow(t->hwnd);   // so the menu closes when the user clicks elsewhere
-    const int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, 0, t->hwnd, nullptr);
+    // Keep the menu clear of the taskbar itself: TrackPopupMenuEx flips it to the other side of
+    // rcExclude rather than letting it open underneath.
+    TPMPARAMS tp = { sizeof tp };
+    APPBARDATA ab = { sizeof ab };
+    const bool have_bar = SHAppBarMessage(ABM_GETTASKBARPOS, &ab) != 0;
+    if (have_bar) tp.rcExclude = ab.rc;
+    const int cmd = TrackPopupMenuEx(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, t->hwnd, have_bar ? &tp : nullptr);
     PostMessageW(t->hwnd, WM_NULL, 0, 0);
     DestroyMenu(m);   // destroys submenus too
     switch (cmd)
@@ -227,6 +233,10 @@ static void TrayThread(Tray* t)
         (HICON)LoadImageW(nullptr, t->icon_path.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
     if (!t->icon) t->icon = MakeIcon();
     t->hwnd = CreateWindowExW(0, wc.lpszClassName, t->app.c_str(), WS_OVERLAPPED, 0, 0, 0, 0, nullptr, nullptr, inst, t);
+    // A popup menu is drawn above its OWNER. The taskbar is topmost, so a menu owned by an ordinary
+    // hidden window comes up behind it and the bottom entries (Quit) cannot be clicked. Topmost owner,
+    // topmost menu.
+    if (t->hwnd) SetWindowPos(t->hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     if (t->hwnd) AddIcon(t);
     SetEvent(t->ready);
     if (!t->hwnd) return;

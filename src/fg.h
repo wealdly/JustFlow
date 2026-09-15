@@ -65,9 +65,10 @@ struct FgStatsOut
     UINT no_pair = 0;                  // sequence gap or reset: nothing to interpolate against
     UINT disabled = 0;                 // DLSS-G raised pOutputDisableInterpolation for the pair
     UINT preempts = 0;                 // a newer slot arrived before the generated frame was due
-    double vblank_wait_ms = -1;        // mean time the presenter spent blocked in OverlayWaitVBlank
-    double record_wait_ms = -1;        // mean time the MAIN thread sat in FgRecord with no free slot
-    UINT   record_waits = 0;           // how many frames had to wait at all
+    // Sums, not means: FgStats is drained every frame and the caller aggregates over its own
+    // window. A mean here could not be added up, and silently read as -1.
+    double vblank_wait_sum_ms = 0; UINT vblank_waits = 0;   // presenter blocked in OverlayWaitVBlank
+    double record_wait_sum_ms = 0; UINT record_waits = 0;   // MAIN thread in FgRecord, no free slot
     std::vector<double> spacing_ms;    // present-to-present spacing of everything shown
     std::vector<double> age_ms;        // real frames: our present - capture timestamp
     std::vector<double> pipe_ms;       // real frames: our present - capture acquire
