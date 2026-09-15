@@ -303,6 +303,7 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
     p->gw = w / bx; p->gh = h / by;
     if (p->gw != cfg.ofa_w || p->gh != cfg.ofa_h) Log("[main] ofa input %ux%u adjusted to %ux%u (block %ux%u)", cfg.ofa_w, cfg.ofa_h, p->gw, p->gh, bx, by);
     p->hud = cfg.hud;
+    p->bypass = !cfg.nr_enabled;   // [nr] enabled=0: no model is created; F9 brings one up on demand
     if (with_overlay)
     {
         HotkeyDef keys[kHotkeys]; HotkeyDefs(cfg, keys);
@@ -794,15 +795,44 @@ static int RealMain(int argc, char** argv)
         return OverlaySetHotkeys(p->ov, k, kHotkeys);
     };
     // F9 / F10 / F8 / F11 and their tray menu items
-    auto toggle_nr = [&] { if (!p) return; p->bypass = !p->bypass; if (!p->bypass) p->force_reset = true; Log("[main] bypass %s", p->bypass ? "on" : "off"); PipelineToast(p, "JustFlow: effect %s", p->bypass ? "OFF" : "ON"); tray_state(); };
+    // A toggle is a setting, not session state: write it back through its own layer so a restart
+    // keeps it. Wipe is deliberately not persisted - it is a comparison view, not a preference.
+    auto persist = [&](const wchar_t* sec, const wchar_t* key, bool on)
+    {
+        const std::wstring& file = ConfigIsAppKey(sec, key) ? app_path : ini_path;
+        if (!WritePrivateProfileStringW(sec, key, on ? L"1" : L"0", file.c_str()))
+            Log("[main] could not write [%ls] %ls to %ls", sec, key, file.c_str());
+    };
+    auto toggle_nr = [&]
+    {
+        if (!p) return;
+        p->bypass = !p->bypass;
+        if (!p->bypass)
+        {
+            p->force_reset = true;
+            // Started with [nr] enabled=0, so there is no model yet: bring it up now (the next frame
+            // creates the feature, and async starts its own thread) rather than demand a restart.
+            if (!p->nr)
+            {
+                p->nr = NrInit(g, ExeDir().c_str(), (NrParamBlock)p->cfg.param_block);
+                if (p->nr) p->create_pending = true; else Log("[nr] init failed while enabling");
+            }
+        }
+        cfg.nr_enabled = p->cfg.nr_enabled = !p->bypass;
+        persist(L"nr", L"enabled", !p->bypass);
+        Log("[main] bypass %s", p->bypass ? "on" : "off");
+        PipelineToast(p, "JustFlow: effect %s", p->bypass ? "OFF" : "ON");
+        tray_state();
+    };
     auto cycle_wipe = [&] { if (!p) return; p->wipe = (p->wipe + 1) % 3; p->wipe_t0 = NowMs(); Log("[main] wipe %d", p->wipe); PipelineToast(p, "Wipe: %s", p->wipe == 1 ? "split" : p->wipe == 2 ? "sweep" : "off"); tray_state(); };
     auto toggle_fg = [&]
     {
         if (!p) return; p->cfg.fg_enabled = !p->cfg.fg_enabled; Log("[main] fg %s", p->cfg.fg_enabled ? "on" : "off");
+        cfg.fg_enabled = p->cfg.fg_enabled; persist(L"fg", L"enabled", p->cfg.fg_enabled);
         if (p->cfg.fg_enabled) PipelineToast(p, "Frame generation ON %dX", p->cfg.fg_multiplier); else PipelineToast(p, "Frame generation OFF");
         tray_state();
     };
-    auto toggle_hud = [&] { if (!p) return; p->hud = !p->hud; Log("[main] hud %s", p->hud ? "on" : "off"); PipelineToast(p, "Status HUD %s", p->hud ? "ON" : "OFF"); };
+    auto toggle_hud = [&] { if (!p) return; p->hud = !p->hud; cfg.hud = p->hud; persist(L"ui", L"hud", p->hud); Log("[main] hud %s", p->hud ? "on" : "off"); PipelineToast(p, "Status HUD %s", p->hud ? "ON" : "OFF"); };
     // the caps in force, for the toasts: "uncapped" | "cap 60" | "cap 60  model 30/s" | "model 30/s"
     auto caps = [](const Config& c)
     {

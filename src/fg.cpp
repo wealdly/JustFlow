@@ -211,6 +211,18 @@ static void Presenter(Fg* f)
     double vb = f->vblank ? OverlayVBlankMs(f->ov) : 0;   // 0 = timer pacing
     UINT64 prev = 0; double prev_real_target = 0;
     auto newer_ready = [&](UINT64 seq) { for (auto& x : f->slots) if (x.state == 2 && x.seq > seq) return true; return false; };
+    // A newer slot is ready in NORMAL steady state - the producer records the next real frame while
+    // we are still evaluating this one - so "newer exists" is not "we are late", and cancelling a
+    // generated frame on it threw away every frame we had just paid to generate (fg_preempt was the
+    // whole deficit). Only a deeper backlog means real lag: kSlots is 3, so two ready slots behind
+    // this one is a full real frame of catch-up owed. Staleness is still caught per frame below.
+    auto behind = [&](UINT64 seq)
+    {
+        if (seq == UINT64_MAX) return false;            // the real frame is never pre-empted
+        int n = 0;
+        for (auto& x : f->slots) if (x.state == 2 && x.seq > seq) ++n;
+        return n >= 2;
+    };
     // Blocks until `target` (NowMs clock): vblank mode returns right after the vblank nearest the
     // target, timer mode at the target. False = pre-empted (stop, or a slot newer than `seq` is ready).
     auto wait_until = [&](double target, UINT64 seq) -> bool
@@ -222,9 +234,9 @@ static void Presenter(Fg* f)
                 if (vb <= 0)
                 {
                     const auto deadline = clock::now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double, std::milli>(target - NowMs()));
-                    return !f->cv.wait_until(lk, deadline, [&] { return f->stop || newer_ready(seq); });
+                    return !f->cv.wait_until(lk, deadline, [&] { return f->stop || behind(seq); });
                 }
-                if (f->stop || newer_ready(seq)) return false;
+                if (f->stop || behind(seq)) return false;
             }
             if (!OverlayWaitVBlank(f->ov)) { vb = 0; continue; }   // no output: timer pacing from here on
             if (NowMs() + vb * 0.5 >= target) return true;
