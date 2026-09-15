@@ -18,10 +18,8 @@ const UINT WM_TRAY_STATE = WM_APP + 2;   // TraySetState -> refresh tooltip on t
 const UINT ICON_ID = 1;
 
 enum { IDM_STATUS = 1, IDM_NR, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM_MULT3, IDM_MULT4, IDM_WIPE, IDM_RELOAD,
-       IDM_SETTINGS, IDM_HOTKEYS, IDM_CONFIG, IDM_APPCONFIG, IDM_LOG, IDM_QUIT,
+       IDM_SETTINGS, IDM_CONFIG, IDM_APPCONFIG, IDM_LOG, IDM_QUIT,
        IDM_PRESET0 = 60, IDM_PROFILE0 = 100 };
-const int HK_EDIT0 = 100;   // dialog edit ids HK_EDIT0..HK_EDIT0+4
-const wchar_t* const HK_LABELS[5] = { L"Toggle NR", L"Wipe", L"Reload", L"Frame gen", L"Quit" };
 }
 
 struct Tray
@@ -29,7 +27,7 @@ struct Tray
     std::wstring app, icon_path;
     std::thread  thread;
     HANDLE ready = nullptr;
-    HWND   hwnd = nullptr, dlg = nullptr;
+    HWND   hwnd = nullptr;
     HICON  icon = nullptr;
     UINT   taskbar_created = 0;
 
@@ -38,9 +36,9 @@ struct Tray
     std::mutex mu;   // guards everything below
     bool nr_on = true, fg_on = false;
     int  mult = 2, wipe = 0, profile = -1;
+    HWND game = nullptr;
     std::wstring status;
     std::vector<std::wstring> profiles;
-    std::wstring hk[5];
     std::deque<std::pair<TrayEvent, int>> events;
 };
 
@@ -68,111 +66,13 @@ static HICON MakeIcon()
     return CreateIcon(GetModuleHandleW(nullptr), N, N, 1, 32, an.data(), (const BYTE*)xr.data());
 }
 
-// ---- hotkey dialog -----------------------------------------------------------------------------
-
-static bool ValidHotkey(std::wstring s)
-{
-    for (auto& c : s) c = (wchar_t)towupper(c);
-    size_t pos;
-    while ((pos = s.find(L'+')) != std::wstring::npos)
-    {
-        const std::wstring m = s.substr(0, pos); s = s.substr(pos + 1);
-        if (m != L"CTRL" && m != L"ALT" && m != L"SHIFT") return false;
-    }
-    if (s.size() >= 2 && s[0] == L'F') { const int n = _wtoi(s.c_str() + 1); return n >= 1 && n <= 24 && s == L"F" + std::to_wstring(n); }
-    return s.size() == 1 && iswalnum(s[0]);
-}
-
-static std::wstring Trim(std::wstring s)
-{
-    while (!s.empty() && iswspace(s.back())) s.pop_back();
-    size_t i = 0; while (i < s.size() && iswspace(s[i])) ++i;
-    return s.substr(i);
-}
-
-// In-memory DLGTEMPLATE (WORD stream, items DWORD-aligned) so no .rc is needed.
-static std::vector<WORD> BuildHotkeyTemplate()
-{
-    std::vector<WORD> w;
-    auto dw = [&](DWORD v) { w.push_back(LOWORD(v)); w.push_back(HIWORD(v)); };
-    auto str = [&](const wchar_t* s) { do w.push_back(*s); while (*s++); };
-    auto item = [&](DWORD style, int x, int y, int cx, int cy, WORD id, WORD cls, const wchar_t* text)
-    {
-        if (w.size() & 1) w.push_back(0);
-        dw(style | WS_CHILD | WS_VISIBLE); dw(0);
-        w.push_back((WORD)x); w.push_back((WORD)y); w.push_back((WORD)cx); w.push_back((WORD)cy);
-        w.push_back(id); w.push_back(0xFFFF); w.push_back(cls); str(text); w.push_back(0);
-    };
-    dw(DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU); dw(0);
-    w.push_back(5 * 2 + 2);                                       // cdit
-    w.push_back(0); w.push_back(0); w.push_back(170); w.push_back(112);
-    w.push_back(0); w.push_back(0); str(L"Hotkeys");             // menu, class, title
-    w.push_back(8); str(L"MS Shell Dlg");
-    for (int i = 0; i < 5; ++i)
-    {
-        item(SS_LEFT, 7, 9 + i * 16, 50, 8, (WORD)(200 + i), 0x0082, HK_LABELS[i]);
-        item(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 60, 7 + i * 16, 100, 12, (WORD)(HK_EDIT0 + i), 0x0081, L"");
-    }
-    item(BS_DEFPUSHBUTTON | WS_TABSTOP, 57, 91, 50, 14, IDOK, 0x0080, L"OK");
-    item(BS_PUSHBUTTON | WS_TABSTOP, 110, 91, 50, 14, IDCANCEL, 0x0080, L"Cancel");
-    return w;
-}
-
-static INT_PTR CALLBACK HotkeyDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
-{
-    Tray* t = (Tray*)GetWindowLongPtrW(h, GWLP_USERDATA);
-    switch (msg)
-    {
-    case WM_INITDIALOG:
-    {
-        t = (Tray*)lp; SetWindowLongPtrW(h, GWLP_USERDATA, lp); t->dlg = h;
-        std::lock_guard<std::mutex> lk(t->mu);
-        for (int i = 0; i < 5; ++i) SetDlgItemTextW(h, HK_EDIT0 + i, t->hk[i].c_str());
-        return TRUE;
-    }
-    case WM_COMMAND:
-        if (LOWORD(wp) == IDCANCEL) { EndDialog(h, 0); return TRUE; }
-        if (LOWORD(wp) != IDOK) return FALSE;
-        {
-            std::wstring v[5];
-            for (int i = 0; i < 5; ++i)
-            {
-                wchar_t buf[64]; GetDlgItemTextW(h, HK_EDIT0 + i, buf, 64);
-                v[i] = Trim(buf);
-                if (!ValidHotkey(v[i]))
-                {
-                    const std::wstring m = L"Invalid hotkey for \"" + std::wstring(HK_LABELS[i]) + L"\": \"" + v[i] +
-                        L"\"\n\nUse [Ctrl+][Alt+][Shift+]Key, where Key is F1..F24 or a single letter/digit.";
-                    MessageBoxW(h, m.c_str(), t->app.c_str(), MB_ICONWARNING);
-                    SetFocus(GetDlgItem(h, HK_EDIT0 + i));
-                    return TRUE;
-                }
-            }
-            std::lock_guard<std::mutex> lk(t->mu);
-            for (int i = 0; i < 5; ++i) t->hk[i] = v[i];
-            t->events.emplace_back(TrayHotkeys, 0);
-        }
-        EndDialog(h, 1);
-        return TRUE;
-    }
-    return FALSE;
-}
-
-static void ShowHotkeyDialog(Tray* t)
-{
-    if (t->dlg) { SetForegroundWindow(t->dlg); return; }
-    static const std::vector<WORD> tmpl = BuildHotkeyTemplate();
-    DialogBoxIndirectParamW(GetModuleHandleW(nullptr), (const DLGTEMPLATE*)tmpl.data(), t->hwnd, HotkeyDlgProc, (LPARAM)t);
-    t->dlg = nullptr;
-}
-
 // ---- settings dialog ---------------------------------------------------------------------------
 
 static void ShowSettingsDialog(Tray* t)
 {
-    std::wstring app, profile;
-    { std::lock_guard<std::mutex> lk(t->mu); app = t->app_ini; profile = t->profile_ini; }
-    if (SettingsDialog(t->hwnd, app.c_str(), profile.c_str(), t->app.c_str())) Push(t, TrayReload);
+    std::wstring app, profile; HWND game;
+    { std::lock_guard<std::mutex> lk(t->mu); app = t->app_ini; profile = t->profile_ini; game = t->game; }
+    if (SettingsDialog(t->hwnd, app.c_str(), profile.c_str(), t->app.c_str(), game)) Push(t, TrayReload);
 }
 
 // ---- menu --------------------------------------------------------------------------------------
@@ -218,7 +118,6 @@ static HMENU BuildMenu(Tray* t)
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
 
     AppendMenuW(m, MF_STRING, IDM_SETTINGS, L"Settings...");
-    AppendMenuW(m, MF_STRING, IDM_HOTKEYS, L"Hotkeys...");
     AppendMenuW(m, MF_STRING, IDM_RELOAD, L"Reload config");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_CONFIG, L"Open profile ini");
@@ -248,7 +147,6 @@ static void ShowMenu(Tray* t)
     case IDM_APPCONFIG: Push(t, TrayOpenAppConfig); break;
     case IDM_LOG:     Push(t, TrayOpenLog); break;
     case IDM_QUIT:    Push(t, TrayQuit); break;
-    case IDM_HOTKEYS: ShowHotkeyDialog(t); break;
     case IDM_SETTINGS: ShowSettingsDialog(t); break;
     default:
         if (cmd >= IDM_PROFILE0) Push(t, TraySelectProfile, cmd - IDM_PROFILE0);
@@ -378,7 +276,7 @@ void TraySetState(Tray* t, const TrayState& s)
     {
         std::lock_guard<std::mutex> lk(t->mu);
         t->nr_on = s.nr_on; t->fg_on = s.fg_on; t->mult = s.fg_multiplier;
-        t->wipe = s.wipe_mode; t->profile = s.profile_index;
+        t->wipe = s.wipe_mode; t->profile = s.profile_index; t->game = s.game;
         t->status = s.status ? s.status : L"";
     }
     PostMessageW(t->hwnd, WM_TRAY_STATE, 0, 0);
@@ -404,14 +302,3 @@ void TrayNotify(Tray* t, const wchar_t* title, const wchar_t* text)
     Shell_NotifyIconW(NIM_MODIFY, &n);
 }
 
-void TraySetHotkeys(Tray* t, const wchar_t* const* five)
-{
-    std::lock_guard<std::mutex> lk(t->mu);
-    for (int i = 0; i < 5; ++i) t->hk[i] = five[i] ? five[i] : L"";
-}
-
-void TrayGetHotkeys(Tray* t, wchar_t out[5][32])
-{
-    std::lock_guard<std::mutex> lk(t->mu);
-    for (int i = 0; i < 5; ++i) wcsncpy_s(out[i], 32, t->hk[i].c_str(), _TRUNCATE);
-}

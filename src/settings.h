@@ -5,7 +5,10 @@
 
 // Modal. Writes only the keys the user changed, each into the file of its layer (ConfigIsAppKey).
 // Returns true if anything was written - the caller should reload.
-bool SettingsDialog(HWND parent, const wchar_t* app_ini, const wchar_t* profile_ini, const wchar_t* app_name);
+// keep_clear_of = the game window (may be null): the dialog opens on a monitor that does not hold
+// it, so opening settings mid-game does not put a window over what is being played.
+bool SettingsDialog(HWND parent, const wchar_t* app_ini, const wchar_t* profile_ini, const wchar_t* app_name,
+                    HWND keep_clear_of = nullptr);
 
 // Quality presets: the cost dials (model resolution, ArtCNN, sharpen, flow resolution) written into
 // the game profile. 0 high performance, 1 performance, 2 balanced, 3 quality.

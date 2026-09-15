@@ -12,7 +12,7 @@
 
 namespace
 {
-enum Type { Bool, Int, Float, Enum };
+enum Type { Bool, Int, Float, Enum, Hotkey };
 
 struct Setting
 {
@@ -25,7 +25,7 @@ struct Setting
     const wchar_t* def;     // shown when the key is absent from the file
 };
 
-const wchar_t* const kTabs[] = { L"Quality", L"Look", L"Frame gen", L"Performance", L"Display" };
+const wchar_t* const kTabs[] = { L"Quality", L"Look", L"Frame gen", L"Performance", L"Display", L"Hotkeys" };
 const int kTabCount = (int)(sizeof kTabs / sizeof *kTabs);
 
 // Model resolutions: the measured cost is ~1.5 ms/MPix + 1 ms on a 5080, so 4K is a 60 fps tier.
@@ -67,10 +67,32 @@ const Setting kSettings[] = {
     { 4, L"overlay", L"mode",         L"Overlay",            Enum,  L"composed|direct", L"composed" },
     { 4, L"capture", L"cursor",       L"Capture cursor",     Bool,  nullptr, L"0" },
     { 4, L"capture", L"border",       L"Capture border",     Bool,  nullptr, L"0" },
+
+    { 5, L"hotkeys", L"toggle",       L"Neural rendering",   Hotkey, nullptr, L"F9" },
+    { 5, L"hotkeys", L"fg",           L"Frame generation",   Hotkey, nullptr, L"F8" },
+    { 5, L"hotkeys", L"hud",          L"Status HUD",         Hotkey, nullptr, L"F7" },
+    { 5, L"hotkeys", L"wipe",         L"Wipe compare",       Hotkey, nullptr, L"F10" },
+    { 5, L"hotkeys", L"reload",       L"Reload config",      Hotkey, nullptr, L"F11" },
+    { 5, L"hotkeys", L"quit",         L"Quit",               Hotkey, nullptr, L"Ctrl+F12" },
 };
 const int kCount = (int)(sizeof kSettings / sizeof *kSettings);
 
 const int ID_TAB = 50, ID_CTL0 = 1000, ID_LBL0 = 2000;
+
+// "[Ctrl+][Alt+][Shift+]Key", Key = F1..F24 or one letter/digit. ParseHotkey in config.cpp is
+// lenient (it falls back to a default vk); this is the strict check the user's typing needs.
+bool ValidHotkey(std::wstring s)
+{
+    for (auto& c : s) c = (wchar_t)towupper(c);
+    size_t pos;
+    while ((pos = s.find(L'+')) != std::wstring::npos)
+    {
+        const std::wstring m = s.substr(0, pos); s = s.substr(pos + 1);
+        if (m != L"CTRL" && m != L"ALT" && m != L"SHIFT") return false;
+    }
+    if (s.size() >= 2 && s[0] == L'F') { const int n = _wtoi(s.c_str() + 1); return n >= 1 && n <= 24 && s == L"F" + std::to_wstring(n); }
+    return s.size() == 1 && iswalnum(s[0]);
+}
 
 // ---- ini -------------------------------------------------------------------------------------
 
@@ -107,9 +129,35 @@ const wchar_t* const kPresetNames[kPresetCount] = { L"High performance", L"Perfo
 struct DlgData
 {
     const wchar_t *app, *profile, *name;
+    HWND           avoid = nullptr;
     std::wstring   initial[kCount];
     bool           wrote = false;
 };
+
+// Centre the dialog on a monitor that does not hold `avoid`. One monitor, or no game window: leave
+// it wherever DS_CENTER put it.
+struct MonPick { HMONITOR skip; RECT work; bool found; };
+
+void PlaceClearOf(HWND h, HWND avoid)
+{
+    if (!avoid || !IsWindow(avoid)) return;
+    MonPick pick = { MonitorFromWindow(avoid, MONITOR_DEFAULTTONEAREST), {}, false };
+    EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR m, HDC, LPRECT, LPARAM lp) -> BOOL
+    {
+        MonPick* c = (MonPick*)lp;
+        if (c->found || m == c->skip) return TRUE;
+        MONITORINFO mi = { sizeof mi };
+        if (GetMonitorInfoW(m, &mi)) { c->work = mi.rcWork; c->found = true; }
+        return TRUE;
+    }, (LPARAM)&pick);
+    if (!pick.found) return;
+    RECT r = {};
+    if (!GetWindowRect(h, &r)) return;
+    const int w = r.right - r.left, ht = r.bottom - r.top;
+    SetWindowPos(h, nullptr, pick.work.left + ((pick.work.right - pick.work.left) - w) / 2,
+                 pick.work.top + ((pick.work.bottom - pick.work.top) - ht) / 2,
+                 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+}
 
 std::vector<WORD> BuildTemplate()
 {
@@ -149,7 +197,7 @@ std::vector<WORD> BuildTemplate()
         else if (s.type == Enum)
             item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 120, y, 110, 90, (WORD)(ID_CTL0 + i), 0x0085, nullptr, L"");
         else
-            item(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 120, y, 70, 12, (WORD)(ID_CTL0 + i), 0x0081, nullptr, L"");
+            item(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 120, y, s.type == Hotkey ? 110 : 70, 12, (WORD)(ID_CTL0 + i), 0x0081, nullptr, L"");
     }
     item(BS_DEFPUSHBUTTON | WS_TABSTOP, 185, 177, 52, 15, IDOK, 0x0080, nullptr, L"OK");
     item(BS_PUSHBUTTON | WS_TABSTOP, 242, 177, 52, 15, IDCANCEL, 0x0080, nullptr, L"Cancel");
@@ -217,6 +265,7 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             else SetDlgItemTextW(h, ID_CTL0 + i, v.c_str());
         }
         ShowTab(h, 0);
+        PlaceClearOf(h, d->avoid);
         return TRUE;
     }
     case WM_NOTIFY:
@@ -226,6 +275,18 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_COMMAND:
         if (LOWORD(wp) == IDCANCEL) { EndDialog(h, 0); return TRUE; }
         if (LOWORD(wp) != IDOK) return FALSE;
+        for (int i = 0; i < kCount; ++i)                         // validate before writing anything
+        {
+            if (kSettings[i].type != Hotkey) continue;
+            const std::wstring v = CtlValue(h, i);
+            if (ValidHotkey(v)) continue;
+            SendMessageW(GetDlgItem(h, ID_TAB), TCM_SETCURSEL, kSettings[i].tab, 0);
+            ShowTab(h, kSettings[i].tab);
+            MessageBoxW(h, (L"\"" + v + L"\" is not a hotkey.\n\nUse [Ctrl+][Alt+][Shift+]Key, where Key is "
+                            L"F1..F24 or a single letter or digit.").c_str(), d->name, MB_ICONWARNING);
+            SetFocus(GetDlgItem(h, ID_CTL0 + i));
+            return TRUE;
+        }
         for (int i = 0; i < kCount; ++i)
         {
             const Setting& s = kSettings[i];
@@ -248,12 +309,12 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 }
 }   // namespace
 
-bool SettingsDialog(HWND parent, const wchar_t* app_ini, const wchar_t* profile_ini, const wchar_t* app_name)
+bool SettingsDialog(HWND parent, const wchar_t* app_ini, const wchar_t* profile_ini, const wchar_t* app_name, HWND keep_clear_of)
 {
     INITCOMMONCONTROLSEX ic = { sizeof ic, ICC_TAB_CLASSES };
     InitCommonControlsEx(&ic);
     static const std::vector<WORD> tmpl = BuildTemplate();
-    DlgData d; d.app = app_ini; d.profile = profile_ini; d.name = app_name;
+    DlgData d; d.app = app_ini; d.profile = profile_ini; d.name = app_name; d.avoid = keep_clear_of;
     DialogBoxIndirectParamW(GetModuleHandleW(nullptr), (const DLGTEMPLATE*)tmpl.data(), parent, DlgProc, (LPARAM)&d);
     return d.wrote;
 }

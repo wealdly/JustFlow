@@ -12,11 +12,10 @@ enum TrayEvent
     TrayWipe,           // cycle wipe mode
     TrayReload,
     TraySelectProfile,  // arg = index into TraySetProfiles
-    TrayOpenConfig,     // the active profile (profiles\<game>.ini)
-    TrayOpenAppConfig,  // justflow.ini (hotkeys, ui, overlay, log stats)
+    TrayOpenConfig,     // the active profile (profiles\<game>.ini), for hand editing
+    TrayOpenAppConfig,  // justflow.ini (hotkeys, ui, overlay, log stats), for hand editing
     TrayOpenLog,
     TrayQuit,
-    TrayHotkeys,        // dialog OK'd: read the new strings with TrayGetHotkeys, write justflow.ini, re-register
 };
 
 struct TrayState
@@ -25,6 +24,7 @@ struct TrayState
     int  fg_multiplier = 2;
     int  wipe_mode = 0;         // 0 = off
     int  profile_index = -1;    // -1 = none
+    HWND game = nullptr;        // the captured window; the settings dialog opens on a different monitor
     const wchar_t* status = L"";   // e.g. L"WoW  90->180 fps  age 12 ms" (menu status line + tooltip)
 };
 
@@ -39,6 +39,3 @@ void  TraySetPaths(Tray*, const wchar_t* app_ini, const wchar_t* profile_ini);
 void  TraySetState(Tray*, const TrayState&);                                    // check marks + tooltip
 bool  TrayPoll(Tray*, TrayEvent& ev, int& arg);                                 // one event per call
 void  TrayNotify(Tray*, const wchar_t* title, const wchar_t* text);             // balloon (NIIF_INFO)
-// Hotkey strings in ini order: toggle, wipe, reload, fg, quit ("[Ctrl+][Alt+][Shift+]Key", Key = F1..F24 or a letter/digit).
-void  TraySetHotkeys(Tray*, const wchar_t* const* five_strings);
-void  TrayGetHotkeys(Tray*, wchar_t out[5][32]);

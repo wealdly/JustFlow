@@ -39,6 +39,7 @@ struct Pipeline
     Nr*      nr = nullptr;
     Ofa*     ofa = nullptr;
     Overlay* ov = nullptr;
+    HWND     target = nullptr;    // the game window: the settings dialog opens on some other monitor
     Fg*      fg = nullptr;        // the presenter thread: always exists with an overlay (passthrough, or generation while cfg.fg_enabled works)
     ID3D12Resource *color4k = nullptr, *gray = nullptr, *out4k = nullptr;   // rest: NPSR, UAV, COPY_SOURCE
     ID3D12Resource *sharp4k = nullptr;                                     // out4k sharpened ([nr] sharpen > 0), rest COPY_SOURCE

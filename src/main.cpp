@@ -297,7 +297,7 @@ static void StopModel(Pipeline* p)
 Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_overlay, HWND target)
 {
     Pipeline* p = new Pipeline();
-    p->g = &g; p->cfg = cfg; p->w = w; p->h = h;
+    p->g = &g; p->cfg = cfg; p->w = w; p->h = h; p->target = target;
     // CsGray needs an integer block: round the block, derive the gray size from it.
     const UINT bx = std::max(1u, (UINT)std::lround((double)w / cfg.ofa_w)), by = std::max(1u, (UINT)std::lround((double)h / cfg.ofa_h));
     p->gw = w / bx; p->gh = h / by;
@@ -754,9 +754,10 @@ static int RealMain(int argc, char** argv)
         wprintf(L"%ls -> %ls\n", ini_path.c_str(), now == preset ? PresetName(preset) : L"NOT APPLIED");
         return now == preset ? 0 : 1;
     }
-    if (settings_only) return SettingsDialog(nullptr, app_path.c_str(), ini_path.c_str(), L"JustFlow") ? 0 : 1;
     Config cfg;
     const int have = ConfigLoad(app_path.c_str(), ini_path.c_str(), cfg);
+    // Standalone settings: dodge the game's monitor too, in case it is already running.
+    if (settings_only) return SettingsDialog(nullptr, app_path.c_str(), ini_path.c_str(), L"JustFlow", FindTarget(cfg)) ? 0 : 1;
     std::wstring log_path = JoinPath(dir, cfg.log_file);
     LogInit(log_path.c_str());
     LogConfigFiles(app_path, ini_path, have);
@@ -782,22 +783,14 @@ static int RealMain(int argc, char** argv)
     {
         if (!tray) return;
         TrayState s; s.profile_index = profile; s.status = status;
-        if (p) { s.nr_on = !p->bypass; s.fg_on = p->cfg.fg_enabled; s.fg_multiplier = p->cfg.fg_multiplier; s.wipe_mode = p->wipe; }
+        if (p) { s.nr_on = !p->bypass; s.fg_on = p->cfg.fg_enabled; s.fg_multiplier = p->cfg.fg_multiplier; s.wipe_mode = p->wipe; s.game = p->target; }
         TraySetState(tray, s);
     };
-    auto tray_hotkeys = [&]   // cfg.hk_* -> the tray's Hotkeys dialog (ini order: toggle, wipe, reload, fg, quit)
+    auto apply_hotkeys = [&]   // cfg.hk_* -> overlay registration (a pipeline created later registers from cfg itself)
     {
-        if (!tray) return;
-        const std::wstring s[5] = { FormatHotkey(cfg.hk_toggle), FormatHotkey(cfg.hk_wipe), FormatHotkey(cfg.hk_reload), FormatHotkey(cfg.hk_fg), FormatHotkey(cfg.hk_quit) };
-        const wchar_t* v[5] = { s[0].c_str(), s[1].c_str(), s[2].c_str(), s[3].c_str(), s[4].c_str() };
-        TraySetHotkeys(tray, v);
-    };
-    auto apply_hotkeys = [&]   // cfg.hk_* -> overlay registration (a pipeline created later registers from cfg itself) + tray
-    {
-        bool ok = true;
-        if (p && p->ov) { HotkeyDef k[kHotkeys]; HotkeyDefs(cfg, k); ok = OverlaySetHotkeys(p->ov, k, kHotkeys); }
-        tray_hotkeys();
-        return ok;
+        if (!p || !p->ov) return true;
+        HotkeyDef k[kHotkeys]; HotkeyDefs(cfg, k);
+        return OverlaySetHotkeys(p->ov, k, kHotkeys);
     };
     // F9 / F10 / F8 / F11 and their tray menu items
     auto toggle_nr = [&] { if (!p) return; p->bypass = !p->bypass; if (!p->bypass) p->force_reset = true; Log("[main] bypass %s", p->bypass ? "on" : "off"); PipelineToast(p, "JustFlow: effect %s", p->bypass ? "OFF" : "ON"); tray_state(); };
@@ -819,9 +812,17 @@ static int RealMain(int argc, char** argv)
     };
     auto reload = [&]
     {
-        if (!p) return;
         Config nc; const int have = ConfigLoad(app_path.c_str(), ini_path.c_str(), nc); const bool ok = (have & 2) != 0;
         ResolveWork(nc, dir);
+        if (!p)
+        {
+            // No pipeline yet (waiting for the game window): the config still has to land, or a
+            // hotkey edited from the settings window would not take until the game came up.
+            cfg = nc;
+            LogConfigFiles(app_path, ini_path, have);
+            Log("[main] config reloaded (no pipeline yet)");
+            return;
+        }
         if (ok && profile >= 0 && ConfigNeedsRestart(cfg, nc))
         {
             // Capture and overlay read these only at create: rebuild the pipeline the way a profile
@@ -859,23 +860,10 @@ static int RealMain(int argc, char** argv)
         case TrayOpenAppConfig: ShellExecuteW(nullptr, L"open", app_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
         case TrayOpenLog:       ShellExecuteW(nullptr, L"open", log_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
         case TrayQuit:       Log("[main] quit (tray)"); quit = true; break;
-        case TrayHotkeys:
-        {
-            wchar_t hk[5][32]; TrayGetHotkeys(tray, hk);
-            static const wchar_t* const keys[5] = { L"toggle", L"wipe", L"reload", L"fg", L"quit" };
-            for (int i = 0; i < 5; ++i) WritePrivateProfileStringW(L"hotkeys", keys[i], hk[i], app_path.c_str());   // app layer, never the profile
-            cfg.hk_toggle = ParseHotkey(hk[0], 0); cfg.hk_wipe = ParseHotkey(hk[1], 0); cfg.hk_reload = ParseHotkey(hk[2], 0);
-            cfg.hk_fg = ParseHotkey(hk[3], 0); cfg.hk_quit = ParseHotkey(hk[4], 0);
-            const bool ok = apply_hotkeys();
-            Log("[main] hotkeys %ls %ls %ls %ls %ls -> %ls%s", hk[0], hk[1], hk[2], hk[3], hk[4], app_path.c_str(), ok ? "" : " (some did not register)");
-            TrayNotify(tray, L"JustFlow", ok ? L"Hotkeys updated" : L"Some hotkeys could not be registered (taken by another app?)");
-            break;
-        }
         default: break;
         }
     };
 
-    tray_hotkeys();
     bool switched = false;   // the next pipeline comes from a tray profile switch (toast "Profile: x" instead of the startup line)
     while (!quit)
     {
@@ -890,7 +878,6 @@ static int RealMain(int argc, char** argv)
             if (lp != log_path) { log_path = lp; LogInit(log_path.c_str()); }
             LogConfigFiles(app_path, ini_path, have);
             Log("[main] profile %ls", ini_path.c_str());
-            tray_hotkeys();
             if (tray) TrayNotify(tray, L"JustFlow", (L"Profile: " + profiles[profile]).c_str());
         }
         swprintf_s(status, L"%ls  waiting for window", profile_name().c_str()); tray_state();
