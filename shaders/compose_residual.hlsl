@@ -40,11 +40,12 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         const float dl = dot(d, float3(0.2126, 0.7152, 0.0722));   // colour part scaled on its own (see compose.hlsl)
         d = lerp(float3(dl, dl, dl), d, chroma);
         res = saturate(nat + d);
-        // Vibrance last, on the composed colour (before the UI rects blend native back, so the
-        // interface is never saturated). 1 = untouched.
+    }
+    {
+        // Vibrance is a FILTER, not part of the model: it runs with the neural layer off too, so a
+        // model-off profile still gets it. Before the UI rects, so the interface is never saturated.
         const float rl = dot(res, float3(0.2126, 0.7152, 0.0722));
         res = saturate(lerp(float3(rl, rl, rl), res, saturation));
-
         const float2 p = float2(q);
         const float f = max(feather, 1);
         [loop] for (uint i = 0; i < min(nrects, 64u); ++i)
