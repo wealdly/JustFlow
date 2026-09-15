@@ -66,6 +66,8 @@ struct FgStatsOut
     UINT disabled = 0;                 // DLSS-G raised pOutputDisableInterpolation for the pair
     UINT preempts = 0;                 // a newer slot arrived before the generated frame was due
     double vblank_wait_ms = -1;        // mean time the presenter spent blocked in OverlayWaitVBlank
+    double record_wait_ms = -1;        // mean time the MAIN thread sat in FgRecord with no free slot
+    UINT   record_waits = 0;           // how many frames had to wait at all
     std::vector<double> spacing_ms;    // present-to-present spacing of everything shown
     std::vector<double> age_ms;        // real frames: our present - capture timestamp
     std::vector<double> pipe_ms;       // real frames: our present - capture acquire

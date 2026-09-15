@@ -75,7 +75,8 @@ struct Fg
     // DLSS-G raised its disable flag, or a newer slot pre-empted the schedule
     std::atomic<UINT> no_pair{ 0 }, disabled{ 0 }, preempts{ 0 }, gen_shown{ 0 };
     std::atomic<UINT64> vbw_us{ 0 }, vbw_n{ 0 };   // time the presenter sits in OverlayWaitVBlank
-    std::atomic<UINT>   vbw_fail{ 0 };            // waitable timeouts (transient: no longer demotes pacing)
+    std::atomic<UINT>   vbw_fail{ 0 };            // vblank wait failures
+    std::atomic<UINT64> rec_us{ 0 }, rec_n{ 0 };  // main thread blocked in FgRecord with no free slot
     std::vector<double> spacing, age, pipe;   // guarded by mu; handed over by FgStats
     double eval_ring[256] = {}; unsigned eval_n = 0;   // guarded by mu; generation GPU ms per real frame (FgEvalMs)
     double last_present = 0;
@@ -251,9 +252,18 @@ static void Presenter(Fg* f)
             std::unique_lock<std::mutex> lk(f->mu);
             f->cv.wait(lk, [&] { return f->stop || newer_ready(0); });
             if (f->stop) break;
-            // Oldest ready first: every real frame is shown; a newer ready slot pre-empts this one's
-            // generated frames (wait_until), so a backlog clears at one vblank per slot.
-            for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq < s->seq)) s = &x;
+            // NEWEST ready, and free every other ready slot on the spot. Oldest-first FIFO is what
+            // broke frame generation, and the reason is arithmetic rather than taste: the presenter
+            // is serial across slots and schedules the real frame at prev_real_target + (count+1)*L,
+            // which IS prev_real_target + interval. Its retire period while generating therefore
+            // equals the producer's submit period exactly, with no margin - it can never work off
+            // a backlog. Lateness could only be shed through pre-emption, which exists precisely to
+            // throw the generated frame away, so the queue had two equilibria: 2x with zero
+            // stability, and 1x backlogged that nothing could escape. Every jitter source pushed it
+            // into the second and none pushed it back. Keeping only the freshest frame means a
+            // backlog cannot form, so the lag that arms pre-emption never builds.
+            for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq > s->seq)) s = &x;
+            for (auto& x : f->slots) if (x.state == 2 && &x != s) { x.state = 0; ++f->drops; }
             s->state = 3;
         }
         bool ok = true;
@@ -446,6 +456,8 @@ void FgStats(Fg* f, FgStatsOut& out)
     out.preempts = f->preempts.exchange(0); out.gen_shown = f->gen_shown.exchange(0);
     { const UINT64 n = f->vbw_n.exchange(0); const UINT64 us = f->vbw_us.exchange(0);
       out.vblank_wait_ms = n ? (double)us / (1000.0 * (double)n) : -1.0; }
+    { const UINT64 n = f->rec_n.exchange(0); const UINT64 us = f->rec_us.exchange(0);
+      out.record_wait_ms = n ? (double)us / (1000.0 * (double)n) : -1.0; out.record_waits = (UINT)n; }
     std::lock_guard<std::mutex> lk(f->mu);
     out.spacing_ms.swap(f->spacing); out.age_ms.swap(f->age); out.pipe_ms.swap(f->pipe);
     f->spacing.clear(); f->age.clear(); f->pipe.clear();
@@ -460,12 +472,16 @@ bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* composed, ID
         auto free_slot = [&] { for (auto& x : f->slots) if (x.state == 0) return &x; return (FgSlot*)nullptr; };
         if (!(s = free_slot()))
         {
+            const double t_block = NowMs();
             // Every slot is in flight (one presenting, two ready): wait for the presenter to retire
             // the oldest (a newer ready slot pre-empts its generated frames, so ~1 vblank) instead
             // of dropping a real frame. ponytail: bound = 2 real intervals; on timeout the oldest
             // ready slot is overwritten (the presenter is stuck behind the display).
             const double bound = std::clamp(2.0 * (f->history ? NowMs() - f->last_submit : 16.0), 8.0, 50.0);
             f->cv.wait_for(lk, std::chrono::duration<double, std::milli>(bound), [&] { return f->stop || f->failed || (s = free_slot()) != nullptr; });
+            // This block was invisible: it lands in main's undifferentiated cpu_ms, which is how a
+            // 7 ms per-frame stall hid for a whole session.
+            f->rec_us += (UINT64)((NowMs() - t_block) * 1000.0); ++f->rec_n;
             if (!s)
             {
                 for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq < s->seq)) s = &x;
