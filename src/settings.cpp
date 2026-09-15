@@ -120,8 +120,12 @@ struct PresetKey { const wchar_t *sec, *key, *val[kPresetCount]; };
 // Only the cost dials. The look ([nr] style/intensity/...) is the user's, and no preset sets a
 // frame-rate cap - a cap the user did not ask for reads as "the filter is slow".
 const PresetKey kPreset[] = {
+    // High performance runs NO DLSS model at all: ArtCNN alone carries the enhancement at ~2.3 ms
+    // against the model's 12 ms in a real scene, which is the difference between fitting a 90 fps
+    // budget alongside frame generation and not. The other three are model tiers.
+    { L"nr",  L"enabled", { L"0",         L"1",         L"1",         L"1" } },
     { L"nr",  L"work",    { L"1920x1080", L"1920x1080", L"2560x1440", L"3200x1800" } },
-    { L"nr",  L"artcnn",  { L"0",         L"1",         L"1",         L"1" } },
+    { L"nr",  L"artcnn",  { L"1",         L"0",         L"0",         L"1" } },
     { L"nr",  L"sharpen", { L"0.4",       L"0.3",       L"0.2",       L"0.0" } },
     { L"ofa", L"input",   { L"640x360",   L"960x540",   L"960x540",   L"1280x720" } },
 };
@@ -179,15 +183,24 @@ std::vector<WORD> BuildTemplate()
         w.push_back(0);
     };
 
+    // Size to the LONGEST tab instead of a number I typed once: adding rows to a tab used to push
+    // them off the bottom of the panel (the Look tab did exactly that when it gained two).
+    int rows_per_tab[kTabCount] = {};
+    for (const auto& s : kSettings) ++rows_per_tab[s.tab];
+    int max_rows = 1;
+    for (int r : rows_per_tab) if (r > max_rows) max_rows = r;
+    const int tab_h = 16 * max_rows + 29;       // rows start at y = 30, 16 apart, + padding
+    const int btn_y = 5 + tab_h + 6, dlg_h = btn_y + 22;
+
     dw(DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU); dw(0);
     w.push_back((WORD)(1 + kCount * 2 + 2));                  // tab + label/control pairs + 2 buttons
-    w.push_back(0); w.push_back(0); w.push_back(300); w.push_back(198);   // tab body fits the longest tab (8 rows)
+    w.push_back(0); w.push_back(0); w.push_back(300); w.push_back((WORD)dlg_h);
     w.push_back(0); w.push_back(0); str(L"JustFlow settings");
     w.push_back(8); str(L"MS Shell Dlg");
 
     // The tab control comes first: CreateWindow puts each later sibling above it, so the rows draw
     // on top of the tab body without any z-order fixing.
-    item(WS_TABSTOP, 5, 5, 290, 165, ID_TAB, 0, WC_TABCONTROLW, L"");
+    item(WS_TABSTOP, 5, 5, 290, tab_h, ID_TAB, 0, WC_TABCONTROLW, L"");
 
     int row[kTabCount] = {};
     for (int i = 0; i < kCount; ++i)
@@ -202,8 +215,8 @@ std::vector<WORD> BuildTemplate()
         else
             item(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 120, y, s.type == Hotkey ? 110 : 70, 12, (WORD)(ID_CTL0 + i), 0x0081, nullptr, L"");
     }
-    item(BS_DEFPUSHBUTTON | WS_TABSTOP, 185, 177, 52, 15, IDOK, 0x0080, nullptr, L"OK");
-    item(BS_PUSHBUTTON | WS_TABSTOP, 242, 177, 52, 15, IDCANCEL, 0x0080, nullptr, L"Cancel");
+    item(BS_DEFPUSHBUTTON | WS_TABSTOP, 185, btn_y, 52, 15, IDOK, 0x0080, nullptr, L"OK");
+    item(BS_PUSHBUTTON | WS_TABSTOP, 242, btn_y, 52, 15, IDCANCEL, 0x0080, nullptr, L"Cancel");
     return w;
 }
 

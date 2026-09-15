@@ -575,7 +575,15 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         cp.strip_w = (int)kStripW; cp.strip_h = (int)kStripH;
     }
     for (int i = 0; i < c.nrects && cp.nrects < 64; ++i) cp.rects[cp.nrects++] = c.rects[i];
-    const bool native = async ? (p->cmp_idx < 0 || p->bypass) : (!evaluated || p->evals_since_create <= (UINT)std::max(0, c.warmup));
+    // ArtCNN on its own, with no DLSS model: it has already produced a work-res before/after pair
+    // (nr_in -> nr_in2), which is exactly what the compose consumes, so the residual carries its
+    // delta and nothing else. ~2.3 ms at 1080p against the model's 12 ms, which is the difference
+    // between an enhancement that fits a frame budget and one that does not. Also covers the
+    // model's warm-up, where the screen would otherwise sit on flat native.
+    // Not when the user has switched the effect off with a model present - that means everything off.
+    const bool art_only = !async && c.artcnn && !evaluated && !(p->nr && p->bypass);
+    const bool native = art_only ? false
+                                 : (async ? (p->cmp_idx < 0 || p->bypass) : (!evaluated || p->evals_since_create <= (UINT)std::max(0, c.warmup)));
     if (native) cp.wipe_mode = 2;
     else if (p->wipe == 1) { cp.wipe_mode = 1; cp.wipe_x = 0.5f; }
     else if (p->wipe == 2) { cp.wipe_mode = 1; cp.wipe_x = (float)fmod((NowMs() - p->wipe_t0) / 2000.0, 1.0); }
@@ -593,7 +601,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     {
         GpuBarrier(cl, p->nr_out, UAV, NPSR);
         stamp(6);
-        CsCompose(g, p->sh, cl, p->color4k, p->nr_in, p->nr_out, p->ww, p->wh, p->out4k, p->w, p->h, cp);
+        CsCompose(g, p->sh, cl, p->color4k, p->nr_in, art_only ? p->nr_in2 : p->nr_out, p->ww, p->wh, p->out4k, p->w, p->h, cp);
         stamp(7);
         GpuBarrier(cl, p->nr_out, NPSR, UAV);
     }
@@ -1065,7 +1073,8 @@ static int RealMain(int argc, char** argv)
                 sprintf_s(p->hud_line[0], "in %.0f  out %.0f  age %.0f ms  acq %.1f ms  cap %s", cap_fps, out_fps, std::max(0.0, age), std::max(0.0, hud_acq.med()), capstr);
                 hud_acq.v.clear();
                 char nr[48];
-                if (p->bypass || !p->nr) strcpy_s(nr, "NR off");
+                // "NR off" would be a lie while ArtCNN is the thing doing the enhancing.
+                if (p->bypass || !p->nr) strcpy_s(nr, (cfg.artcnn && !(p->nr && p->bypass)) ? "ArtCNN only" : "NR off");
                 else if (cfg.nr_async)
                 {
                     double ms; { std::lock_guard<std::mutex> lk(p->pub_mu); ms = p->model_ms.med(); }
