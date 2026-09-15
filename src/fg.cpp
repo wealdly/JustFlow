@@ -43,7 +43,9 @@ struct FgSlot
     int    state = 0;
     UINT64 seq = 0, fence = 0, eval_fence = 0;
     bool   interpolate = false;
-    double interval = 16.0;   // ms between this and the previous submit
+    double interval = 16.0;   // ms between this and the previous submit (our clock)
+    double content_ms = 0;    // ms between this frame and the previous CAPTURED one, in the game's
+                              // own clock: 0 = the capture gave no timestamp
     LONGLONG cap_qpc = 0, acq_qpc = 0;
 };
 
@@ -66,6 +68,7 @@ struct Fg
     FgSlot   slots[kSlots];
     FgSlot*  pending = nullptr;              // reserved by FgRecord, handed over by FgSubmit
     UINT64   seq = 0; double last_submit = 0; bool history = false;
+    LONGLONG last_cap = 0;                   // cap_qpc of the previous submit (FgSubmit only)
     // presenter thread
     std::thread thread;
     std::mutex mu; std::condition_variable cv;
@@ -212,7 +215,7 @@ static void Presenter(Fg* f)
 {
     using clock = std::chrono::steady_clock;
     double vb = f->vblank ? OverlayVBlankMs(f->ov) : 0;   // 0 = timer pacing
-    UINT64 prev = 0; double prev_real_target = 0; LONGLONG prev_cap = 0;
+    UINT64 prev = 0; double prev_real_target = 0;
     auto newer_ready = [&](UINT64 seq) { for (auto& x : f->slots) if (x.state == 2 && x.seq > seq) return true; return false; };
     // Pre-emption is gone, and it is only safe to remove it BECAUSE the pick above now takes the
     // newest slot and frees the rest. Under the old oldest-first FIFO it was load-bearing - the
@@ -276,8 +279,7 @@ static void Presenter(Fg* f)
         // to anything happening on our threads. s->interval is submit-to-submit and therefore
         // carries our own stalls back into the cadence that caused them. Fall back to it only when
         // the capture gave us no timestamp.
-        const double content_ms = (s->cap_qpc && prev_cap) ? QpcToMs(s->cap_qpc - prev_cap) : 0.0;
-        const double span = (content_ms > 0.5 && content_ms < 100.0) ? content_ms : s->interval;
+        const double span = (s->content_ms > 0.5 && s->content_ms < 100.0) ? s->content_ms : s->interval;
         // A slot we dropped does NOT invalidate the pair. DLSS-G's history holds the last frame we
         // EVALUATED, and we evaluate every slot we pick, so a gap only widens the motion delta -
         // which `span` has just measured. Requiring seq == prev + 1 spent a generated frame on
@@ -310,7 +312,7 @@ static void Presenter(Fg* f)
             if (ok && wait_until(real_target + ph)) ok = Present(f, s->real, s, true);
             prev_real_target = real_target;
         }
-        prev = s->seq; prev_cap = s->cap_qpc;
+        prev = s->seq;
         { std::lock_guard<std::mutex> lk(f->mu); s->state = 0; }
         f->cv.notify_all();   // FgRecord may be waiting for a free slot
     }
@@ -529,6 +531,12 @@ void FgSubmit(Fg* f, UINT64 render_fence_value, bool reset, LONGLONG cap_qpc, LO
         std::lock_guard<std::mutex> lk(f->mu);
         if (!render_fence_value) { s->state = 0; return; }
         s->seq = ++f->seq; s->fence = render_fence_value; s->cap_qpc = cap_qpc; s->acq_qpc = acq_qpc;
+        // The game's own frame interval. Between consecutive SUBMITS, not between the frames the
+        // presenter happens to evaluate: measuring the evaluated gap made dropping self-amplifying
+        // (drop one, the gap doubles, L doubles, the presenter halves, it drops more) and it settled
+        // at a stable half rate - out == cap with drops == gen.
+        s->content_ms = (cap_qpc && f->last_cap) ? QpcToMs(cap_qpc - f->last_cap) : 0.0;
+        if (cap_qpc) f->last_cap = cap_qpc;
         s->interpolate = f->history && !reset && interval < 100.0;
         s->interval = std::clamp(interval, 4.0, 50.0);
         s->state = 2;
