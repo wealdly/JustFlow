@@ -303,7 +303,7 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
     p->gw = w / bx; p->gh = h / by;
     if (p->gw != cfg.ofa_w || p->gh != cfg.ofa_h) Log("[main] ofa input %ux%u adjusted to %ux%u (block %ux%u)", cfg.ofa_w, cfg.ofa_h, p->gw, p->gh, bx, by);
     p->hud = cfg.hud;
-    p->bypass = !cfg.nr_enabled;   // [nr] enabled=0: no model is created; F9 brings one up on demand
+    p->bypass = !cfg.nr_enabled;   // F9 state: the effect as a whole, model or ArtCNN alike
     if (with_overlay)
     {
         HotkeyDef keys[kHotkeys]; HotkeyDefs(cfg, keys);
@@ -312,7 +312,7 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
     }
     p->sh = ShadersCreate(g);
     if (!p->sh) { PipelineDestroy(p); return nullptr; }
-    if (cfg.nr_enabled)
+    if (cfg.nr_model)
     {
         p->nr = NrInit(g, ExeDir().c_str(), (NrParamBlock)cfg.param_block);
         if (!p->nr) { PipelineDestroy(p); return nullptr; }
@@ -365,6 +365,11 @@ void PipelineReload(Pipeline* p, const Config& c)
     const bool rebuild = ConfigNeedsRebuild(p->cfg, c);
     // recreated next frame (a multiplier change is caught there: the presenter is rebuilt only when it differs)
     if (c.fg_pacing_vblank != p->cfg.fg_pacing_vblank || (c.fg_enabled && c.fg_mv_dilated != p->cfg.fg_mv_dilated)) DropFg(p);
+    if (c.nr_model && !p->nr)
+    {
+        p->nr = NrInit(*p->g, ExeDir().c_str(), (NrParamBlock)c.param_block);
+        if (p->nr) p->create_pending = true; else Log("[nr] init failed on reload");
+    }
     if (c.nr_async != p->cfg.nr_async) { StopModel(p); p->model_failed = false; p->force_reset = true; Log("[nr] mode=%s", c.nr_async ? "async" : "sync"); }
     p->cfg = c;
     SetModelParams(p, c);   // live keys for the model thread (zero_below, exposure, model_max_fps, warmup)
@@ -581,7 +586,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // between an enhancement that fits a frame budget and one that does not. Also covers the
     // model's warm-up, where the screen would otherwise sit on flat native.
     // Not when the user has switched the effect off with a model present - that means everything off.
-    const bool art_only = !async && c.artcnn && !evaluated && !(p->nr && p->bypass);
+    const bool art_only = !async && c.artcnn && !evaluated && !p->bypass;
     const bool native = art_only ? false
                                  : (async ? (p->cmp_idx < 0 || p->bypass) : (!evaluated || p->evals_since_create <= (UINT)std::max(0, c.warmup)));
     if (native) cp.wipe_mode = 2;
@@ -834,9 +839,10 @@ static int RealMain(int argc, char** argv)
         if (!p->bypass)
         {
             p->force_reset = true;
-            // Started with [nr] enabled=0, so there is no model yet: bring it up now (the next frame
-            // creates the feature, and async starts its own thread) rather than demand a restart.
-            if (!p->nr)
+            // Bring up the model only if this profile actually wants one. F9 is the effect
+            // switch, not the model switch - it used to create a model here, which made
+            // "ArtCNN only" impossible to hold: every F9 turned the expensive path back on.
+            if (!p->nr && p->cfg.nr_model)
             {
                 p->nr = NrInit(g, ExeDir().c_str(), (NrParamBlock)p->cfg.param_block);
                 if (p->nr) p->create_pending = true; else Log("[nr] init failed while enabling");
@@ -1074,7 +1080,8 @@ static int RealMain(int argc, char** argv)
                 hud_acq.v.clear();
                 char nr[48];
                 // "NR off" would be a lie while ArtCNN is the thing doing the enhancing.
-                if (p->bypass || !p->nr) strcpy_s(nr, (cfg.artcnn && !(p->nr && p->bypass)) ? "ArtCNN only" : "NR off");
+                if (p->bypass) strcpy_s(nr, "effect off");
+                else if (!p->nr) strcpy_s(nr, cfg.artcnn ? "ArtCNN only" : "no model");
                 else if (cfg.nr_async)
                 {
                     double ms; { std::lock_guard<std::mutex> lk(p->pub_mu); ms = p->model_ms.med(); }

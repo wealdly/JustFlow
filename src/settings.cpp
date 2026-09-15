@@ -32,9 +32,10 @@ const int kTabCount = (int)(sizeof kTabs / sizeof *kTabs);
 const wchar_t* const kWork = L"auto|1920x1080|2560x1440|3200x1800|3840x2160";
 
 const Setting kSettings[] = {
-    { 0, L"nr", L"enabled",           L"Neural rendering",   Bool,  nullptr, L"0" },
+    { 0, L"nr", L"enabled",           L"Effect on (F9)",     Bool,  nullptr, L"1" },
+    { 0, L"nr", L"model",             L"DLSS model (~12ms)", Bool,  nullptr, L"0" },
     { 0, L"nr", L"work",              L"Model resolution",   Enum,  kWork,   L"auto" },
-    { 0, L"nr", L"artcnn",            L"ArtCNN pre-pass",    Bool,  nullptr, L"0" },
+    { 0, L"nr", L"artcnn",            L"ArtCNN (~2.3ms)",    Bool,  nullptr, L"1" },
     { 0, L"nr", L"sharpen",           L"Sharpen",            Float, nullptr, L"0.0" },
     { 0, L"nr", L"residual_strength", L"Effect strength",    Float, nullptr, L"1.0" },
 
@@ -62,6 +63,7 @@ const Setting kSettings[] = {
     { 3, L"capture", L"mode",         L"Capture",            Enum,  L"dda|wgc", L"dda" },
     { 3, L"ofa", L"input",            L"Flow resolution",    Enum,  L"640x360|960x540|1280x720", L"960x540" },
 
+    { 4, L"ui", L"mask",              L"JustFlow addon mask",Bool,  nullptr, L"0" },
     { 4, L"ui", L"hud",               L"Status HUD",         Bool,  nullptr, L"0" },
     { 4, L"ui", L"hud_corner",        L"HUD corner",         Enum,  L"tl|tr|bl|br", L"tl" },
     { 4, L"ui", L"hud_scale",         L"HUD size",           Int,   nullptr, L"3" },
@@ -123,7 +125,8 @@ const PresetKey kPreset[] = {
     // High performance runs NO DLSS model at all: ArtCNN alone carries the enhancement at ~2.3 ms
     // against the model's 12 ms in a real scene, which is the difference between fitting a 90 fps
     // budget alongside frame generation and not. The other three are model tiers.
-    { L"nr",  L"enabled", { L"0",         L"1",         L"1",         L"1" } },
+    { L"nr",  L"enabled", { L"1",         L"1",         L"1",         L"1" } },
+    { L"nr",  L"model",   { L"0",         L"1",         L"1",         L"1" } },
     { L"nr",  L"work",    { L"1920x1080", L"1920x1080", L"2560x1440", L"3200x1800" } },
     { L"nr",  L"artcnn",  { L"1",         L"0",         L"0",         L"1" } },
     { L"nr",  L"sharpen", { L"0.4",       L"0.3",       L"0.2",       L"0.0" } },

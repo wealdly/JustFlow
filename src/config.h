@@ -22,7 +22,12 @@ struct Config
     bool cursor = false, border = false;
     bool dda = true;                       // capture.mode: dda (monitor refresh rate) | wgc (60 Hz ceiling)
     // [nr]
-    bool  nr_enabled = false;              // the app starts as a frame generator; F9 brings the model up
+    // Two separate things, because one key could not say "effect on, model off, ArtCNN on":
+    //   enabled = the effect as a whole, which is what F9 toggles and what persists.
+    //   model   = use the DLSS neural-rendering model (expensive: ~12 ms in a real scene).
+    //   artcnn  = use ArtCNN (~2.3 ms), on its own or ahead of the model.
+    bool  nr_enabled = true;
+    bool  nr_model = false;
     UINT  work_w = 0, work_h = 0;          // 0 = auto (from spike results / default 2560x1440)
     int   create_style = 1;                // 0 = A (NeuralScreen set), 1 = B (plain)   [app layer]
     int   param_block = 1;                 // 1 Allocate, 2 Capability, 3 Own           [app layer]
