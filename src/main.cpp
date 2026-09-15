@@ -619,7 +619,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
             if (toast_on) GpuUavBarrier(cl, shown);   // a wide toast can reach a wide HUD line
             const int sc = std::max(1, c.hud_scale), pad = 2 * sc, margin = 24, gap = sc, bh = TextBoxH(sc, pad);
             const bool right = c.hud_corner & 1, bottom = c.hud_corner & 2;
-            int y = bottom ? (int)p->h - margin - 2 * bh - gap : margin;
+            const int nlines = (int)(sizeof p->hud_line / sizeof p->hud_line[0]);
+            int y = bottom ? (int)p->h - margin - nlines * bh - (nlines - 1) * gap : margin;
             for (const char* line : p->hud_line)
             {
                 const int bw = TextBoxW(strlen(line), sc, pad);
@@ -914,6 +915,7 @@ static int RealMain(int argc, char** argv)
         // FG / model counters are handed over on read: the HUD tick (250 ms) and the [stats] line share one drain
         FgStatsOut fs_agg; UINT model_evals_acc = 0;
         double hud_t = NowMs(); UINT hud_frames = 0, hud_presented = 0, hud_model = 0;
+        UINT hud_gen = 0, hud_nopair = 0, hud_disabled = 0, hud_preempt = 0;   // FG gates, live on the HUD
         auto drain = [&]
         {
             if (p->fg)
@@ -922,6 +924,8 @@ static int RealMain(int argc, char** argv)
                 fs_agg.presented += fs.presented; fs_agg.drops += fs.drops; hud_presented += fs.presented;
                 fs_agg.gen_shown += fs.gen_shown; fs_agg.no_pair += fs.no_pair;
                 fs_agg.disabled += fs.disabled; fs_agg.preempts += fs.preempts;
+                hud_gen += fs.gen_shown; hud_nopair += fs.no_pair;
+                hud_disabled += fs.disabled; hud_preempt += fs.preempts;
                 fs_agg.spacing_ms.insert(fs_agg.spacing_ms.end(), fs.spacing_ms.begin(), fs.spacing_ms.end());
                 fs_agg.age_ms.insert(fs_agg.age_ms.end(), fs.age_ms.begin(), fs.age_ms.end());
                 fs_agg.pipe_ms.insert(fs_agg.pipe_ms.end(), fs.pipe_ms.begin(), fs.pipe_ms.end());
@@ -1011,7 +1015,12 @@ static int RealMain(int argc, char** argv)
                 char mask[8]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "-");
                 if (p->fg && FgMultiplier(p->fg) > 1) sprintf_s(p->hud_line[1], "%s  FG %dX %.1fms  mask %s", nr, FgMultiplier(p->fg), std::max(0.0, FgEvalMs(p->fg, nullptr)), mask);
                 else sprintf_s(p->hud_line[1], "%s  FG off  mask %s", nr, mask);
+                // Why FG is or is not paying off: shown generated frames, then the gate that ate the rest.
+                if (p->fg && FgMultiplier(p->fg) > 1 && hud_frames)
+                    sprintf_s(p->hud_line[2], "gen %.0f%%  nopair %u  off %u  late %u", hud_gen * 100.0 / hud_frames, hud_nopair, hud_disabled, hud_preempt);
+                else p->hud_line[2][0] = 0;
                 hud_t = NowMs(); hud_frames = 0; hud_presented = 0; hud_model = 0;
+                hud_gen = 0; hud_nopair = 0; hud_disabled = 0; hud_preempt = 0;
             }
             if (++frames % (UINT)std::max(1, cfg.stats_every) == 0)
             {

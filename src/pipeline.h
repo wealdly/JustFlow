@@ -82,7 +82,7 @@ struct Pipeline
     double     toast_t0 = 0, toast_until_ms = 0;
     bool       model_toast_pending = false;      // "Model ready" once a rebuilt model composes
     bool       hud = false;                      // [ui] hud, F7
-    char       hud_line[2][65] = {};             // filled by main every 250 ms (empty = nothing drawn)
+    char       hud_line[3][65] = {};             // filled by main every 250 ms (empty line = nothing drawn)
 
     // ---- decoupled model track ([nr] mode=async) --------------------------------------------------
     // Main hands one native frame at a time to the model thread (model_src copy + gray in a held OFA
