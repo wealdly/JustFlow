@@ -33,21 +33,9 @@ std::wstring ExeDir()
     return p;
 }
 
-// Above 2560x1440 the model is unusable: at 3200x1800 the evaluate takes the process down, and at
-// 3840x2160 it covers only a subrect in the top-left of nr_out and leaves the rest at zero, so the
-// residual composes to black outside it. The spike only checked those sizes ran, not that they
-// covered the frame. Every source of a work size funnels through here, so cap it once.
-static void CapWork(Config& c, const wchar_t* why)
-{
-    const UINT kMaxW = 2560, kMaxH = 1440;
-    if (c.work_w <= kMaxW && c.work_h <= kMaxH) return;
-    Log("[nr] work %ux%u (%ls) is past the model's usable size - capped to %ux%u", c.work_w, c.work_h, why, kMaxW, kMaxH);
-    c.work_w = kMaxW; c.work_h = kMaxH;
-}
-
 void ResolveWork(Config& c, const std::wstring& dir)
 {
-    if (c.work_w && c.work_h) { CapWork(c, L"profile"); return; }
+    if (c.work_w && c.work_h) return;
     const std::wstring ini = dir + L"\\justflow.spike.ini";
     wchar_t buf[64] = {};
     GetPrivateProfileStringW(L"spike", L"work", L"", buf, 64, ini.c_str());
@@ -56,7 +44,6 @@ void ResolveWork(Config& c, const std::wstring& dir)
         c.create_style = (int)GetPrivateProfileIntW(L"spike", L"create_style", c.create_style, ini.c_str());
         c.param_block = (int)GetPrivateProfileIntW(L"spike", L"param_block", c.param_block, ini.c_str());
         Log("[nr] work %ux%u style %d block %d from justflow.spike.ini", c.work_w, c.work_h, c.create_style, c.param_block);
-        CapWork(c, L"justflow.spike.ini");
     }
     else { c.work_w = 2560; c.work_h = 1440; Log("[nr] work auto -> 2560x1440 (no justflow.spike.ini)"); }
 }
