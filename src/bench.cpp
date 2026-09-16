@@ -179,6 +179,29 @@ int RunBench(int argc, char** argv)
         Log("[fg] bench: %u frames presented (%.1f fps), %u dropped, spacing %.2f/%.2f ms (med/p95, %zu samples)", fs.presented, fs.presented * 1000.0 / wall, fs.drops, sp.med(), sp.p95(), sp.v.size());
     }
 
+    // What the spike never checked: that the model wrote the whole work texture. A subrect here is
+    // the "renders in the top-left, dark everywhere else" symptom, and it is silent at runtime.
+    if (p->nr)
+    {
+        ID3D12Resource* out = cfg.nr_async ? p->nr_out_m : p->nr_out;
+        const UINT ww = p->ww, wh = p->wh;
+        std::vector<uint8_t> px((size_t)ww * wh * 4);
+        if (out && GpuReadbackTex(g, out, px.data(), ww, wh, 4, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+        {
+            UINT x0 = ww, y0 = wh, x1 = 0, y1 = 0; size_t nz = 0;
+            for (UINT y = 0; y < wh; ++y) for (UINT x = 0; x < ww; ++x)
+            {
+                const uint8_t* q = &px[((size_t)y * ww + x) * 4];
+                if (q[0] | q[1] | q[2])
+                { ++nz; if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y; }
+            }
+            const double frac = 100.0 * (double)nz / ((double)ww * wh);
+            const char* verdict = frac > 99.0 ? "PASS" : "FAIL (the model wrote a subrect)";
+            Log("[bench] nr_out coverage %ux%u: %.1f%% written, bbox %u,%u..%u,%u - %s", ww, wh, frac, x0, y0, x1, y1, verdict);
+            printf("nr_out coverage %ux%u: %.1f%% written, bbox %u,%u..%u,%u - %s\n", ww, wh, frac, x0, y0, x1, y1, verdict);
+        }
+    }
+
     printf("\n%-16s %10s %10s %8s\n", "stage", "median ms", "p95 ms", "samples");
     FILE* csv = nullptr; _wfopen_s(&csv, (dir + L"\\bench.csv").c_str(), L"w");
     if (csv) fprintf(csv, "stage,median_ms,p95_ms,samples\n");
