@@ -2,11 +2,18 @@
 // it (one row per setting, one tab per group) and writes each key back through ConfigIsAppKey, so
 // adding a setting means adding a row here and reading it in config.cpp.
 //
-// Diagnostics stay out of the table on purpose. Ini-only: create_style, param_block, warmup,
+// A row earns its place by being worth tuning. Ini-only, either because they are diagnostics or
+// because tuning them changes nothing anyone can see: create_style, param_block, warmup,
 // rebuild_debounce_frames, selftest, fg.pacing, fg.mv_dilated, fg.phase_ms, nr.exposure_scale,
 // nr.model_max_fps, nr.warp, ofa.input/grid/zero_below, capture.cursor/border, ui.rectN,
-// ui.mask_every, ui.feather. They are for debugging, not for tuning, and a panel that lists
-// everything is a panel nobody can read.
+// ui.mask_every, ui.feather, ui.toast_scale, overlay.mode.
+// Dropped deliberately after measurement rather than taste:
+//   nr.intensity      - the runtime CLAMPS it at 1.0 (upstream re-measured this on the live DLL),
+//                       so the slider only ever moved downward. residual_strength scales the whole
+//                       edit predictably and is the honest control.
+//   nr.skin_structure - -1 already means "follow local_structure", which is what anyone wants.
+//   nr.auto_mask      - no visible effect in testing here.
+//   nr.ui_correction  - same; our own UI rects are what actually protect the interface.
 #include "settings.h"
 #include "config.h"
 #include <commctrl.h>
@@ -36,7 +43,7 @@ const wchar_t* const kTabs[] = { L"Neural", L"Model", L"Filters", L"Frame gen", 
 const int kTabCount = (int)(sizeof kTabs / sizeof *kTabs);
 
 // Model resolutions: the measured cost is ~1.5 ms/MPix + 1 ms on a 5080, so 4K is a 60 fps tier.
-const wchar_t* const kWork = L"auto|1920x1080|2560x1440|3200x1800|3840x2160";
+const wchar_t* const kWork = L"auto|1920x1080|2560x1440";   // past 1440p the model crashes (1800p) or covers only a corner (4K)
 
 const Setting kSettings[] = {
     // ---- 0 Neural layer: which model runs, and how its residual is applied ---------------------
@@ -49,13 +56,9 @@ const Setting kSettings[] = {
 
     // ---- 1 Model tuning: only bites when the DLSS model is on ----------------------------------
     { 1, L"nr", L"mode",              L"Model mode",         Enum,  L"sync|async", L"sync" },
-    { 1, L"nr", L"style",             L"Style (0-2)",        Int,   nullptr, L"0" },
-    { 1, L"nr", L"intensity",         L"Intensity",          Float, nullptr, L"1.0" },
+    { 1, L"nr", L"style",             L"Style 0=std 1=nat 2=cine", Int, nullptr, L"0" },
     { 1, L"nr", L"local_tone",        L"Local tone/colour",  Float, nullptr, L"0.2" },
     { 1, L"nr", L"local_structure",   L"Local structure",    Float, nullptr, L"1.0" },
-    { 1, L"nr", L"skin_structure",    L"Skin structure",     Float, nullptr, L"-1" },
-    { 1, L"nr", L"auto_mask",         L"Auto skin mask",     Bool,  nullptr, L"1" },
-    { 1, L"nr", L"ui_correction",     L"UI correction",      Bool,  nullptr, L"1" },
 
     // ---- 2 Filters: ordinary post passes, independent of the neural layer ----------------------
     { 2, L"nr", L"sharpen",           L"Sharpen",            Float, nullptr, L"0.0" },
@@ -63,20 +66,18 @@ const Setting kSettings[] = {
 
     // ---- 3 Frame generation ---------------------------------------------------------------------
     { 3, L"fg", L"enabled",           L"Frame generation",   Bool,  nullptr, L"1" },
-    { 3, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4", L"2" },
+    { 3, L"fg", L"multiplier",        L"Multiplier (warps UI)", Enum, L"2|3|4", L"2" },
 
     // ---- 4 Display --------------------------------------------------------------------------------
     { 4, L"ui", L"hud",               L"Status HUD (F7)",    Bool,  nullptr, L"0" },
     { 4, L"ui", L"hud_corner",        L"HUD corner",         Enum,  L"tl|tr|bl|br", L"tl" },
     { 4, L"ui", L"hud_scale",         L"HUD size",           Int,   nullptr, L"3" },
     { 4, L"ui", L"toast",             L"Toasts",             Bool,  nullptr, L"1" },
-    { 4, L"ui", L"toast_scale",       L"Toast size",         Int,   nullptr, L"4" },
     { 4, L"ui", L"mask",              L"JustFlow addon mask",Bool,  nullptr, L"0" },
 
     // ---- 5 System: this machine, rarely touched ---------------------------------------------------
     { 5, L"gpu", L"adapter",          L"GPU (-1 = auto)",    Int,   nullptr, L"-1" },
     { 5, L"capture", L"mode",         L"Capture",            Enum,  L"dda|wgc", L"dda" },
-    { 5, L"overlay", L"mode",         L"Overlay",            Enum,  L"composed|direct", L"composed" },
     { 5, L"nr", L"max_fps",           L"FPS cap (0 = off)",  Int,   nullptr, L"0" },
 
     // ---- 6 Hotkeys ---------------------------------------------------------------------------------
@@ -134,7 +135,7 @@ const PresetKey kPreset[] = {
     // budget alongside frame generation and not. The other three are model tiers.
     { L"nr",  L"enabled", { L"1",         L"1",         L"1",         L"1" } },
     { L"nr",  L"model",   { L"0",         L"1",         L"1",         L"1" } },
-    { L"nr",  L"work",    { L"1920x1080", L"1920x1080", L"2560x1440", L"3200x1800" } },
+    { L"nr",  L"work",    { L"1920x1080", L"1920x1080", L"2560x1440", L"2560x1440" } },
     { L"nr",  L"artcnn",  { L"1",         L"0",         L"0",         L"1" } },
     { L"nr",  L"sharpen", { L"0.4",       L"0.3",       L"0.2",       L"0.0" } },
     { L"ofa", L"input",   { L"640x360",   L"960x540",   L"960x540",   L"1280x720" } },
