@@ -984,12 +984,12 @@ static int RealMain(int argc, char** argv)
         // picks a profile or generates one - "auto" is opt-in, not the default.
         if (profile < 0 || ini_path.empty())
         {
-            swprintf_s(status, L"no profile - pick one from the tray");
+            _snwprintf_s(status, _TRUNCATE, L"no profile - pick one from the tray");
             tray_state();
             while (!quit && pending_profile < 0) { Sleep(100); handle_tray(); }
             continue;
         }
-        swprintf_s(status, L"%ls  waiting for window", profile_name().c_str()); tray_state();
+        _snwprintf_s(status, _TRUNCATE, L"%ls  waiting for window", profile_name().c_str()); tray_state();
         HWND target = nullptr;
         for (int i = 0; !quit && pending_profile < 0 && !(target = FindTarget(cfg)); ++i)
         {
@@ -1004,7 +1004,7 @@ static int RealMain(int argc, char** argv)
         if (!cap) { Sleep(1000); continue; }
         p = PipelineCreate(g, cfg, CaptureWidth(cap), CaptureHeight(cap), true, target);
         if (!p) { CaptureClose(cap); rc = 1; break; }
-        swprintf_s(status, L"%ls", profile_name().c_str()); tray_state();
+        _snwprintf_s(status, _TRUNCATE, L"%ls", profile_name().c_str()); tray_state();
         if (switched) { switched = false; PipelineToast(p, "Profile: %ls", profile_name().c_str()); }
         else
         {
@@ -1118,8 +1118,10 @@ static int RealMain(int argc, char** argv)
                 const double dt = NowMs() - hud_t, cap_fps = hud_frames * 1000.0 / dt, out_fps = hud_presented * 1000.0 / dt;
                 const double age = StageStats{ fs_agg.age_ms }.med();
                 char capstr[12]; if (cfg.max_fps > 0) sprintf_s(capstr, "%d", cfg.max_fps); else strcpy_s(capstr, "none");
-                sprintf_s(p->hud_line[0], "in %.0f  out %.0f  age %.0f ms  acq %.1f ms  cap %s", cap_fps, out_fps, std::max(0.0, age), std::max(0.0, hud_acq.med()), capstr);
+                snprintf(p->hud_line[0], sizeof p->hud_line[0], "in %.0f  out %.0f  age %.0f ms  acq %.1f ms  cap %s", cap_fps, out_fps, std::max(0.0, age), std::max(0.0, hud_acq.med()), capstr);
                 hud_acq.v.clear();
+                // snprintf, not sprintf_s: an overflow here must clip the HUD, not fast-fail the
+                // process (sprintf_s calls the invalid-parameter handler, which is a hard kill).
                 char nr[48];
                 // "NR off" would be a lie while ArtCNN is the thing doing the enhancing.
                 if (p->bypass) strcpy_s(nr, "effect off");
@@ -1127,16 +1129,16 @@ static int RealMain(int argc, char** argv)
                 else if (cfg.nr_async)
                 {
                     double ms; { std::lock_guard<std::mutex> lk(p->pub_mu); ms = p->model_ms.med(); }
-                    sprintf_s(nr, "NR %.1f ms %up async %.0f fps", std::max(0.0, ms), p->wh, hud_model * 1000.0 / dt);
-                    if (cfg.model_max_fps > 0) sprintf_s(nr + strlen(nr), sizeof nr - strlen(nr), " model %d/s cap", cfg.model_max_fps);
+                    snprintf(nr, sizeof nr, "NR %.1f ms %up async %.0f fps", std::max(0.0, ms), p->wh, hud_model * 1000.0 / dt);
+                    if (cfg.model_max_fps > 0) snprintf(nr + strlen(nr), sizeof nr - strlen(nr), " cap %d/s", cfg.model_max_fps);
                 }
-                else sprintf_s(nr, "NR %.1f ms %up", std::max(0.0, p->st[PS_EVAL].med()), p->wh);
+                else snprintf(nr, sizeof nr, "NR %.1f ms %up", std::max(0.0, p->st[PS_EVAL].med()), p->wh);
                 char mask[8]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "-");
-                if (p->fg && FgMultiplier(p->fg) > 1) sprintf_s(p->hud_line[1], "%s  FG %dX %.1fms  mask %s", nr, FgMultiplier(p->fg), std::max(0.0, FgEvalMs(p->fg, nullptr)), mask);
-                else sprintf_s(p->hud_line[1], "%s  FG off  mask %s", nr, mask);
+                if (p->fg && FgMultiplier(p->fg) > 1) snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  FG %dX %.1fms  mask %s", nr, FgMultiplier(p->fg), std::max(0.0, FgEvalMs(p->fg, nullptr)), mask);
+                else snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  FG off  mask %s", nr, mask);
                 // Why FG is or is not paying off: shown generated frames, then the gate that ate the rest.
                 if (p->fg && FgMultiplier(p->fg) > 1 && hud_frames)
-                    sprintf_s(p->hud_line[2], "gen %.0f%%  nopair %u  off %u  late %u", hud_gen * 100.0 / hud_frames, hud_nopair, hud_disabled, hud_preempt);
+                    snprintf(p->hud_line[2], sizeof p->hud_line[2], "gen %.0f%%  nopair %u  off %u  late %u", hud_gen * 100.0 / hud_frames, hud_nopair, hud_disabled, hud_preempt);
                 else p->hud_line[2][0] = 0;
                 hud_t = NowMs(); hud_frames = 0; hud_presented = 0; hud_model = 0;
                 hud_gen = 0; hud_nopair = 0; hud_disabled = 0; hud_preempt = 0;
@@ -1162,7 +1164,7 @@ static int RealMain(int argc, char** argv)
                     fg_fps, spacing.med(), spacing.p95(), fs.drops, fs.gen_shown, fs.no_pair, fs.disabled, fs.preempts, fg_eval, fg_eval_p95, pres_total, pres_prev, pres_call, fs.vblank_waits ? fs.vblank_wait_sum_ms / fs.vblank_waits : -1.0,
                     fs.record_waits ? fs.record_wait_sum_ms / fs.record_waits : -1.0, fs.record_waits,
                     model_evals * 1000.0 / span, mm.med(), p->residual_age.med(), mask, vram_used, vram_budget);
-                swprintf_s(status, L"%ls  cap %.0f  out %.0f fps  age %.0f ms", profile_name().c_str(), cap_fps, fg_fps, std::max(0.0, age.med()));
+                _snwprintf_s(status, _TRUNCATE, L"%ls  cap %.0f  out %.0f fps  age %.0f ms", profile_name().c_str(), cap_fps, fg_fps, std::max(0.0, age.med()));
                 tray_state();
                 p->residual_age.v.clear();
                 Log("[stats] gpu: swz=%.2f gray+ds=%.2f expand=%.2f eval=%.2f compose=%.2f filter=%.2f | cpu waits: begin1=%.1f ofa=%.1f begin2=%.1f present=%.1f",
