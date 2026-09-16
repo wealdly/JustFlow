@@ -15,6 +15,7 @@ enum TrayEvent
     TrayOpenConfig,     // the active profile (profiles\<game>.ini), for hand editing
     TrayOpenAppConfig,  // justflow.ini (hotkeys, ui, overlay, log stats), for hand editing
     TrayOpenLog,
+    TrayRescanProfiles,  // a profile was written: re-scan profiles\ and switch to [app] profile
     TrayQuit,
 };
 

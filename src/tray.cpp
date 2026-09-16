@@ -18,7 +18,7 @@ const UINT WM_TRAY_STATE = WM_APP + 2;   // TraySetState -> refresh tooltip on t
 const UINT ICON_ID = 1;
 
 enum { IDM_STATUS = 1, IDM_NR, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM_MULT3, IDM_MULT4, IDM_WIPE, IDM_RELOAD,
-       IDM_SETTINGS, IDM_CONFIG, IDM_APPCONFIG, IDM_LOG, IDM_QUIT,
+       IDM_SETTINGS, IDM_NEWPROFILE, IDM_CONFIG, IDM_APPCONFIG, IDM_LOG, IDM_QUIT,
        IDM_PRESET0 = 60, IDM_PROFILE0 = 100 };
 }
 
@@ -68,6 +68,21 @@ static HICON MakeIcon()
 
 // ---- settings dialog ---------------------------------------------------------------------------
 
+// profiles\<name>.ini -> the directory that holds them
+static std::wstring ProfilesDir(const std::wstring& profile_ini)
+{
+    const size_t sl = profile_ini.find_last_of(L"\\/");
+    return sl == std::wstring::npos ? L"profiles" : profile_ini.substr(0, sl);
+}
+
+static void ShowNewProfileDialog(Tray* t)
+{
+    std::wstring app, profile;
+    { std::lock_guard<std::mutex> lk(t->mu); app = t->app_ini; profile = t->profile_ini; }
+    if (NewProfileDialog(t->hwnd, ProfilesDir(profile).c_str(), app.c_str(), t->app.c_str()))
+        Push(t, TrayRescanProfiles);
+}
+
 static void ShowSettingsDialog(Tray* t)
 {
     std::wstring app, profile; HWND game;
@@ -115,6 +130,7 @@ static HMENU BuildMenu(Tray* t)
     if (t->profile >= 0 && t->profile < (int)t->profiles.size())
         CheckMenuRadioItem(pr, IDM_PROFILE0, IDM_PROFILE0 + (UINT)t->profiles.size() - 1, IDM_PROFILE0 + t->profile, MF_BYCOMMAND);
     AppendMenuW(m, MF_POPUP, (UINT_PTR)pr, L"Profiles");
+    AppendMenuW(m, MF_STRING, IDM_NEWPROFILE, L"New profile from window...");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
 
     AppendMenuW(m, MF_STRING, IDM_SETTINGS, L"Settings...");
@@ -154,6 +170,7 @@ static void ShowMenu(Tray* t)
     case IDM_LOG:     Push(t, TrayOpenLog); break;
     case IDM_QUIT:    Push(t, TrayQuit); break;
     case IDM_SETTINGS: ShowSettingsDialog(t); break;
+    case IDM_NEWPROFILE: ShowNewProfileDialog(t); break;
     default:
         if (cmd >= IDM_PROFILE0) Push(t, TraySelectProfile, cmd - IDM_PROFILE0);
         else if (cmd >= IDM_PRESET0 && cmd < IDM_PRESET0 + kPresetCount)

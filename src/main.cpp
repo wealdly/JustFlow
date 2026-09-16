@@ -665,6 +665,9 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
 // ---- live mode ----------------------------------------------------------------------------------------
 static HWND FindTarget(const Config& c)
 {
+    // Both empty matches the FIRST window on the desktop, which is how a profile-less start would
+    // attach itself to something arbitrary. A profile that names nothing targets nothing.
+    if (c.window_class.empty() && c.window_title.empty()) return nullptr;
     HWND h = nullptr;
     while ((h = FindWindowExW(nullptr, h, c.window_class.empty() ? nullptr : c.window_class.c_str(), nullptr)) != nullptr)
     {
@@ -709,6 +712,9 @@ std::wstring PickProfile(const std::wstring& dir, const std::wstring& ini, std::
     if (!ini.empty()) { index = find(Stem(ini)); return ini.find(L'\\') != std::wstring::npos ? ini : dir + L"\\" + ini; }
     if (names.empty()) return L"";
     Config a; ConfigLoad((dir + L"\\justflow.ini").c_str(), nullptr, a);   // [app] profile=<name> pins the startup profile
+    // none = start attached to nothing. The tray picks one, or "New profile from window..."
+    // generates one. JustFlow should not grab a game the user did not ask it to.
+    if (_wcsicmp(a.profile.c_str(), L"none") == 0) { index = -1; return L""; }
     if (!a.profile.empty() && _wcsicmp(a.profile.c_str(), L"auto") != 0)
     {
         index = find(a.profile);
@@ -925,6 +931,18 @@ static int RealMain(int argc, char** argv)
             cfg.fg_multiplier = arg; Log("[main] fg multiplier %d", arg); tray_state();
             break;
         case TraySelectProfile: if (arg >= 0 && arg < (int)profiles.size() && arg != profile) pending_profile = arg; break;
+        case TrayRescanProfiles:
+        {
+            // PickProfile honours [app] profile, which the picker just pointed at the new file.
+            std::vector<std::wstring> names; int idx = -1;
+            PickProfile(dir, L"", names, idx);
+            profiles = names;
+            std::vector<const wchar_t*> pn; for (auto& n : profiles) pn.push_back(n.c_str());
+            TraySetProfiles(tray, pn.data(), (int)pn.size());
+            if (idx >= 0 && idx != profile) pending_profile = idx;
+            Log("[main] profiles rescanned (%zu), selected %d", profiles.size(), idx);
+            break;
+        }
         case TrayOpenConfig:    ShellExecuteW(nullptr, L"open", ini_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
         case TrayOpenAppConfig: ShellExecuteW(nullptr, L"open", app_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
         case TrayOpenLog:       ShellExecuteW(nullptr, L"open", log_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
@@ -948,6 +966,15 @@ static int RealMain(int argc, char** argv)
             LogConfigFiles(app_path, ini_path, have);
             Log("[main] profile %ls", ini_path.c_str());
             if (tray) TrayNotify(tray, L"JustFlow", (L"Profile: " + profiles[profile]).c_str());
+        }
+        // No profile: sit in the tray. Nothing is captured and no window is touched until the user
+        // picks a profile or generates one - "auto" is opt-in, not the default.
+        if (profile < 0 || ini_path.empty())
+        {
+            swprintf_s(status, L"no profile - pick one from the tray");
+            tray_state();
+            while (!quit && pending_profile < 0) { Sleep(100); handle_tray(); }
+            continue;
         }
         swprintf_s(status, L"%ls  waiting for window", profile_name().c_str()); tray_state();
         HWND target = nullptr;

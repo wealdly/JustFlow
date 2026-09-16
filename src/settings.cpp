@@ -10,6 +10,7 @@
 #include "settings.h"
 #include "config.h"
 #include <commctrl.h>
+#include <dwmapi.h>
 #include <string>
 #include <vector>
 
@@ -333,6 +334,130 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     return FALSE;
 }
 }   // namespace
+
+// ---- new profile from an open window ----------------------------------------------------------
+namespace
+{
+struct WinPick { HWND hwnd; std::wstring title, cls; };
+
+BOOL CALLBACK CollectWindow(HWND h, LPARAM lp)
+{
+    auto* out = (std::vector<WinPick>*)lp;
+    if (!IsWindowVisible(h) || GetWindowTextLengthW(h) == 0) return TRUE;
+    if (GetWindowLongW(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) return TRUE;
+    BOOL cloaked = FALSE;   // UWP keeps invisible ghost windows around; they are cloaked, not hidden
+    if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof cloaked)) && cloaked) return TRUE;
+    RECT r{};
+    if (!GetWindowRect(h, &r) || r.right - r.left < 320 || r.bottom - r.top < 240) return TRUE;
+    wchar_t cls[128] = {}; GetClassNameW(h, cls, 128);
+    if (!wcscmp(cls, L"JustFlowPresent") || !wcscmp(cls, L"JustFlowTray")) return TRUE;
+    wchar_t t[256] = {}; GetWindowTextW(h, t, 256);
+    out->push_back({ h, t, cls });
+    return TRUE;
+}
+
+// "World of Warcraft" -> "world-of-warcraft"; the stem becomes the profile's file name.
+std::wstring Stemify(const std::wstring& title)
+{
+    std::wstring out;
+    for (wchar_t c : title)
+    {
+        if (iswalnum(c)) out += (wchar_t)towlower(c);
+        else if (!out.empty() && out.back() != L'-') out += L'-';
+        if (out.size() >= 32) break;
+    }
+    while (!out.empty() && out.back() == L'-') out.pop_back();
+    return out.empty() ? L"game" : out;
+}
+
+const int ID_LIST = 60;
+struct PickData { std::vector<WinPick> wins; const wchar_t *dir, *app, *name; bool made = false; };
+
+std::vector<WORD> BuildPickTemplate()
+{
+    std::vector<WORD> w;
+    auto dw = [&](DWORD v) { w.push_back(LOWORD(v)); w.push_back(HIWORD(v)); };
+    auto str = [&](const wchar_t* s) { do w.push_back(*s); while (*s++); };
+    auto item = [&](DWORD style, int x, int y, int cx, int cy, WORD id, WORD atom, const wchar_t* text)
+    {
+        if (w.size() & 1) w.push_back(0);
+        dw(style | WS_CHILD | WS_VISIBLE); dw(0);
+        w.push_back((WORD)x); w.push_back((WORD)y); w.push_back((WORD)cx); w.push_back((WORD)cy);
+        w.push_back(id); w.push_back(0xFFFF); w.push_back(atom); str(text); w.push_back(0);
+    };
+    dw(DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU); dw(0);
+    w.push_back(4);
+    w.push_back(0); w.push_back(0); w.push_back(300); w.push_back(190);
+    w.push_back(0); w.push_back(0); str(L"New profile from a window");
+    w.push_back(8); str(L"MS Shell Dlg");
+    item(SS_LEFT, 7, 7, 286, 18, 300, 0x0082, L"Pick the game's window. A profile is written for its title and class, and selected.");
+    item(LBS_NOTIFY | WS_BORDER | WS_VSCROLL | WS_TABSTOP, 7, 28, 286, 130, ID_LIST, 0x0083, L"");
+    item(BS_DEFPUSHBUTTON | WS_TABSTOP, 185, 166, 52, 15, IDOK, 0x0080, L"Create");
+    item(BS_PUSHBUTTON | WS_TABSTOP, 242, 166, 52, 15, IDCANCEL, 0x0080, L"Cancel");
+    return w;
+}
+
+INT_PTR CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    PickData* d = (PickData*)GetWindowLongPtrW(h, GWLP_USERDATA);
+    if (msg == WM_INITDIALOG)
+    {
+        d = (PickData*)lp; SetWindowLongPtrW(h, GWLP_USERDATA, lp);
+        for (const auto& wp2 : d->wins)
+        {
+            const std::wstring line = wp2.title + L"   [" + wp2.cls + L"]";
+            SendMessageW(GetDlgItem(h, ID_LIST), LB_ADDSTRING, 0, (LPARAM)line.c_str());
+        }
+        SendMessageW(GetDlgItem(h, ID_LIST), LB_SETCURSEL, 0, 0);
+        return TRUE;
+    }
+    if (msg != WM_COMMAND) return FALSE;
+    if (LOWORD(wp) == IDCANCEL) { EndDialog(h, 0); return TRUE; }
+    if (LOWORD(wp) == ID_LIST && HIWORD(wp) == LBN_DBLCLK) PostMessageW(h, WM_COMMAND, IDOK, 0);
+    if (LOWORD(wp) != IDOK) return FALSE;
+    const int sel = (int)SendMessageW(GetDlgItem(h, ID_LIST), LB_GETCURSEL, 0, 0);
+    if (sel < 0 || sel >= (int)d->wins.size()) { EndDialog(h, 0); return TRUE; }
+    const WinPick& win = d->wins[sel];
+    const std::wstring stem = Stemify(win.title);
+    const std::wstring path = std::wstring(d->dir) + L"\\" + stem + L".ini";
+    // Written as text, not through WritePrivateProfileString, so the file keeps its comments.
+    const std::wstring ini =
+        L"; JustFlow profile generated from an open window.\n"
+        L"; Matching is on the TITLE (a prefix match). window_class is recorded below for reference:\n"
+        L"; fill it in if two windows share a title. Both come from the window, never the process.\n\n"
+        L"[capture]\nmode=dda\nwindow_class=\nwindow_title=" + win.title + L"\ncursor=0\nborder=0\n"
+        L"; class seen when this profile was made: " + win.cls + L"\n\n"
+        L"[nr]\n; enabled = the effect as a whole (F9). model = the DLSS model (~12 ms).\n"
+        L"; artcnn = ArtCNN (~2.3 ms), which needs no model.\n"
+        L"enabled=1\nmodel=0\nartcnn=1\nwork=1920x1080\nchroma=0.25\n\n"
+        L"; filters, applied after the neural layer: sharpen then vibrance.\n"
+        L"sharpen=0.4\nsaturation=1.10\n\n"
+        L"[ofa]\ninput=960x540\n\n"
+        L"[ui]\nfeather=12\n\n"
+        L"[fg]\nenabled=1\nmultiplier=2\n\n"
+        L"[log]\nfile=justflow." + stem + L".log\n";
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"wt,ccs=UTF-8") == 0 && f)
+    {
+        fputws(ini.c_str(), f); fclose(f);
+        WritePrivateProfileStringW(L"app", L"profile", stem.c_str(), d->app);   // select it on the next scan
+        d->made = true;
+    }
+    else MessageBoxW(h, (L"Could not write " + path).c_str(), d->name, MB_ICONWARNING);
+    EndDialog(h, 1);
+    return TRUE;
+}
+}   // namespace
+
+bool NewProfileDialog(HWND parent, const wchar_t* profiles_dir, const wchar_t* app_ini, const wchar_t* app_name)
+{
+    PickData d; d.dir = profiles_dir; d.app = app_ini; d.name = app_name;
+    EnumWindows(CollectWindow, (LPARAM)&d.wins);
+    if (d.wins.empty()) { MessageBoxW(parent, L"No suitable windows are open.", app_name, MB_ICONINFORMATION); return false; }
+    static const std::vector<WORD> tmpl = BuildPickTemplate();
+    DialogBoxIndirectParamW(GetModuleHandleW(nullptr), (const DLGTEMPLATE*)tmpl.data(), parent, PickProc, (LPARAM)&d);
+    return d.made;
+}
 
 bool SettingsDialog(HWND parent, const wchar_t* app_ini, const wchar_t* profile_ini, const wchar_t* app_name, HWND keep_clear_of)
 {

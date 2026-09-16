@@ -10,6 +10,11 @@
 bool SettingsDialog(HWND parent, const wchar_t* app_ini, const wchar_t* profile_ini, const wchar_t* app_name,
                     HWND keep_clear_of = nullptr);
 
+// Lists the open top-level windows and writes a profile for the one picked, then points
+// [app] profile at it. Window title and class only - deliberately no OpenProcess, so the binary
+// keeps its clean import table. Returns true if a profile was written.
+bool NewProfileDialog(HWND parent, const wchar_t* profiles_dir, const wchar_t* app_ini, const wchar_t* app_name);
+
 // Quality presets: the cost dials (model resolution, ArtCNN, sharpen, flow resolution) written into
 // the game profile. 0 high performance, 1 performance, 2 balanced, 3 quality.
 enum { kPresetCount = 4 };
