@@ -197,6 +197,18 @@ int RunBench(int argc, char** argv)
             }
             const double frac = 100.0 * (double)nz / ((double)ww * wh);
             const char* verdict = frac > 99.0 ? "PASS" : "FAIL (the model wrote a subrect)";
+            {   // the model's own before/after, for inspecting what it did with scale
+                std::vector<uint8_t> in((size_t)ww * wh * 4);
+                ID3D12Resource* src = cfg.nr_async ? p->nr_in_m : p->nr_in;
+                if (src && GpuReadbackTex(g, src, in.data(), ww, wh, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
+                {
+                    wchar_t f1[64], f2[64];
+                    _snwprintf_s(f1, _TRUNCATE, L"work_in_%ux%u.png", ww, wh);
+                    _snwprintf_s(f2, _TRUNCATE, L"work_out_%ux%u.png", ww, wh);
+                    SavePngRgba(f1, in.data(), ww, wh); SavePngRgba(f2, px.data(), ww, wh);
+                    Log("[bench] wrote %ls and %ls", f1, f2);
+                }
+            }
             Log("[bench] nr_out coverage %ux%u: %.1f%% written, bbox %u,%u..%u,%u - %s", ww, wh, frac, x0, y0, x1, y1, verdict);
             printf("nr_out coverage %ux%u: %.1f%% written, bbox %u,%u..%u,%u - %s\n", ww, wh, frac, x0, y0, x1, y1, verdict);
         }
