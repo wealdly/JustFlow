@@ -46,6 +46,7 @@ struct Config
     int   max_fps = 0;                     // 0 = process every captured frame; else cap the pipeline rate
     bool  nr_async = false;                // mode=sync (evaluate per frame) | async (decoupled model thread, residual compose)
     float warp = 1.0f;                     // async: residual sampled at uv + mv * warp (this frame's mv only, see PipelineFrame)
+    float warp_reject = 0.06f;             // async: luma mismatch (0..1) at which the warped edit is half faded out - the ghost guard (0 = off)
     int   model_every = 1;                 // run the model on every Nth captured frame. 1 = every frame (sync, unless
                                            // mode=async); N > 1 = async at a FIXED cadence, so the residual's age is a
                                            // constant N-1 frames instead of drifting with a rate cap

@@ -4,7 +4,7 @@
 //
 // Diagnostics stay out of the table on purpose. Ini-only: param_block, warmup,
 // rebuild_debounce_frames, selftest, fg.pacing, fg.mv_dilated, fg.phase_ms, nr.exposure_scale,
-// nr.mode, nr.model_max_fps, nr.warp, ofa.grid/zero_below, capture.cursor/border, ui.rectN, ui.mask_every,
+// nr.mode, nr.model_max_fps, nr.warp, nr.warp_reject, ofa.grid/zero_below, capture.cursor/border, ui.rectN, ui.mask_every,
 // ui.feather, ui.toast_scale, overlay.mode. They are for debugging, not for tuning, and a panel
 // that lists everything is a panel nobody can read.
 //

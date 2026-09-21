@@ -132,6 +132,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     // N > 1 IS async: the model cannot skip frames while the compose waits on it every frame.
     c.nr_async = S(L"nr", L"mode", c.nr_async ? L"async" : L"sync") == L"async" || c.model_every > 1;
     c.warp = F(L"nr", L"warp", c.warp);
+    c.warp_reject = F(L"nr", L"warp_reject", c.warp_reject);
     c.model_max_fps = I(L"nr", L"model_max_fps", c.model_max_fps);
     c.artcnn = B(L"nr", L"artcnn", c.artcnn);
 

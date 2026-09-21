@@ -33,6 +33,7 @@ struct ComposeParams
     int   nrects = 0;
     UiRect rects[64];
     float warp = 1.0f;                // CsComposeResidual only: residual sampled at uv + mv_uv * warp
+    float reject = 0.06f;             // CsComposeResidual only: luma mismatch that fades the warped edit out (0 = off)
     // addon mask strip (top-left strip_w x strip_h px): output rows 0..strip_h-1 there replicate the
     // composed rows just beneath, so the strip's pixels never reach the screen. 0 = off.
     int   strip_w = 0, strip_h = 0;
