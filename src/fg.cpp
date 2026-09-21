@@ -533,22 +533,26 @@ bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* composed, ID
         auto free_slot = [&] { for (auto& x : f->slots) if (x.state == 0) return &x; return (FgSlot*)nullptr; };
         if (!(s = free_slot()))
         {
+            // No free slot, so take the OLDEST READY one immediately. It is not worth waiting for:
+            // the presenter picks the NEWEST ready slot and frees every other one on the spot, so an
+            // older ready slot is already destined for the bin. The old code waited up to 50 ms to
+            // avoid "dropping a real frame" - but the same frame died either way, just later and
+            // with the capture thread stalled behind it. That wait was the largest remaining stall
+            // in the pipeline (recwait_ms reached 45 ms), and it bought nothing.
+            for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq < s->seq)) s = &x;
+            if (s) ++f->drops;
+        }
+        if (!s)
+        {
+            // Nothing free and nothing ready: every slot is mid-record or mid-present. One presenter
+            // and one recorder cannot hold three slots, so this is unreachable today - it stays as a
+            // bounded wait rather than a silent dropped frame, and rec_us still reports it if the
+            // slot count or the thread model ever changes.
             const double t_block = NowMs();
-            // Every slot is in flight (one presenting, two ready): wait for the presenter to retire
-            // the oldest (a newer ready slot pre-empts its generated frames, so ~1 vblank) instead
-            // of dropping a real frame. ponytail: bound = 2 real intervals; on timeout the oldest
-            // ready slot is overwritten (the presenter is stuck behind the display).
             const double bound = std::clamp(2.0 * (f->history ? NowMs() - f->last_submit : 16.0), 8.0, 50.0);
             f->cv.wait_for(lk, std::chrono::duration<double, std::milli>(bound), [&] { return f->stop || f->failed || (s = free_slot()) != nullptr; });
-            // This block was invisible: it lands in main's undifferentiated cpu_ms, which is how a
-            // 7 ms per-frame stall hid for a whole session.
             f->rec_us += (UINT64)((NowMs() - t_block) * 1000.0); ++f->rec_n;
-            if (!s)
-            {
-                for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq < s->seq)) s = &x;
-                if (!s) return false;
-                ++f->drops;
-            }
+            if (!s) return false;
         }
         s->state = 1; eval = s->eval_fence;
     }
