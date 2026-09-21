@@ -491,7 +491,10 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // the native frame into model_src); the fence value that completes the copies goes with it.
     Pipeline::ModelFrame mf; bool handoff = false;
     p->model_reset_pending |= reset;
-    if (async && p->model_wants_frame.load())
+    // model_every: hand a frame over only on the Nth, so the model's cadence is locked to the
+    // capture (90 in, N=2 -> 45 evaluates/s, residual always exactly one frame old) rather than
+    // free-running against a sleep-based rate cap and drifting in and out of phase.
+    if (async && p->model_wants_frame.load() && (c.model_every <= 1 || p->frame_index % (UINT)c.model_every == 0))
     {
         handoff = true; p->model_wants_frame = false;
         // held slot 2..4: not the last hand-off's (the model's next flow reference), not cmp_held (ours)

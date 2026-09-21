@@ -40,6 +40,9 @@ struct Config
     int   max_fps = 0;                     // 0 = process every captured frame; else cap the pipeline rate
     bool  nr_async = false;                // mode=sync (evaluate per frame) | async (decoupled model thread, residual compose)
     float warp = 1.0f;                     // async: residual sampled at uv + mv * warp (this frame's mv only, see PipelineFrame)
+    int   model_every = 1;                 // run the model on every Nth captured frame. 1 = every frame (sync, unless
+                                           // mode=async); N > 1 = async at a FIXED cadence, so the residual's age is a
+                                           // constant N-1 frames instead of drifting with a rate cap
     int   model_max_fps = 0;               // async: throttle the model thread (0 = as fast as the leftover GPU allows)
     // [filters] - its own layer, its own section. Three switches, one per layer, and none of them
     // reaches into another: [nr] enabled, [filters] enabled, [fg] enabled. `enabled` is a bypass

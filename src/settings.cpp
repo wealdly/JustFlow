@@ -4,7 +4,7 @@
 //
 // Diagnostics stay out of the table on purpose. Ini-only: param_block, warmup,
 // rebuild_debounce_frames, selftest, fg.pacing, fg.mv_dilated, fg.phase_ms, nr.exposure_scale,
-// nr.model_max_fps, nr.warp, ofa.grid/zero_below, capture.cursor/border, ui.rectN, ui.mask_every,
+// nr.mode, nr.model_max_fps, nr.warp, ofa.grid/zero_below, capture.cursor/border, ui.rectN, ui.mask_every,
 // ui.feather, ui.toast_scale, overlay.mode. They are for debugging, not for tuning, and a panel
 // that lists everything is a panel nobody can read.
 //
@@ -68,7 +68,7 @@ const Setting kSettings[] = {
     { 0, L"nr", L"artcnn",            L"ArtCNN (~2.3ms)",    Bool,  nullptr, L"1" },
     { 0, L"nr", L"model",             L"DLSS model (~12ms)", Bool,  nullptr, L"0" },
     { 0, L"nr", L"work",              L"Model resolution",   Enum,  kWork,   L"auto" },
-    { 0, L"nr", L"mode",              L"Model mode",         Enum,  L"sync|async", L"sync" },
+    { 0, L"nr", L"model_every",       L"Model every Nth frame", Enum, L"1|2|3|4|6|8", L"1" },
     { 0, L"nr", L"residual_strength", L"Neural strength",    Float, nullptr, L"1.0" },
     { 0, L"nr", L"chroma",            L"Keep model colour",  Float, nullptr, L"0.25" },
     { 0, L"nr", L"style",             L"Style 0=std 1=nat 2=cine", Int, nullptr, L"0" },
