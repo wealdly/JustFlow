@@ -31,7 +31,7 @@ struct Config
     //   model   = use the DLSS neural-rendering model (expensive: ~12 ms in a real scene).
     //   artcnn  = use ArtCNN (~2.3 ms), on its own or ahead of the model.
     bool  nr_enabled = true;
-    bool  nr_model = false;
+    bool  nr_model = true;                 // the default experience is the DLSS model on its own (no ArtCNN, no FG)
     UINT  work_w = 0, work_h = 0;          // 0 = auto (from spike results / default 2560x1440)
     int   param_block = 1;                 // 1 Allocate, 2 Capability, 3 Own           [app layer]
     NrTuning tuning;
@@ -71,7 +71,10 @@ struct Config
     int   hud_corner = 0;                  // 0 tl, 1 tr, 2 bl, 3 br
     int   hud_scale = 3;
     // [fg]
-    bool  fg_enabled = true;
+    // Off by default. FG only pays above ~1.5x gain, many games already run their own (with real depth
+    // and motion vectors, which ours cannot match), and stacking ours on theirs interpolates
+    // interpolations. It stays one key away (F8).
+    bool  fg_enabled = false;
     int   fg_multiplier = 2;               // presented frames per rendered frame, 2..4
     bool  fg_pacing_vblank = true;         // pacing=vblank | timer
     bool  fg_mv_dilated = true;            // DLSS-G motionVectorsDilated (see fg.cpp Evaluate)

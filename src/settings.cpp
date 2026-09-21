@@ -65,8 +65,8 @@ const wchar_t* const kFlow = L"640x360|960x540|1280x720|1920x1080";
 const Setting kSettings[] = {
     // ---- 0 Neural layer: the switch, what runs under it, and how the model is tuned ------------
     { 0, L"nr", L"enabled",           L"Neural layer (F9)",  Bool,  nullptr, L"1" },
-    { 0, L"nr", L"artcnn",            L"ArtCNN (~2.3ms)",    Bool,  nullptr, L"1" },
-    { 0, L"nr", L"model",             L"DLSS model (~12ms)", Bool,  nullptr, L"0" },
+    { 0, L"nr", L"artcnn",            L"ArtCNN (~2.3ms)",    Bool,  nullptr, L"0" },
+    { 0, L"nr", L"model",             L"DLSS model (~12ms)", Bool,  nullptr, L"1" },
     { 0, L"nr", L"work",              L"Model resolution",   Enum,  kWork,   L"auto" },
     { 0, L"nr", L"model_every",       L"Model every Nth frame", Enum, L"1|2|3|4|6|8", L"1" },
     { 0, L"nr", L"residual_strength", L"Neural strength",    Float, nullptr, L"1.0" },
@@ -81,7 +81,7 @@ const Setting kSettings[] = {
     { 1, L"filters", L"saturation",   L"Vibrance",           Float, nullptr, L"1.10" },
 
     // ---- 2 Frame generation ---------------------------------------------------------------------
-    { 2, L"fg", L"enabled",           L"Frame generation (F8)", Bool, nullptr, L"1" },
+    { 2, L"fg", L"enabled",           L"Frame generation (F8)", Bool, nullptr, L"0" },
     { 2, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4", L"2" },
     { 2, L"fg", L"min_gain",          L"Auto-pause below gain", Float, nullptr, L"1.5" },
 
@@ -513,13 +513,16 @@ INT_PTR CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         L"; class seen when this profile was made: " + win.cls + L"\n\n"
         L"[nr]\n; enabled = the effect as a whole (F9). model = the DLSS model (~12 ms).\n"
         L"; artcnn = ArtCNN (~2.3 ms), which needs no model.\n"
-        L"enabled=1\nmodel=0\nartcnn=1\nwork=1920x1080\nchroma=0.25\n\n"
+        L"enabled=1\nmodel=1\nartcnn=0\nwork=1920x1080\nchroma=0.25\n"
+        L"; model_every=N runs the model on every Nth frame off the main path. Raise it (2-4) when the\n"
+        L"; game presents faster than the model can follow - e.g. a game running its own frame generation.\n"
+        L"model_every=1\n\n"
         L"[filters]\n; its own layer, applied after the neural one: sharpen then vibrance.\n"
         L"; enabled=0 bypasses the layer without losing these values (F6).\n"
         L"enabled=1\nsharpen=0.4\nsaturation=1.10\n\n"
         L"[ofa]\ninput=960x540\n\n"
         L"[ui]\nfeather=12\n\n"
-        L"[fg]\nenabled=1\nmultiplier=2\n\n"
+        L"[fg]\n; off by default: leave it off when the game has its own frame generation\nenabled=0\nmultiplier=2\n\n"
         L"[log]\nfile=justflow." + stem + L".log\n";
     FILE* f = nullptr;
     if (_wfopen_s(&f, path.c_str(), L"wt,ccs=UTF-8") == 0 && f)

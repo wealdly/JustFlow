@@ -11,15 +11,26 @@ no injection, no input. The same mechanisms OBS and overlay apps use, nothing mo
 - **Frame generation** (DLSS frame generation, desktop path) on the composed frame with hardware
   optical-flow motion vectors, paced to the display's vblank. Generated frames get the UI copied
   back out of the real frame, so text and action bars do not smear with the world.
-- **Capture** by DXGI Desktop Duplication at the monitor's refresh rate (window capture fallback).
+- **Capture** by Windows.Graphics.Capture, uncapped on Windows 11 24H2+ (`MinUpdateInterval`), or DXGI
+  Desktop Duplication where that is unavailable (`[capture] mode=auto|wgc|dda`).
 - **Per-game profiles**, global hotkeys, a tray menu, a live before/after wipe.
 
-Out of the box it runs as a frame generator: **frame generation on, neural rendering off**
-(`[fg] enabled=1`, `[nr] enabled=0`). FG is the cheap half - about 1.8 ms of GPU per frame at
-4K - while the model costs 6.5 ms at 1440p on an idle card, and noticeably more with a game
-already loading the GPU, so it wants a frame-rate budget of its own. F9 turns
-the model on when you want it, and it is created on demand rather than at startup, so leaving
-it off costs no VRAM. Both toggles are remembered.
+Out of the box it runs **the DLSS model on its own: neural layer on, ArtCNN off, frame generation
+off** (`[nr] enabled=1 model=1 artcnn=0`, `[fg] enabled=0`). The model costs about 3.8 ms at 1080p
+and 5.7 ms at 1440p on an idle card, more with a game already loading the GPU. F9 / F6 / F8 switch
+the three layers and every toggle is remembered; with all of them off JustFlow goes dormant -
+overlay hidden, capture released - rather than sit on top of the game as a slower copy of it.
+
+Frame generation is off by default on purpose. It only pays when it is really multiplying the
+frame rate (a governor pauses it below 1.5x), and many games ship their own - with real depth and
+motion vectors, which an external tool cannot match. **If the game has its own frame generation,
+use that and leave ours off**: stacking the two interpolates between interpolated frames.
+
+That case has a second consequence. The overlay is opaque, so JustFlow's pipeline rate is the rate
+you see. A game presenting 135-270 fps with its own FG outruns a model that takes 6-10 ms a frame,
+and a per-frame (sync) model would *lower* the visible frame rate. Set **Model every Nth frame**
+to 2-4 there: the main path stays around 0.2 ms, the model runs beside it on its own queue, and its
+edit is warped onto every frame. The shipped Dawnwalker profile does this (`model_every=3`).
 
 Tested on an RTX 5080 at 4K 240 Hz with World of Warcraft, Valheim and The Blood of Dawnwalker.
 

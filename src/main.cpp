@@ -420,6 +420,11 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     const bool need_mv = (model_on && !p->bypass) || c.fg_enabled;
     if (need_mv && !p->had_mv) reset = true;   // the previous gray is stale: no flow across the gap
     p->had_mv = need_mv;
+    // The per-frame flow (pair 0, current -> previous -> p->mv) has two readers: frame generation and
+    // the SYNC evaluate. The async track warps its residual with a different flow (pair 2, current ->
+    // the residual's own frame), so async with FG off - the NR-only default for games that bring
+    // their own frame generation - was running an OFA execute and an expand per frame for nobody.
+    const bool need_pair0 = c.fg_enabled || (model_on && !async && !p->bypass);
     if (async && !p->model_thread.joinable() && !StartModel(p)) return false;
     // The presenter is always on while an overlay exists: passthrough (multiplier 1) with FG off,
     // generation with cfg.fg_enabled (ini, F8). A generation failure turns the flag off (F8 retries)
@@ -547,10 +552,10 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     double ofa_t0 = 0;
     if (p->measure_ofa) { GpuWait(g, g.fence, f1, 5000); ofa_t0 = NowMs(); }
     tw = NowMs();
-    const UINT64 ov = need_mv ? OfaExecuteRef(p->ofa, g.fence, f1, p->ofa_cur, 1 - p->ofa_cur, 0, reset) : 0;   // OfaFenceValue is shared with the model thread: use the returned value
-    const UINT64 ov2 = warp_res && ov ? OfaExecuteRef(p->ofa, g.fence, f1, p->ofa_cur, p->cmp_held, 2, reset) : 0;
+    const UINT64 ov = need_pair0 ? OfaExecuteRef(p->ofa, g.fence, f1, p->ofa_cur, 1 - p->ofa_cur, 0, reset) : 0;   // OfaFenceValue is shared with the model thread: use the returned value
+    const UINT64 ov2 = warp_res ? OfaExecuteRef(p->ofa, g.fence, f1, p->ofa_cur, p->cmp_held, 2, reset) : 0;
     p->cpu_wait[1].add(NowMs() - tw);
-    if (need_mv && (!ov || (warp_res && !ov2))) { Log("[ofa] execute failed"); return false; }
+    if ((need_pair0 && !ov) || (warp_res && !ov2)) { Log("[ofa] execute failed"); return false; }
     if (need_mv) p->ofa_cur ^= 1;
     if (p->measure_ofa)
     {
@@ -567,7 +572,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (!GpuBegin(g)) return false;
     p->cpu_wait[2].add(NowMs() - tw);
     stamp(16);   // PS_LIST2
-    if (need_mv)
+    if (need_pair0)
     {
         ID3D12Resource* flow = OfaFlow(p->ofa);
         GpuBarrier(cl, flow, D3D12_RESOURCE_STATE_COMMON, NPSR);
