@@ -35,18 +35,37 @@ std::wstring ExeDir()
     return p;
 }
 
+// [nr] work=auto. The model runs on a downscaled copy and its edit is composed back up, so the
+// RATIO to the native size matters more than the pixel count. Measured against the model's own edit
+// at native 4K, on two unrelated test frames:
+//     work        cost     fidelity (r)    strength
+//   2560x1440   5.65 ms    0.80 / 0.49    144% / 70%     <- 1.5x: a non-integer resample both ways
+//   1920x1080   3.79 ms    0.88 / 0.67    106% / 103%    <- 2x: exact
+//   1280x720    2.58 ms    0.73 / 0.55
+//    960x540    2.30 ms    0.44 / 0.53    (cost has a ~1.8 ms floor; below 720p it buys almost nothing)
+// 1080p beat 1440p on BOTH axes, both times. So auto is the integer divisor of the native size
+// nearest 1080 lines (ties go to the larger): 4K -> 1920x1080, 1440p -> 2560x1440 (1:1, exact),
+// 1080p -> 1920x1080. It used to come from justflow.spike.ini, where the spike had picked 2560x1440
+// on evaluate time alone - and the capture size was not even known when it was read.
+static void WorkAuto(Config& c, UINT w, UINT h)
+{
+    if (!c.work_auto || !w || !h) return;
+    UINT best = 1; long best_d = 1L << 30;
+    for (UINT d = 1; d <= 4; ++d)
+    {
+        if (w % d || h % d || h / d < 360) continue;
+        const long dist = labs((long)(h / d) - 1080);
+        if (dist < best_d) { best_d = dist; best = d; }   // strict <: on a tie the smaller divisor (larger size) stays
+    }
+    c.work_w = w / best; c.work_h = h / best;
+}
+
 void ResolveWork(Config& c, const std::wstring& dir)
 {
-    if (c.work_w && c.work_h) return;
+    // The spike file still supplies the machine-level parameter block; the work SIZE is no longer its
+    // business (see WorkAuto). An explicit work=WxH in the profile is left exactly as written.
     const std::wstring ini = dir + L"\\justflow.spike.ini";
-    wchar_t buf[64] = {};
-    GetPrivateProfileStringW(L"spike", L"work", L"", buf, 64, ini.c_str());
-    if (swscanf_s(buf, L"%ux%u", &c.work_w, &c.work_h) == 2 && c.work_w && c.work_h)
-    {
-        c.param_block = (int)GetPrivateProfileIntW(L"spike", L"param_block", c.param_block, ini.c_str());
-        Log("[nr] work %ux%u block %d from justflow.spike.ini", c.work_w, c.work_h, c.param_block);
-    }
-    else { c.work_w = 2560; c.work_h = 1440; Log("[nr] work auto -> 2560x1440 (no justflow.spike.ini)"); }
+    if (c.work_auto) c.param_block = (int)GetPrivateProfileIntW(L"spike", L"param_block", c.param_block, ini.c_str());
 }
 
 // Overlay hotkey ids: 1 toggle, 2 wipe, 3 reload, 4 quit, 5 fg, 6 hud, 7 filters (OverlayHotkey(p->ov, id) in main).
@@ -300,6 +319,8 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
 {
     Pipeline* p = new Pipeline();
     p->g = &g; p->cfg = cfg; p->w = w; p->h = h; p->target = target;
+    WorkAuto(p->cfg, w, h);
+    if (p->cfg.work_auto) Log("[nr] work auto -> %ux%u (integer divisor of the %ux%u capture nearest 1080 lines)", p->cfg.work_w, p->cfg.work_h, w, h);
     // CsGray needs an integer block: round the block, derive the gray size from it.
     const UINT bx = std::max(1u, (UINT)std::lround((double)w / cfg.ofa_w)), by = std::max(1u, (UINT)std::lround((double)h / cfg.ofa_h));
     p->gw = w / bx; p->gh = h / by;
@@ -358,12 +379,17 @@ bool PipelineResize(Pipeline* p, UINT w, UINT h)
     REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->model_src);
     p->w = w; p->h = h;
     p->force_reset = true;
+    {   // a new native size can change what auto means; the ordinary rebuild reallocates and recreates in step
+        const UINT ow = p->cfg.work_w, oh = p->cfg.work_h; WorkAuto(p->cfg, w, h);
+        if (p->cfg.work_w != ow || p->cfg.work_h != oh) p->rebuild_countdown = std::max(1, p->rebuild_countdown);
+    }
     if (!AllocNative(p)) return false;
     return !p->ov || OverlayResize(p->ov, w, h);
 }
 
-void PipelineReload(Pipeline* p, const Config& c)
+void PipelineReload(Pipeline* p, const Config& c_in)
 {
+    Config c = c_in; WorkAuto(c, p->w, p->h);   // resolve BEFORE comparing, or every reload of an auto profile looks like a size change
     const bool rebuild = ConfigNeedsRebuild(p->cfg, c);
     // recreated next frame (a multiplier change is caught there: the presenter is rebuilt only when it differs)
     if (c.fg_pacing_vblank != p->cfg.fg_pacing_vblank || (c.fg_enabled && c.fg_mv_dilated != p->cfg.fg_mv_dilated)) DropFg(p);

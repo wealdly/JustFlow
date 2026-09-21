@@ -100,7 +100,7 @@ int RunBench(int argc, char** argv)
     Config cfg; const int have = ConfigLoad(app_path.c_str(), ini_path.c_str(), cfg);
     LogInit((dir + L"\\bench.log").c_str());
     LogConfigFiles(app_path, ini_path, have);
-    if (work_w && work_h) { cfg.work_w = work_w; cfg.work_h = work_h; }
+    if (work_w && work_h) { cfg.work_w = work_w; cfg.work_h = work_h; cfg.work_auto = false; }   // an explicit size is not auto
 
     const std::vector<std::wstring> files = ListPngs(input);
     if (files.empty()) { Log("[bench] no PNG at %ls", input.c_str()); return 1; }
@@ -149,7 +149,7 @@ int RunBench(int argc, char** argv)
         // feature once at the right size, so they could never see a rebuild that failed to rebuild.
         if (rework_w && i == frames / 3)
         {
-            Config nc = p->cfg; nc.work_w = rework_w; nc.work_h = rework_h; nc.rebuild_debounce_frames = 4;
+            Config nc = p->cfg; nc.work_w = rework_w; nc.work_h = rework_h; nc.work_auto = false; nc.rebuild_debounce_frames = 4;
             Log("[bench] live work-size change %ux%u -> %ux%u at frame %d", p->ww, p->wh, rework_w, rework_h, i);
             PipelineReload(p, nc);
         }
@@ -280,6 +280,19 @@ int RunBench(int argc, char** argv)
             Log("[bench] mv halves: left %.2f  right %.2f work px", lmed, rmed);
             printf("mv halves: left %.2f  right %.2f work px\n", lmed, rmed);
         }
+    }
+
+    // The finished frame and the native one it came from, for judging what a setting does to the
+    // PICTURE rather than to a work-resolution intermediate (e.g. how much of the model's edit
+    // survives being composed up from a small work size).
+    if (p->shown && p->color4k)
+    {
+        std::vector<uint8_t> px((size_t)w * h * 4);
+        wchar_t f[64];
+        if (GpuReadbackTex(g, p->shown, px.data(), w, h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE))
+        { _snwprintf_s(f, _TRUNCATE, L"final_%ux%u.png", p->ww, p->wh); SavePngRgba(f, px.data(), w, h); }
+        if (GpuReadbackTex(g, p->color4k, px.data(), w, h, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
+            SavePngRgba(L"final_native.png", px.data(), w, h);
     }
 
     // What the spike never checked: that the model wrote the whole work texture. A subrect here is

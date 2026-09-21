@@ -32,7 +32,8 @@ struct Config
     //   artcnn  = use ArtCNN (~2.3 ms), on its own or ahead of the model.
     bool  nr_enabled = true;
     bool  nr_model = true;                 // the default experience is the DLSS model on its own (no ArtCNN, no FG)
-    UINT  work_w = 0, work_h = 0;          // 0 = auto (from spike results / default 2560x1440)
+    UINT  work_w = 0, work_h = 0;          // 0 = auto until the capture size is known (WorkAuto in main.cpp)
+    bool  work_auto = false;               // [nr] work=auto: re-derived from the native size, never from a fixed number
     int   param_block = 1;                 // 1 Allocate, 2 Capability, 3 Own           [app layer]
     NrTuning tuning;
     float exposure_scale = 1.0f;
