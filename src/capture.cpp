@@ -2,6 +2,7 @@
 // frame is copied into a shared NT-handle BGRA8 texture and signalled through a shared fence that
 // the D3D12 queue waits on. No CPU wait on the GPU anywhere in here.
 #include "capture.h"
+#include <vector>
 #include "log.h"
 #include <dwmapi.h>
 #include <algorithm>
@@ -59,6 +60,9 @@ struct Capture
     RECT  win_rect = {};                 // captured region (window bounds clamped to the monitor)
     ULONGLONG region_at = 0;             // last DwmGetWindowAttribute: throttled, it calls into dwm.exe
     UINT  accum_last = 0; UINT64 accum_sum = 0, accum_n = 0;   // DDA AccumulatedFrames telemetry
+    std::vector<BYTE> meta;        // dirty/move rect scratch
+    bool  uncapped = false;        // WGC: MinUpdateInterval was accepted
+    LONG  foreign = 0;             // desktop updates that did not touch our region (telemetry, reset on read)
 };
 
 #define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
@@ -167,6 +171,34 @@ static bool AcquireDda(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG&
     c->dup_frame_held = true;
     c->accum_last = info.AccumulatedFrames; c->accum_sum += info.AccumulatedFrames; ++c->accum_n;
     if (info.LastPresentTime.QuadPart == 0) { res->Release(); return false; }   // only the cursor / metadata moved
+    // Desktop Duplication reports updates of the whole OUTPUT, and LastPresentTime moves for any of
+    // them - another app repainting, a notification, a video on the same monitor. Cropping to our
+    // window afterwards does not make that a frame of the game: measured on a Notepad window that
+    // never changes, 50 "new frames" a second were arriving, and frame generation was interpolating
+    // between identical images with a meaningless content interval. The dirty and move rects say
+    // where the change was; a frame that does not touch our region is not ours.
+    if (info.TotalMetadataBufferSize)
+    {
+        if (c->meta.size() < info.TotalMetadataBufferSize) c->meta.resize(info.TotalMetadataBufferSize);
+        const RECT rg = { c->win_rect.left - c->out_rect.left, c->win_rect.top - c->out_rect.top,
+                          c->win_rect.right - c->out_rect.left, c->win_rect.bottom - c->out_rect.top };
+        auto hits = [&](const RECT& r) { return r.left < rg.right && r.right > rg.left && r.top < rg.bottom && r.bottom > rg.top; };
+        bool ours = false, known = false; UINT got = 0;
+        if (SUCCEEDED(c->dup->GetFrameMoveRects((UINT)c->meta.size(), (DXGI_OUTDUPL_MOVE_RECT*)c->meta.data(), &got)))
+        {
+            known = true;
+            const DXGI_OUTDUPL_MOVE_RECT* m = (const DXGI_OUTDUPL_MOVE_RECT*)c->meta.data();
+            for (UINT i = 0; i < got / sizeof *m && !ours; ++i) ours = hits(m[i].DestinationRect);
+        }
+        if (!ours && SUCCEEDED(c->dup->GetFrameDirtyRects((UINT)c->meta.size(), (RECT*)c->meta.data(), &got)))
+        {
+            known = true;
+            const RECT* d = (const RECT*)c->meta.data();
+            for (UINT i = 0; i < got / sizeof *d && !ours; ++i) ours = hits(d[i]);
+        }
+        // fail open: if the metadata cannot be read, take the frame rather than starve the pipeline
+        if (known && !ours) { InterlockedIncrement(&c->foreign); res->Release(); return false; }
+    }
     // DwmGetWindowAttribute is a call into dwm.exe. On the acquire path that is one cross-process
     // round trip per captured frame - 90 a second - to re-read a rectangle that changes almost
     // never (a borderless game never moves). Poll it at 10 Hz and reuse the last rect in between;
@@ -266,6 +298,17 @@ Capture* CaptureOpen(Gpu& g, HWND target, bool show_cursor, bool show_border, bo
             try { c->session.IsBorderRequired(show_border); }
             catch (winrt::hresult_error const&) { Log("[cap] border setting not honoured"); }
         }
+        // Window capture used to top out near 60 Hz, which is why Desktop Duplication became the
+        // default. Windows 11 24H2 added MinUpdateInterval: ask for 1 ms and the session delivers at
+        // the rate the window actually updates. That matters because DDA has a flaw WGC does not: it
+        // reports updates of the whole desktop, and our own overlay's presents count - measured as a
+        // self-sustaining 240 "frames" a second from a window that never changes.
+        c->uncapped = false;
+        if (winrt::Windows::Foundation::Metadata::ApiInformation::IsPropertyPresent(L"Windows.Graphics.Capture.GraphicsCaptureSession", L"MinUpdateInterval"))
+        {
+            try { c->session.MinUpdateInterval(std::chrono::milliseconds(1)); c->uncapped = true; }
+            catch (winrt::hresult_error const&) { Log("[cap] MinUpdateInterval not honoured - window capture stays near 60 Hz"); }
+        }
         if (!CreateBridge(g, c)) { CaptureFree(c); return nullptr; }
         c->session.StartCapture();
     }
@@ -275,7 +318,8 @@ Capture* CaptureOpen(Gpu& g, HWND target, bool show_cursor, bool show_border, bo
         CaptureFree(c);
         return nullptr;
     }
-    Log("[cap] capturing window %p at %ux%u via Windows.Graphics.Capture (60 Hz ceiling)", (void*)target, c->w, c->h);
+    Log("[cap] capturing window %p at %ux%u via Windows.Graphics.Capture (%s)", (void*)target, c->w, c->h,
+        c->uncapped ? "uncapped: MinUpdateInterval 1 ms" : "~60 Hz ceiling: this Windows build has no MinUpdateInterval");
     return c;
 }
 
@@ -351,6 +395,14 @@ bool CaptureAcquire(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG& sy
 ID3D12Resource* CaptureTexture(Capture* c) { return c->shared12[c->cur]; }
 ID3D12Fence*    CaptureFence(Capture* c)   { return c->fence12; }
 UINT            CaptureWidth(Capture* c)   { return c->w; }
+bool CaptureWgcUncapped()
+{
+    try { return winrt::Windows::Foundation::Metadata::ApiInformation::IsPropertyPresent(L"Windows.Graphics.Capture.GraphicsCaptureSession", L"MinUpdateInterval"); }
+    catch (...) { return false; }
+}
+
+UINT CaptureForeign(Capture* c) { return c ? (UINT)InterlockedExchange(&c->foreign, 0) : 0; }
+
 // Mean DXGI AccumulatedFrames per acquired DDA frame since the last call (1.0 = every composed frame
 // reached us; 3.0 = the compositor produced three per acquire, i.e. we are slow; 0 = not DDA).
 double CaptureAccumMean(Capture* c) { if (!c || !c->dup || !c->accum_n) return 0; double m = (double)c->accum_sum / (double)c->accum_n; c->accum_sum = 0; c->accum_n = 0; return m; }

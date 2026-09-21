@@ -413,6 +413,13 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // EvaluateFeature calls with model=0, each one taking the NgxMutex that DLSS-G also needs.
     const bool model_on = c.nr_model && p->nr;
     const bool async = c.nr_async && model_on && !p->model_failed;
+    // Motion vectors have exactly two consumers: the model (its temporal reprojection) and frame
+    // generation. With neither - filters only, ArtCNN only - the gray pass, the OFA execute, the
+    // queue wait on it and the expand were all running for nobody; and optical flow is 82-93% of an
+    // FG-only frame, so it was most of the cost of configurations that never needed it.
+    const bool need_mv = (model_on && !p->bypass) || c.fg_enabled;
+    if (need_mv && !p->had_mv) reset = true;   // the previous gray is stale: no flow across the gap
+    p->had_mv = need_mv;
     if (async && !p->model_thread.joinable() && !StartModel(p)) return false;
     // The presenter is always on while an overlay exists: passthrough (multiplier 1) with FG off,
     // generation with cfg.fg_enabled (ini, F8). A generation failure turns the flag off (F8 retries)
@@ -471,7 +478,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     }
     GpuBarrier(cl, p->nr_in, NPSR, UAV);
     stamp(2);
-    CsGray(g, p->sh, cl, p->color4k, p->w, p->h, p->gray, p->gw, p->gh);
+    if (need_mv) CsGray(g, p->sh, cl, p->color4k, p->w, p->h, p->gray, p->gw, p->gh);
     // Only the model and ArtCNN read nr_in. With neither (FG-only, the default), the compose
     // takes the native path and never samples it, so this whole area filter was dead work.
     if (!async && (model_on || c.artcnn)) CsDownscale(g, p->sh, cl, p->color4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
@@ -483,11 +490,14 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         stamp(10); CsArtCnn(g, p->sh, cl, p->nr_in, p->nr_in2, p->ww, p->wh); stamp(11);
         GpuBarrier(cl, p->nr_in2, UAV, NPSR);
     }
-    GpuBarrier(cl, p->gray, UAV, CSRC);
-    ID3D12Resource* oin = OfaInput(p->ofa, p->ofa_cur);
-    GpuBarrier(cl, oin, COMMON, CDST);
-    cl->CopyResource(oin, p->gray);
-    GpuBarrier(cl, oin, CDST, COMMON);
+    if (need_mv)
+    {
+        GpuBarrier(cl, p->gray, UAV, CSRC);
+        ID3D12Resource* oin = OfaInput(p->ofa, p->ofa_cur);
+        GpuBarrier(cl, oin, COMMON, CDST);
+        cl->CopyResource(oin, p->gray);
+        GpuBarrier(cl, oin, CDST, COMMON);
+    }
     // async: hand this frame to the model thread when it asks (its gray into the other held OFA slot,
     // the native frame into model_src); the fence value that completes the copies goes with it.
     Pipeline::ModelFrame mf; bool handoff = false;
@@ -505,7 +515,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         GpuBarrier(cl, hin, COMMON, CDST); cl->CopyResource(hin, p->gray); GpuBarrier(cl, hin, CDST, COMMON);
         GpuBarrier(cl, p->color4k, NPSR, CSRC); cl->CopyResource(p->model_src, p->color4k); GpuBarrier(cl, p->color4k, CSRC, NPSR);
     }
-    GpuBarrier(cl, p->gray, CSRC, UAV);
+    if (need_mv) GpuBarrier(cl, p->gray, CSRC, UAV);   // pairs with the UAV->CSRC above (async implies need_mv)
     GpuBarrier(cl, cap, NPSR, COMMON);
     stamp(15);
     const UINT64 f1 = GpuEnd(g);
@@ -527,17 +537,17 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     double ofa_t0 = 0;
     if (p->measure_ofa) { GpuWait(g, g.fence, f1, 5000); ofa_t0 = NowMs(); }
     tw = NowMs();
-    const UINT64 ov = OfaExecuteRef(p->ofa, g.fence, f1, p->ofa_cur, 1 - p->ofa_cur, 0, reset);   // OfaFenceValue is shared with the model thread: use the returned value
+    const UINT64 ov = need_mv ? OfaExecuteRef(p->ofa, g.fence, f1, p->ofa_cur, 1 - p->ofa_cur, 0, reset) : 0;   // OfaFenceValue is shared with the model thread: use the returned value
     const UINT64 ov2 = warp_res && ov ? OfaExecuteRef(p->ofa, g.fence, f1, p->ofa_cur, p->cmp_held, 2, reset) : 0;
     p->cpu_wait[1].add(NowMs() - tw);
-    if (!ov || (warp_res && !ov2)) { Log("[ofa] execute failed"); return false; }
-    p->ofa_cur ^= 1;
+    if (need_mv && (!ov || (warp_res && !ov2))) { Log("[ofa] execute failed"); return false; }
+    if (need_mv) p->ofa_cur ^= 1;
     if (p->measure_ofa)
     {
-        GpuWait(g, OfaFence(p->ofa), ov, 5000); p->st[PS_OFA].add(NowMs() - ofa_t0);
+        if (ov) { GpuWait(g, OfaFence(p->ofa), ov, 5000); p->st[PS_OFA].add(NowMs() - ofa_t0); }
         if (ov2) { ofa_t0 = NowMs(); GpuWait(g, OfaFence(p->ofa), ov2, 5000); p->st[PS_OFA2].add(NowMs() - ofa_t0); }
     }
-    g.queue->Wait(OfaFence(p->ofa), ov);
+    if (ov) g.queue->Wait(OfaFence(p->ofa), ov);
     if (ov2) g.queue->Wait(OfaFence(p->ofa), ov2);   // also orders the next list 1's hand-off copies after this read of the held slot
     if (wait_pub) g.queue->Wait(p->model_ctx.fence, p->cmp_fence);
 
@@ -546,14 +556,17 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (!GpuBegin(g)) return false;
     p->cpu_wait[2].add(NowMs() - tw);
     stamp(16);   // PS_LIST2
-    ID3D12Resource* flow = OfaFlow(p->ofa);
-    GpuBarrier(cl, flow, D3D12_RESOURCE_STATE_COMMON, NPSR);
-    GpuBarrier(cl, p->mv, NPSR, UAV);
-    stamp(8);
-    CsExpand(g, p->sh, cl, flow, OfaFlowWidth(p->ofa), OfaFlowHeight(p->ofa), p->gw, p->gh, p->mv, p->ww, p->wh, c.zero_below, reset);
-    stamp(9);
-    GpuBarrier(cl, p->mv, UAV, NPSR);
-    GpuBarrier(cl, flow, NPSR, D3D12_RESOURCE_STATE_COMMON);
+    if (need_mv)
+    {
+        ID3D12Resource* flow = OfaFlow(p->ofa);
+        GpuBarrier(cl, flow, D3D12_RESOURCE_STATE_COMMON, NPSR);
+        GpuBarrier(cl, p->mv, NPSR, UAV);
+        stamp(8);
+        CsExpand(g, p->sh, cl, flow, OfaFlowWidth(p->ofa), OfaFlowHeight(p->ofa), p->gw, p->gh, p->mv, p->ww, p->wh, c.zero_below, reset);
+        stamp(9);
+        GpuBarrier(cl, p->mv, UAV, NPSR);
+        GpuBarrier(cl, flow, NPSR, D3D12_RESOURCE_STATE_COMMON);
+    }
     if (warp_res)
     {
         ID3D12Resource* flow3 = OfaFlow3(p->ofa);
@@ -1093,7 +1106,7 @@ static int RealMain(int argc, char** argv)
             PipelineToast(p, "JustFlow  %ls  %s  %s %.0f Hz  %s", profile_name().c_str(), model, CaptureIsDda(cap) ? "DDA" : "WGC", 1000.0 / OverlayVBlankMs(p->ov), caps(cfg).c_str());
         }
 
-        bool reset = true;
+        bool reset = true, dormant = false;
         LONGLONG last_sysrel = 0;
         UINT frames = 0, skips = 0, rate_drops = 0; int follow_tick = 0; double last_processed_ms = 0;
         double win_t0 = NowMs();
@@ -1134,9 +1147,9 @@ static int RealMain(int argc, char** argv)
             if (OverlayHotkey(p->ov, 3)) reload();
             if (OverlayHotkey(p->ov, 6)) toggle_hud();
             if (OverlayHotkey(p->ov, 7)) toggle_filters();
-            if (CaptureLost(cap)) { Log("[main] capture lost - back to waiting for the window"); break; }
+            if (cap && CaptureLost(cap)) { Log("[main] capture lost - back to waiting for the window"); break; }
             UINT nw = 0, nh = 0;
-            if (CaptureSizeChanged(cap, nw, nh))
+            if (cap && CaptureSizeChanged(cap, nw, nh))
             {
                 Log("[main] window settled at %ux%u - recreating capture", nw, nh);
                 GpuWaitIdle(g);
@@ -1146,6 +1159,42 @@ static int RealMain(int argc, char** argv)
                 PipelineToast(p, "Capture %ux%u", CaptureWidth(cap), CaptureHeight(cap));
                 reset = true; last_sysrel = 0;
                 continue;
+            }
+            // ---- dormant -------------------------------------------------------------------------
+            // With no layer doing anything the overlay is a strictly worse copy of the game: an opaque
+            // topmost window re-presenting the capture at the CAPTURE rate, on top of a game that may
+            // be running faster underneath (Dawnwalker's own frame generation), and a full-screen
+            // composed window also costs the game independent flip and VRR. So get out of the way
+            // completely: hide the overlay and RELEASE the desktop duplication, then idle on the
+            // hotkeys and the tray. Any toggle that enables a layer wakes it within 50 ms.
+            {
+                const Config& lc = p->cfg;
+                const bool neural = !p->bypass && (lc.nr_model || lc.artcnn);
+                const bool filters = lc.filters_enabled && (lc.sharpen > 0 || lc.saturation != 1.0f);
+                const bool active = neural || filters || lc.fg_enabled || p->wipe != 0 || dump > dumped;
+                if (!active)
+                {
+                    if (!dormant)
+                    {
+                        dormant = true; GpuWaitIdle(g); OverlayHide(p->ov);
+                        if (cap) { CaptureClose(cap); cap = nullptr; }
+                        Log("[main] dormant: no layer is enabled - overlay hidden, capture released");
+                        _snwprintf_s(status, _TRUNCATE, L"%ls  dormant (all layers off)", profile_name().c_str()); tray_state();
+                    }
+                    if (!IsWindow(target)) { Log("[main] target window gone"); break; }
+                    Sleep(50);
+                    continue;
+                }
+                if (dormant)
+                {
+                    dormant = false;
+                    cap = CaptureOpen(g, target, cfg.cursor, cfg.border, cfg.dda);
+                    if (!cap) { Log("[main] wake: capture did not reopen"); break; }
+                    if (CaptureWidth(cap) != p->w || CaptureHeight(cap) != p->h) { if (!PipelineResize(p, CaptureWidth(cap), CaptureHeight(cap))) break; }
+                    reset = true; last_sysrel = 0;
+                    Log("[main] awake: a layer was enabled - capture reopened");
+                    _snwprintf_s(status, _TRUNCATE, L"%ls", profile_name().c_str()); tray_state();
+                }
             }
             UINT64 fv = 0; LONGLONG sysrel = 0;
             const double acq_t0 = NowMs();
@@ -1249,8 +1298,8 @@ static int RealMain(int argc, char** argv)
                 double pres_prev = -1, pres_call = -1, pres_total = -1;
                 if (p->ov) OverlayPresentStats(p->ov, pres_prev, pres_call, pres_total);
                 char mask[16]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "none");
-                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f acq_ms=%.2f dda_accum=%.2f static_skips=%u rate_drops=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u fg_gen=%u fg_nopair=%u fg_disabled=%u fg_preempt=%u fg_paused=%u fg_eval_ms=%.2f/%.2f(med/p95) pres_ms=%.2f(prev %.2f, call %.2f) vbwait_ms=%.2f recwait_ms=%.2f/%u model_fps=%.1f model_ms=%.2f residual_age_frames=%.1f mask=%s vram_mb=%.0f/%.0f",
-                    cap_fps, p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), acq_ms.med(), CaptureAccumMean(cap), skips, rate_drops, age.med(), pipe.med(),
+                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f acq_ms=%.2f dda_accum=%.2f dda_foreign=%u static_skips=%u rate_drops=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u fg_gen=%u fg_nopair=%u fg_disabled=%u fg_preempt=%u fg_paused=%u fg_eval_ms=%.2f/%.2f(med/p95) pres_ms=%.2f(prev %.2f, call %.2f) vbwait_ms=%.2f recwait_ms=%.2f/%u model_fps=%.1f model_ms=%.2f residual_age_frames=%.1f mask=%s vram_mb=%.0f/%.0f",
+                    cap_fps, p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), acq_ms.med(), CaptureAccumMean(cap), CaptureForeign(cap), skips, rate_drops, age.med(), pipe.med(),
                     fg_fps, spacing.med(), spacing.p95(), fs.drops, fs.gen_shown, fs.no_pair, fs.disabled, fs.preempts, fs.paused, fg_eval, fg_eval_p95, pres_total, pres_prev, pres_call, fs.vblank_waits ? fs.vblank_wait_sum_ms / fs.vblank_waits : -1.0,
                     fs.record_waits ? fs.record_wait_sum_ms / fs.record_waits : -1.0, fs.record_waits,
                     model_evals * 1000.0 / span, mm.med(), p->residual_age.med(), mask, vram_used, vram_budget);

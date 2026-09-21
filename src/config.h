@@ -20,7 +20,11 @@ struct Config
     std::wstring window_class = L"";      // profiles name the game; the binary carries no game-specific strings
     std::wstring window_title = L"";
     bool cursor = false, border = false;
-    bool dda = true;                       // capture.mode: dda (monitor refresh rate) | wgc (60 Hz ceiling)
+    // capture.mode: auto | wgc | dda. auto = window capture when this Windows can run it uncapped
+    // (MinUpdateInterval, Win11 24H2+), Desktop Duplication otherwise. WGC only reports updates of the
+    // TARGET window; DDA reports the whole desktop, including our own overlay's presents, which
+    // measured as a self-sustaining 240 'frames' a second from a window that never changes.
+    bool dda = false;
     // [nr]
     // Two separate things, because one key could not say "effect on, model off, ArtCNN on":
     //   enabled = the effect as a whole, which is what F9 toggles and what persists.

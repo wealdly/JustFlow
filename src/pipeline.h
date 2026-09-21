@@ -64,6 +64,7 @@ struct Pipeline
     double wipe_t0 = 0;
     bool   measure_ofa = false;   // bench only: CPU-wait around OfaExecute to time it in isolation
     bool   last_evaluated = false;
+    bool   had_mv = false;        // motion vectors were computed last frame (a gap forces a flow reset)
     // capture timestamps of the frame being fed (QPC ticks, 0 = unknown): set by main before PipelineFrame
     LONGLONG cap_qpc = 0, acq_qpc = 0;
     // stats (GPU timestamps by stage), cleared by the reader

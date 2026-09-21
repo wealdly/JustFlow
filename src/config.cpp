@@ -1,4 +1,5 @@
 #include "config.h"
+#include "capture.h"
 #include <cstdlib>
 #include <cstring>
 #include <cwctype>
@@ -94,7 +95,10 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.window_class = S(L"capture", L"window_class", c.window_class);
     c.window_title = S(L"capture", L"window_title", c.window_title);
     c.cursor = B(L"capture", L"cursor", c.cursor);
-    c.dda = S(L"capture", L"mode", L"dda") != L"wgc";
+    {
+        const std::wstring m = S(L"capture", L"mode", L"auto");
+        c.dda = m == L"dda" || (m != L"wgc" && !CaptureWgcUncapped());   // auto: WGC only where it is not pinned to ~60 Hz
+    }
     c.border = B(L"capture", L"border", c.border);
 
     c.nr_enabled = B(L"nr", L"enabled", c.nr_enabled);

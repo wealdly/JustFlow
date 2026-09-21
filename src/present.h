@@ -41,6 +41,9 @@ double OverlayVBlankMs(Overlay* o);   // refresh period of that monitor (1000/60
 // Reposition over the target's DWMWA_EXTENDED_FRAME_BOUNDS, hide while the target is iconic,
 // re-assert topmost every `reassert_every` calls. Call once per frame (or per second when idle).
 void OverlayFollow(Overlay* o, int reassert_every);
+// Take the overlay off the screen (dormant: nothing is enabled, so it would only be a slower copy
+// of the game sitting on top of it). OverlayFollow shows it again the next time it runs.
+void OverlayHide(Overlay* o);
 // Recreate swapchain buffers at a new size (after CaptureSizeChanged). Waits for GPU idle.
 bool OverlayResize(Overlay* o, UINT w, UINT h);
 // Hotkey polling: returns true once per press (consumes the flag).

@@ -94,7 +94,7 @@ const Setting kSettings[] = {
 
     // ---- 4 System: this machine, rarely touched ---------------------------------------------------
     { 4, L"gpu", L"adapter",          L"GPU (-1 = auto)",    Int,   nullptr, L"-1" },
-    { 4, L"capture", L"mode",         L"Capture",            Enum,  L"dda|wgc", L"dda" },
+    { 4, L"capture", L"mode",         L"Capture",            Enum,  L"auto|wgc|dda", L"auto" },
     { 4, L"ofa", L"input",            L"Flow input",         Enum,  kFlow,   L"960x540" },
     { 4, L"nr", L"max_fps",           L"FPS cap (0 = off)",  Int,   nullptr, L"0" },
 
@@ -455,7 +455,7 @@ INT_PTR CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         L"; JustFlow profile generated from an open window.\n"
         L"; Matching is on the TITLE (a prefix match). window_class is recorded below for reference:\n"
         L"; fill it in if two windows share a title. Both come from the window, never the process.\n\n"
-        L"[capture]\nmode=dda\nwindow_class=" + win.cls + L"\nwindow_title=" + win.title + L"\ncursor=0\nborder=0\n"
+        L"[capture]\nmode=auto\nwindow_class=" + win.cls + L"\nwindow_title=" + win.title + L"\ncursor=0\nborder=0\n"
         L"; class seen when this profile was made: " + win.cls + L"\n\n"
         L"[nr]\n; enabled = the effect as a whole (F9). model = the DLSS model (~12 ms).\n"
         L"; artcnn = ArtCNN (~2.3 ms), which needs no model.\n"

@@ -390,6 +390,12 @@ static IDXGIOutput* Output(Overlay* o)
 bool OverlayWaitVBlank(Overlay* o) { IDXGIOutput* out = Output(o); return out && SUCCEEDED(out->WaitForVBlank()); }
 double OverlayVBlankMs(Overlay* o) { Output(o); return o->vblank_ms; }
 
+void OverlayHide(Overlay* o)
+{
+    if (o && o->shown) { ShowWindow(o->hwnd, SW_HIDE); o->shown = false; }
+    if (o) o->follow_at = 0;   // so the wake-up is not held back by the follow throttle
+}
+
 void OverlayFollow(Overlay* o, int reassert_every)
 {
     if (!o->target || !IsWindow(o->target)) return;
