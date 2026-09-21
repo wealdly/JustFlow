@@ -417,7 +417,7 @@ Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UI
     if (!f->count)
     {
         for (auto& s : f->slots)
-            if (!(s.real = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, CSRC, L"fg_real"))) return fail("slot textures");
+            if (!(s.real = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_real"))) return fail("slot textures");
         f->thread = std::thread(Passthrough, f);
         Log("[fg] passthrough presenter %ux%u pacing=%s", out_w, out_h, vblank_pacing ? "vblank" : "timer");
         return f;
@@ -458,7 +458,7 @@ Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UI
     if (!f->disable || !f->disable_rb) return fail("disable buffers");
     for (auto& s : f->slots)
     {
-        s.real = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, CSRC, L"fg_real");
+        s.real = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_real");
         s.mv = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, CDST, L"fg_mv");
         if (!s.real || !s.mv) return fail("slot textures");
         for (int i = 0; i < f->count; ++i)
@@ -523,10 +523,9 @@ ID3D12Resource* FgDebugGen(Fg* f, int i)
 
 ID3D12Resource* FgDebugReal(Fg* f) { return (f && f->dbg) ? f->dbg->real : nullptr; }
 
-bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* composed, ID3D12Resource* mv,
-              const UiRect* rects, int nrects)
+ID3D12Resource* FgAcquire(Fg* f)
 {
-    if (f->failed) return false;
+    if (f->failed) return nullptr;
     FgSlot* s = nullptr; UINT64 eval = 0;
     {
         std::unique_lock<std::mutex> lk(f->mu);
@@ -552,20 +551,25 @@ bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* composed, ID
             const double bound = std::clamp(2.0 * (f->history ? NowMs() - f->last_submit : 16.0), 8.0, 50.0);
             f->cv.wait_for(lk, std::chrono::duration<double, std::milli>(bound), [&] { return f->stop || f->failed || (s = free_slot()) != nullptr; });
             f->rec_us += (UINT64)((NowMs() - t_block) * 1000.0); ++f->rec_n;
-            if (!s) return false;
+            if (!s) return nullptr;
         }
         s->state = 1; eval = s->eval_fence;
     }
-    s->nrects = std::clamp(nrects, 0, 64);
-    if (s->nrects) memcpy(s->rects, rects, (size_t)s->nrects * sizeof(UiRect));
     f->pending = s;
     // GPU-side ordering for the reuse: the FG queue's last evaluate of this slot (reads real/mv,
-    // writes gen) and the present queue's last copy (reads real/gen) complete before list 2 writes.
+    // writes gen) and the present queue's last copy (reads real/gen) complete before list 2 writes
+    // into s->real. The queue Wait lands before this list is executed by GpuEnd.
     if (eval) f->g->queue->Wait(f->ctx.fence, eval);
     OverlayGuard(f->ov, f->g->queue);
-    GpuBarrier(cl, s->real, CSRC, CDST);
-    cl->CopyResource(s->real, composed);
-    GpuBarrier(cl, s->real, CDST, CSRC);
+    return s->real;
+}
+
+bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, const UiRect* rects, int nrects)
+{
+    FgSlot* s = f->pending;
+    if (f->failed || !s) return false;
+    s->nrects = std::clamp(nrects, 0, 64);
+    if (s->nrects) memcpy(s->rects, rects, (size_t)s->nrects * sizeof(UiRect));
     if (!f->count) return true;   // passthrough: no mv
     GpuBarrier(cl, mv, NPSR, CSRC);
     cl->CopyResource(s->mv, mv);

@@ -14,7 +14,7 @@
 // real frame on the next vblank (pacing=vblank) or immediately (timer). It always takes the NEWEST
 // ready slot: older ready ones are dropped (counted in FgStatsOut::drops) - a display slower than
 // the capture never throttles the main thread, and the frames it skips would not have reached the
-// screen anyway. The slot ring, FgRecord's bounded wait and the latency stats are shared with
+// screen anyway. The slot ring and the latency stats are shared with
 // generation mode.
 //
 // Pacing (vblank mode): output slot L = real interval / multiplier. Frame k of a slot is due at
@@ -26,12 +26,13 @@
 // on the next vblank and the newer slot takes over.
 //
 // Contract:
-//   FgRecord  (main thread, inside list 2): copies composed (COPY_SOURCE) and mv (NPSR, restored)
-//             into a slot (Gpu::queue waits GPU-side for the slot's last evaluate + present copy).
-//             Slot textures are owned here, so the pipeline may overwrite out4k/mv on the next
-//             frame. With every slot in flight it waits (bounded, ~2 real intervals) for the
-//             presenter to retire one rather than drop a real frame; on timeout the oldest ready
-//             slot is overwritten. Returns false when no slot can be taken (frame not presented).
+//   FgAcquire (main thread, BEFORE list 2 writes the frame): takes a slot and returns the texture
+//             the pipeline composes into, so the last 4K pass lands in the slot instead of being
+//             copied there afterwards. Orders the reuse GPU-side (the slot's last evaluate and its
+//             last present) before returning. No free slot: the OLDEST READY one is taken on the
+//             spot - the presenter keeps only the newest, so that frame was going to be dropped
+//             anyway and waiting for it only stalls the capture. nullptr = no slot, no present.
+//   FgRecord  (main thread, inside list 2): copies mv (NPSR, restored) into the acquired slot.
 //   FgSubmit  (main thread, after GpuEnd): hands the recorded slot to the presenter with the fence
 //             value that completes the copy. reset = no interpolation against the previous frame.
 //             cap_qpc/acq_qpc (QPC ticks, 0 = unknown) feed the age/pipe latency stats.
@@ -53,14 +54,15 @@ Fg*  FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, U
 void FgDestroy(Fg* f);   // stops the presenter (drains the GPU), releases the feature and textures
 int  FgMultiplier(const Fg* f);   // as created (1 = passthrough)
 // mv may be nullptr in passthrough (never read).
-// rects/nrects: the addon UI mask for THIS frame, in output pixels. The composed frame already
-// has the UI restored; these let the generated frames get it back too (FgRestoreUi).
+// rects/nrects: the addon UI mask for THIS frame, in output pixels, restored onto every generated
+// frame out of s->real before it is presented.
 // Diagnostics (bench): the generated frames of the slot evaluated most recently, in COPY_SOURCE.
 // i in [0, multiplier-1); nullptr when nothing has been generated yet.
 ID3D12Resource* FgDebugGen(Fg* f, int i);
 ID3D12Resource* FgDebugReal(Fg* f);      // the real frame those generated frames came from
 
-bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* composed_rgba8, ID3D12Resource* mv,
+ID3D12Resource* FgAcquire(Fg* f);
+bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv,
               const UiRect* rects = nullptr, int nrects = 0);
 void FgSubmit(Fg* f, UINT64 render_fence_value, bool reset, LONGLONG cap_qpc, LONGLONG acq_qpc);
 // Live pacing knob (no rebuild): phase_ms shifts every scheduled present target (negative = earlier).

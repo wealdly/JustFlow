@@ -593,13 +593,21 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (native) cp.wipe_mode = 2;
     else if (p->wipe == 1) { cp.wipe_mode = 1; cp.wipe_x = 0.5f; }
     else if (p->wipe == 2) { cp.wipe_mode = 1; cp.wipe_x = (float)fmod((NowMs() - p->wipe_t0) / 2000.0, 1.0); }
-    GpuBarrier(cl, p->out4k, CSRC, UAV);
+    // Take the FG slot now, so the LAST 4K pass of this frame writes straight into it. The frame
+    // used to be composed into out4k/sharp4k and then CopyResource'd into the slot: 33 MB read plus
+    // 33 MB written per frame, ~6 GB/s of memory traffic at 90 fps, for a copy that produced nothing
+    // the previous pass had not already computed. Nobody downstream needs to know: the slot texture
+    // has the same format, size and resting state (COPY_SOURCE) as the targets it replaces.
+    ID3D12Resource* const fg_dst = p->fg ? FgAcquire(p->fg) : nullptr;
+    const bool filt = c.sharpen > 0 || c.saturation != 1.0f;
+    ID3D12Resource* const compose_dst = filt ? p->out4k : (fg_dst ? fg_dst : p->out4k);
+    GpuBarrier(cl, compose_dst, CSRC, UAV);
     if (async)
     {
         // The residual is from model frame M; mv_res is this frame's motion current -> M (the flow
         // against M's held gray), scaled by [nr] warp. mv (current -> previous) stays with FG.
         stamp(6);
-        CsComposeResidual(g, p->sh, cl, p->color4k, p->residual[std::max(p->cmp_idx, 0)], p->ww, p->wh, p->mv_res, p->out4k, p->w, p->h, cp);
+        CsComposeResidual(g, p->sh, cl, p->color4k, p->residual[std::max(p->cmp_idx, 0)], p->ww, p->wh, p->mv_res, compose_dst, p->w, p->h, cp);
         stamp(7);
         if (!native) { evaluated = true; p->residual_age.add((double)(p->frame_index - residual_frame)); }
     }
@@ -607,7 +615,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     {
         GpuBarrier(cl, p->nr_out, UAV, NPSR);
         stamp(6);
-        CsCompose(g, p->sh, cl, p->color4k, p->nr_in, art_only ? p->nr_in2 : p->nr_out, p->ww, p->wh, p->out4k, p->w, p->h, cp);
+        CsCompose(g, p->sh, cl, p->color4k, p->nr_in, art_only ? p->nr_in2 : p->nr_out, p->ww, p->wh, compose_dst, p->w, p->h, cp);
         stamp(7);
         GpuBarrier(cl, p->nr_out, NPSR, UAV);
     }
@@ -615,14 +623,15 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // Filter layer (out4k -> sharp4k, UI rects untouched): sharpen then vibrance, before the text
     // so the text stays crisp. Runs when either filter is asked for - vibrance used to live inside
     // the neural compose, which meant it died with the neural layer while sharpen carried on.
-    ID3D12Resource* shown = p->out4k;
-    if (c.sharpen > 0 || c.saturation != 1.0f)
+    ID3D12Resource* shown = compose_dst;
+    if (filt)
     {
+        ID3D12Resource* const filt_dst = fg_dst ? fg_dst : p->sharp4k;
         GpuBarrier(cl, p->out4k, UAV, NPSR);
-        GpuBarrier(cl, p->sharp4k, CSRC, UAV);
-        stamp(12); CsSharpen(g, p->sh, cl, p->out4k, p->sharp4k, p->w, p->h, c.sharpen, c.saturation, (UINT)cp.nrects); stamp(13);   // rect_tex holds this frame's rects (compose above)
+        GpuBarrier(cl, filt_dst, CSRC, UAV);
+        stamp(12); CsSharpen(g, p->sh, cl, p->out4k, filt_dst, p->w, p->h, c.sharpen, c.saturation, (UINT)cp.nrects); stamp(13);   // rect_tex holds this frame's rects (compose above)
         GpuBarrier(cl, p->out4k, NPSR, CSRC);
-        shown = p->sharp4k;
+        shown = filt_dst;
     }
     // toast (2 s, the last 0.4 s fade) top-centre; status HUD in its corner (also in bypass)
     const double now = NowMs();
@@ -650,7 +659,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     GpuBarrier(cl, shown, UAV, CSRC);
     p->shown = shown;
     // the presenter thread presents (passthrough or generation); --no-present has no Fg
-    const bool fg_recorded = p->fg && FgRecord(p->fg, cl, shown, p->mv, cp.rects, (int)cp.nrects);
+    const bool fg_recorded = fg_dst && FgRecord(p->fg, cl, p->mv, cp.rects, (int)cp.nrects);
     const UINT64 f2 = GpuEnd(g);
     if (!f2) return false;
     if (async && p->cmp_idx >= 0) p->residual_read_fence[p->cmp_idx] = f2;   // the model thread waits for it before rewriting that residual
