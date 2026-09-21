@@ -231,7 +231,7 @@ static void ModelThread(Pipeline* p, bool create, NrConfig nc)
         if (!GpuCtxBegin(g, c)) return fail("ctx begin A");
         GpuBarrier(c.list, p->model_src, CDST, NPSR);
         GpuBarrier(c.list, p->nr_in_m, NPSR, UAV);
-        CsDownscale(g, p->sh, c.list, p->model_src, p->w, p->h, p->nr_in_m, p->ww, p->wh);
+        CsDownscale(g, p->sh, c.list, p->model_src, p->w, p->h, p->nr_in_m, p->ww, p->wh, p->cfg.ds);
         GpuBarrier(c.list, p->nr_in_m, UAV, NPSR);
         if (mp.artcnn) { GpuBarrier(c.list, p->nr_in2_m, NPSR, UAV); CsArtCnn(g, p->sh, c.list, p->nr_in_m, p->nr_in2_m, p->ww, p->wh); GpuBarrier(c.list, p->nr_in2_m, UAV, NPSR); }
         GpuBarrier(c.list, p->model_src, NPSR, CDST);
@@ -522,7 +522,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // downscale and ArtCNN's seven passes were being computed and thrown away - measured live as
     // ~5 ms a frame at 1800p, holding a 240 fps capture at 146 with the layer OFF.
     const bool neural_live = !p->bypass;
-    if (!async && neural_live && (model_on || c.artcnn)) CsDownscale(g, p->sh, cl, p->color4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
+    if (!async && neural_live && (model_on || c.artcnn)) CsDownscale(g, p->sh, cl, p->color4k, p->w, p->h, p->nr_in, p->ww, p->wh, c.ds);   // async: the model thread downscales its own copy
     stamp(3);
     GpuBarrier(cl, p->nr_in, UAV, NPSR);
     if (!async && neural_live && c.artcnn)   // the evaluate reads nr_in2; compose keeps nr_in so the residual carries the ArtCNN delta too
