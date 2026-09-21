@@ -88,7 +88,7 @@ Shaders* ShadersCreate(Gpu& g)
     bool ok = true;
     ok &= GpuMakeCompute(g, g_cs_swizzle,   sizeof g_cs_swizzle,   1, 1, 2,  s->swizzle,   L"cs_swizzle");
     ok &= GpuMakeCompute(g, g_cs_gray,      sizeof g_cs_gray,      1, 1, 6,  s->gray,      L"cs_gray");
-    ok &= GpuMakeCompute(g, g_cs_downscale, sizeof g_cs_downscale, 1, 1, 7,  s->downscale, L"cs_downscale");
+    ok &= GpuMakeCompute(g, g_cs_downscale, sizeof g_cs_downscale, 1, 1, 4,  s->downscale, L"cs_downscale");
     ok &= GpuMakeCompute(g, g_cs_expand,    sizeof g_cs_expand,    1, 1,  9, s->expand,    L"cs_expand");
     ok &= GpuMakeCompute(g, g_cs_compose,   sizeof g_cs_compose,   4, 1, 12, s->compose,   L"cs_compose");
     ok &= GpuMakeCompute(g, g_cs_residual,  sizeof g_cs_residual,  2, 1, 2,  s->residual,  L"cs_residual");
@@ -149,12 +149,11 @@ void CsGray(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* s
     GpuDispatch(g, cl, s->gray, &srv, &uav, c, GpuGroups(gw, 8), GpuGroups(gh, 8));
 }
 
-void CsDownscale(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, UINT w, UINT h, ID3D12Resource* dst, UINT dw, UINT dh,
-                 const DownscaleShape& k)
+void CsDownscale(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, UINT w, UINT h, ID3D12Resource* dst, UINT dw, UINT dh)
 {
-    const struct { UINT w, h, dw, dh; float sharp, point_mix; UINT linear_light; } c = { w, h, dw, dh, k.sharp, k.point_mix, k.linear_light ? 1u : 0u };
+    const UINT c[4] = { w, h, dw, dh };
     const GpuView srv = { src, DXGI_FORMAT_R8G8B8A8_UNORM }, uav = { dst, DXGI_FORMAT_R8G8B8A8_UNORM };
-    GpuDispatch(g, cl, s->downscale, &srv, &uav, &c, GpuGroups(dw, 8), GpuGroups(dh, 8));
+    GpuDispatch(g, cl, s->downscale, &srv, &uav, c, GpuGroups(dw, 8), GpuGroups(dh, 8));
 }
 
 void CsExpand(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* flow, UINT fw, UINT fh, UINT ofa_w, UINT ofa_h,

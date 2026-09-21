@@ -118,8 +118,6 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.exposure_scale = F(L"nr", L"exposure_scale", c.exposure_scale);
     c.residual_strength = F(L"nr", L"residual_strength", c.residual_strength);
     c.chroma = F(L"nr", L"chroma", c.chroma);
-    c.ds.sharp = F(L"nr", L"ds_sharp", c.ds.sharp); c.ds.point_mix = F(L"nr", L"ds_point", c.ds.point_mix);
-    c.ds.linear_light = B(L"nr", L"ds_linear", c.ds.linear_light);
     // sharpen/saturation used to live in [nr], which put the filter layer's keys inside the neural
     // layer's section. They read from [filters] now, falling back to the old home so a profile
     // written before the move keeps its values.

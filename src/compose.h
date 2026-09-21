@@ -14,10 +14,7 @@ void CsSwizzle(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource
 // RGBA8 (w x h) -> R8 luminance (gw x gh), exact area average (block = w/gw x h/gh, integer).
 void CsGray(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src_rgba, UINT w, UINT h, ID3D12Resource* dst_r8, UINT gw, UINT gh);
 // RGBA8 (w x h) -> RGBA8 (dw x dh), area box filter (any ratio).
-// How the frame the MODEL sees is formed (shaders/downscale.hlsl). All zero = the plain area filter.
-struct DownscaleShape { float sharp = 0, point_mix = 0; bool linear_light = false; };
-void CsDownscale(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, UINT w, UINT h, ID3D12Resource* dst, UINT dw, UINT dh,
-                 const DownscaleShape& k = DownscaleShape());
+void CsDownscale(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, UINT w, UINT h, ID3D12Resource* dst, UINT dw, UINT dh);
 // OFA flow R16G16_SINT (fw x fh cells, S10.5, units = OFA-input pixels) -> R16G16_FLOAT motion
 // vectors (mw x mh) in work-resolution pixels: v = flow/32 * (mw/ofa_w, mh/ofa_h), bilinear over
 // the grid, zeroed below `zero_below` px or when `reset`.
