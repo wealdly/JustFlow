@@ -9,8 +9,11 @@
 // that lists everything is a panel nobody can read.
 //
 // Four model knobs are ini-only for a stronger reason - they were tested and do nothing useful:
-//   nr.intensity        the runtime clamps it; dead above 1.0. residual_strength scales the whole
-//                       edit predictably, so the slider only ever offered a worse version of it.
+//   nr.intensity        the runtime clamps it, so it is dead ABOVE 1.0 - below it does change the
+//                       model's output (measured: distinct hashes). It stays ini-only because the
+//                       useful direction is already covered, not because it does nothing. NB it is
+//                       NOT the same lever as residual_strength, which scales the delta in our own
+//                       compose and leaves nr_out untouched.
 //   nr.skin_structure   -1 already means "follow local_structure", which is what anyone wants.
 //   nr.auto_mask        no visible effect in testing.
 //   nr.ui_correction    the addon's UI rects are what actually protects the interface.

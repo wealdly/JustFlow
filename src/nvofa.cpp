@@ -122,7 +122,16 @@ Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid, const wchar_t* dll_override)
     const std::vector<uint32_t> grids = Caps(o, NV_OF_CAPS_SUPPORTED_OUTPUT_GRID_SIZES);
     if (grids.empty()) { Log("[ofa] no supported grid sizes"); OfaDestroy(o); return nullptr; }
     std::string gl; for (uint32_t x : grids) gl += std::to_string(x) + " ";
-    o->grid = *std::min_element(grids.begin(), grids.end());
+    // auto = 2, not the smallest. Measured against a known split-motion pair (left half panning, right
+    // half static), 960x540 input, deterministic across runs:
+    //   grid 1   0.99 ms   84 columns of smeared boundary
+    //   grid 2   0.46 ms   12 columns          <- cheaper AND sharper
+    //   grid 4   0.40 ms   86 columns
+    // Grid 2 wins on both axes. The finest grid estimates each vector from the smallest window, so it
+    // is the noisiest, and the coarsest genuinely blurs the boundary - 2 is the bias/variance middle.
+    // Taking min_element picked the option that was neither stable nor cheap.
+    o->grid = 2;
+    if (std::find(grids.begin(), grids.end(), 2u) == grids.end()) o->grid = *std::min_element(grids.begin(), grids.end());
     if (grid > 0 && std::find(grids.begin(), grids.end(), (uint32_t)grid) != grids.end()) o->grid = (UINT)grid;
     else if (grid > 0) Log("[ofa] requested grid %d unsupported", grid);
     Log("[ofa] supported grids: %s-> using %u", gl.c_str(), o->grid);

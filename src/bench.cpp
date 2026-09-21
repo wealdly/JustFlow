@@ -234,10 +234,40 @@ int RunBench(int argc, char** argv)
                 if (vx != 0.0f || vy != 0.0f) { ++nz; xs.push_back(vx); ys.push_back(vy); }
             }
             auto med = [](std::vector<float>& v) { if (v.empty()) return 0.0f; std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
+            // Left and right halves separately: a rigid pan cannot tell a coarse flow grid from a
+            // fine one (every vector is the same, so downsampling loses nothing). Split motion can.
+            std::vector<float> lx, rx;
+            for (UINT y = 0; y < wh; ++y) for (UINT x = 0; x < ww; ++x)
+            {
+                const uint16_t* q = (const uint16_t*)&raw[((size_t)y * ww + x) * 4];
+                const float vx = half(q[0]);
+                if (!std::isfinite(vx)) continue;
+                (x < ww / 2 ? lx : rx).push_back(vx);
+            }
+            const float lmed = med(lx), rmed = med(rx);
+            // Transition width: columns whose median vector matches NEITHER side. That is the smear
+            // a coarse flow grid leaves at a motion boundary, and it is the only thing a rigid pan
+            // cannot show. Expect it to scale with the grid: one grid cell = `grid` OFA-input px.
+            int ambiguous = 0;
+            for (UINT x = 0; x < ww; ++x)
+            {
+                std::vector<float> col;
+                for (UINT y = 0; y < wh; ++y)
+                {
+                    const uint16_t* q = (const uint16_t*)&raw[((size_t)y * ww + x) * 4];
+                    const float vx = half(q[0]); if (std::isfinite(vx)) col.push_back(vx);
+                }
+                const float m = med(col);
+                if (fabsf(m - lmed) > 1.0f && fabsf(m - rmed) > 1.0f) ++ambiguous;
+            }
+            Log("[bench] mv transition: %d of %u columns match neither side", ambiguous, ww);
+            printf("mv transition: %d of %u columns match neither side\n", ambiguous, ww);
             const double frac = 100.0 * (double)nz / ((double)ww * wh);
             const float mx = med(xs), my = med(ys);
             Log("[bench] mv %ux%u: %.1f%% non-zero, median (%.2f, %.2f) work px, %zu non-finite", ww, wh, frac, mx, my, bad);
             printf("mv %ux%u: %.1f%% non-zero, median (%.2f, %.2f) work px, %zu non-finite\n", ww, wh, frac, mx, my, bad);
+            Log("[bench] mv halves: left %.2f  right %.2f work px", lmed, rmed);
+            printf("mv halves: left %.2f  right %.2f work px\n", lmed, rmed);
         }
     }
 
