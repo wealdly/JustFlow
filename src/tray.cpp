@@ -14,7 +14,8 @@
 namespace
 {
 const UINT WM_TRAY_ICON  = WM_APP + 1;   // Shell_NotifyIcon callback
-const UINT WM_TRAY_STATE = WM_APP + 2;   // TraySetState -> refresh tooltip on the tray thread
+const UINT WM_TRAY_STATE = WM_APP + 2;
+const UINT WM_TRAY_SETTINGS = WM_APP + 3;   // double-click: open Settings once the menu loop has unwound   // TraySetState -> refresh tooltip on the tray thread
 const UINT ICON_ID = 1;
 
 enum { IDM_STATUS = 1, IDM_NR, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM_MULT3, IDM_MULT4, IDM_WIPE, IDM_RELOAD,
@@ -28,6 +29,7 @@ struct Tray
     std::thread  thread;
     HANDLE ready = nullptr;
     HWND   hwnd = nullptr;
+    bool   in_menu = false, in_dialog = false;   // tray thread only: both run modal loops that pump messages
     HICON  icon = nullptr;
     UINT   taskbar_created = 0;
 
@@ -77,6 +79,7 @@ static std::wstring ProfilesDir(const std::wstring& profile_ini)
 
 static void ShowNewProfileDialog(Tray* t)
 {
+    struct Guard { bool& f; Guard(bool& x) : f(x) { f = true; } ~Guard() { f = false; } } guard(t->in_dialog);
     std::wstring app, profile;
     { std::lock_guard<std::mutex> lk(t->mu); app = t->app_ini; profile = t->profile_ini; }
     if (NewProfileDialog(t->hwnd, ProfilesDir(profile).c_str(), app.c_str(), t->app.c_str()))
@@ -85,15 +88,23 @@ static void ShowNewProfileDialog(Tray* t)
 
 // The active profile's name and the shipped default it could be reset to (profiles\\defaults\\ is
 // refreshed by every build and is never live config, so it is always the pristine copy).
-static std::wstring ActiveProfile(Tray* t, std::wstring* path = nullptr, std::wstring* def = nullptr)
+// NoLock: for callers that already hold t->mu (BuildMenu). std::mutex is not recursive - taking it
+// twice on one thread throws, and an exception escaping a window procedure is terminate(): that
+// was a crash on every tray-menu open with a profile active.
+static std::wstring ActiveProfileNoLock(const std::wstring& ini, std::wstring* path = nullptr, std::wstring* def = nullptr)
 {
-    std::wstring ini; { std::lock_guard<std::mutex> lk(t->mu); ini = t->profile_ini; }
     if (ini.empty()) return L"";
     const size_t sl = ini.find_last_of(L"\\/"), dot = ini.rfind(L".ini");
     const std::wstring name = ini.substr(sl == std::wstring::npos ? 0 : sl + 1, dot == std::wstring::npos ? std::wstring::npos : dot - (sl == std::wstring::npos ? 0 : sl + 1));
     if (path) *path = ini;
     if (def) *def = ProfilesDir(ini) + L"\\defaults\\" + name + L".ini";
     return name;
+}
+
+static std::wstring ActiveProfile(Tray* t, std::wstring* path = nullptr, std::wstring* def = nullptr)
+{
+    std::wstring ini; { std::lock_guard<std::mutex> lk(t->mu); ini = t->profile_ini; }
+    return ActiveProfileNoLock(ini, path, def);
 }
 
 static void ResetProfile(Tray* t)
@@ -124,6 +135,7 @@ static void RemoveProfile(Tray* t)
 
 static void ShowSettingsDialog(Tray* t)
 {
+    struct Guard { bool& f; Guard(bool& x) : f(x) { f = true; } ~Guard() { f = false; } } guard(t->in_dialog);
     std::wstring app, profile; HWND game;
     { std::lock_guard<std::mutex> lk(t->mu); app = t->app_ini; profile = t->profile_ini; game = t->game; }
     // Apply reloads with the window still open; OK reloads only for what changed after the last Apply.
@@ -171,7 +183,7 @@ static HMENU BuildMenu(Tray* t)
     if (t->profile >= 0 && t->profile < (int)t->profiles.size())
         CheckMenuRadioItem(pr, IDM_PROFILE0, IDM_PROFILE0 + (UINT)t->profiles.size() - 1, IDM_PROFILE0 + t->profile, MF_BYCOMMAND);
     {
-        std::wstring def; const std::wstring name = ActiveProfile(t, nullptr, &def);
+        std::wstring def; const std::wstring name = ActiveProfileNoLock(t->profile_ini, nullptr, &def);   // t->mu is held here
         if (!name.empty())
         {
             const bool has_def = GetFileAttributesW(def.c_str()) != INVALID_FILE_ATTRIBUTES;
@@ -206,7 +218,9 @@ static void ShowMenu(Tray* t)
     APPBARDATA ab = { sizeof ab };
     const bool have_bar = SHAppBarMessage(ABM_GETTASKBARPOS, &ab) != 0;
     if (have_bar) tp.rcExclude = ab.rc;
+    t->in_menu = true;    // TrackPopupMenuEx pumps messages: a second click must not nest another menu inside this one
     const int cmd = TrackPopupMenuEx(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, t->hwnd, have_bar ? &tp : nullptr);
+    t->in_menu = false;
     PostMessageW(t->hwnd, WM_NULL, 0, 0);
     DestroyMenu(m);   // destroys submenus too
     switch (cmd)
@@ -273,9 +287,17 @@ static LRESULT CALLBACK TrayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     if (!t) return DefWindowProcW(h, msg, wp, lp);
     if (msg == WM_TRAY_ICON)
     {
-        switch (LOWORD(lp)) { case WM_CONTEXTMENU: case NIN_SELECT: case NIN_KEYSELECT: ShowMenu(t); break; }
+        switch (LOWORD(lp))
+        {
+        // The first click of a double-click has already opened the menu and is sitting in its modal
+        // loop, so this arrives nested inside it: close the menu and open Settings from a posted
+        // message, after that loop has unwound, rather than stacking a dialog on top of it.
+        case WM_LBUTTONDBLCLK: EndMenu(); PostMessageW(h, WM_TRAY_SETTINGS, 0, 0); break;
+        case WM_CONTEXTMENU: case NIN_SELECT: case NIN_KEYSELECT: if (!t->in_menu && !t->in_dialog) ShowMenu(t); break;
+        }
         return 0;
     }
+    if (msg == WM_TRAY_SETTINGS) { if (!t->in_dialog) ShowSettingsDialog(t); return 0; }
     if (msg == WM_TRAY_STATE)
     {
         NOTIFYICONDATAW n = Nid(t);
