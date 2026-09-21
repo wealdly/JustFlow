@@ -453,6 +453,12 @@ static void Dispatch(Gpu& g, ID3D12DescriptorHeap* heap, int slot, UINT& used, b
         cpu.ptr += g.desc_size; gpu.ptr += g.desc_size;
     }
     used += need;
+    // Every dispatch, not once per frame in GpuBegin: an NGX EvaluateFeature records into this same
+    // list and binds its own descriptor heaps, and SetDescriptorHeaps is command-list state. Anything
+    // recorded after an evaluate would otherwise run with NGX's heap bound while the root tables
+    // below point into ours - the compose reading foreign descriptors. A redundant bind is free.
+    ID3D12DescriptorHeap* heaps[] = { heap };
+    cl->SetDescriptorHeaps(1, heaps);
     cl->SetComputeRootSignature(p.root);
     cl->SetPipelineState(p.pso);
     if (p.num_consts) cl->SetComputeRoot32BitConstants(0, p.num_consts, consts, 0);
