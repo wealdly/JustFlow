@@ -1,5 +1,6 @@
 // WIC PNG load/save and --bench: PNG frames through the same pipeline as live capture.
 #include "pipeline.h"
+#include <cmath>
 #include "log.h"
 #include <wincodec.h>
 #include <algorithm>
@@ -204,6 +205,39 @@ int RunBench(int argc, char** argv)
                 in_diff, in_n, outpct, pass ? "PASS" : "FAIL");
             printf("FG ui restore: %zu/%zu px differ inside rect1, %.1f%% differ outside - %s\n",
                    in_diff, in_n, outpct, pass ? "PASS" : "FAIL");
+        }
+    }
+
+    // The motion vectors, checked against KNOWN motion. These feed BOTH the NR model and DLSS-G, so
+    // a wrong sign, scale or reference frame shows up as warping and temporal instability rather
+    // than as an error - which is why it can hide for a long time behind "FG is unstable".
+    // Feed --bench a panning sequence and the expected magnitude is arithmetic: a shift of N native
+    // pixels is N * (ww / w) at work resolution.
+    if (p->mv)
+    {
+        const UINT ww = p->ww, wh = p->wh;
+        std::vector<uint8_t> raw((size_t)ww * wh * 4);
+        if (GpuReadbackTex(g, p->mv, raw.data(), ww, wh, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
+        {
+            auto half = [](uint16_t h) -> float {
+                const int e = (h >> 10) & 0x1F, m = h & 0x3FF; const float sgn = (h & 0x8000) ? -1.0f : 1.0f;
+                if (e == 0) return sgn * ldexpf((float)m, -24);
+                if (e == 31) return sgn * (m ? NAN : INFINITY);
+                return sgn * ldexpf((float)(m | 0x400), e - 25);
+            };
+            std::vector<float> xs, ys; size_t nz = 0, bad = 0;
+            for (size_t i = 0; i < (size_t)ww * wh; ++i)
+            {
+                const uint16_t* q = (const uint16_t*)&raw[i * 4];
+                const float vx = half(q[0]), vy = half(q[1]);
+                if (!std::isfinite(vx) || !std::isfinite(vy)) { ++bad; continue; }
+                if (vx != 0.0f || vy != 0.0f) { ++nz; xs.push_back(vx); ys.push_back(vy); }
+            }
+            auto med = [](std::vector<float>& v) { if (v.empty()) return 0.0f; std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
+            const double frac = 100.0 * (double)nz / ((double)ww * wh);
+            const float mx = med(xs), my = med(ys);
+            Log("[bench] mv %ux%u: %.1f%% non-zero, median (%.2f, %.2f) work px, %zu non-finite", ww, wh, frac, mx, my, bad);
+            printf("mv %ux%u: %.1f%% non-zero, median (%.2f, %.2f) work px, %zu non-finite\n", ww, wh, frac, mx, my, bad);
         }
     }
 
