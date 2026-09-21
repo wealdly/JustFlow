@@ -4,9 +4,18 @@
 //
 // Diagnostics stay out of the table on purpose. Ini-only: param_block, warmup,
 // rebuild_debounce_frames, selftest, fg.pacing, fg.mv_dilated, fg.phase_ms, nr.exposure_scale,
-// nr.model_max_fps, nr.warp, ofa.input/grid/zero_below, capture.cursor/border, ui.rectN,
-// ui.mask_every, ui.feather. They are for debugging, not for tuning, and a panel that lists
-// everything is a panel nobody can read.
+// nr.model_max_fps, nr.warp, ofa.grid/zero_below, capture.cursor/border, ui.rectN, ui.mask_every,
+// ui.feather, ui.toast_scale, overlay.mode. They are for debugging, not for tuning, and a panel
+// that lists everything is a panel nobody can read.
+//
+// Four model knobs are ini-only for a stronger reason - they were tested and do nothing useful:
+//   nr.intensity        the runtime clamps it; dead above 1.0. residual_strength scales the whole
+//                       edit predictably, so the slider only ever offered a worse version of it.
+//   nr.skin_structure   -1 already means "follow local_structure", which is what anyone wants.
+//   nr.auto_mask        no visible effect in testing.
+//   nr.ui_correction    the addon's UI rects are what actually protects the interface.
+// A control that cannot change the picture is worse than no control: it invites tuning that does
+// nothing and then hides the knob that would have worked.
 #include "settings.h"
 #include "config.h"
 #include <commctrl.h>
@@ -29,65 +38,63 @@ struct Setting
     const wchar_t* def;     // shown when the key is absent from the file
 };
 
-// One tab per pipeline LAYER, in the order a frame passes through them: the neural layer
-// (ArtCNN and/or the DLSS model) composes a residual onto the native frame, ordinary filters
-// run on the result, then frame generation, then presentation. Mixing them was the confusion.
-const wchar_t* const kTabs[] = { L"Neural", L"Model", L"Filters", L"Frame gen", L"Display", L"System", L"Hotkeys" };
+// One tab per pipeline LAYER, in the order a frame passes through them: neural (ArtCNN and/or the
+// DLSS model, composed back as a residual), then ordinary filters, then frame generation, then
+// presentation. Everything neural is on ONE tab - splitting the layer's switches from the model's
+// tuning across two tabs meant hunting for which tab a knob lived on, which was the original
+// complaint. A layer you are not running is a tab you never open.
+const wchar_t* const kTabs[] = { L"Neural", L"Filters", L"Frame gen", L"Display", L"System", L"Hotkeys" };
 const int kTabCount = (int)(sizeof kTabs / sizeof *kTabs);
 
 // Model resolutions: the measured cost is ~1.5 ms/MPix + 1 ms on a 5080, so 4K is a 60 fps tier.
 const wchar_t* const kWork = L"auto|1920x1080|2560x1440|3200x1800|3840x2160";
+// Optical flow input: the largest GPU cost in the pipeline and it scales steeply.
+// Measured on an idle 5080 from a 4K capture: 0.55 / 1.05 / 1.49 / 3.61 ms.
+const wchar_t* const kFlow = L"640x360|960x540|1280x720|1920x1080";
 
 const Setting kSettings[] = {
-    // ---- 0 Neural layer: which model runs, and how its residual is applied ---------------------
+    // ---- 0 Neural layer: the switch, what runs under it, and how the model is tuned ------------
     { 0, L"nr", L"enabled",           L"Neural layer (F9)",  Bool,  nullptr, L"1" },
     { 0, L"nr", L"artcnn",            L"ArtCNN (~2.3ms)",    Bool,  nullptr, L"1" },
     { 0, L"nr", L"model",             L"DLSS model (~12ms)", Bool,  nullptr, L"0" },
     { 0, L"nr", L"work",              L"Model resolution",   Enum,  kWork,   L"auto" },
-    { 0, L"nr", L"residual_strength", L"Effect strength",    Float, nullptr, L"1.0" },
+    { 0, L"nr", L"mode",              L"Model mode",         Enum,  L"sync|async", L"sync" },
+    { 0, L"nr", L"residual_strength", L"Neural strength",    Float, nullptr, L"1.0" },
     { 0, L"nr", L"chroma",            L"Keep model colour",  Float, nullptr, L"0.25" },
+    { 0, L"nr", L"style",             L"Style 0=std 1=nat 2=cine", Int, nullptr, L"0" },
+    { 0, L"nr", L"local_tone",        L"Local tone/colour",  Float, nullptr, L"0.2" },
+    { 0, L"nr", L"local_structure",   L"Local structure",    Float, nullptr, L"1.0" },
 
-    // ---- 1 Model tuning: only bites when the DLSS model is on ----------------------------------
-    { 1, L"nr", L"mode",              L"Model mode",         Enum,  L"sync|async", L"sync" },
-    { 1, L"nr", L"style",             L"Style (0-2)",        Int,   nullptr, L"0" },
-    { 1, L"nr", L"intensity",         L"Intensity",          Float, nullptr, L"1.0" },
-    { 1, L"nr", L"local_tone",        L"Local tone/colour",  Float, nullptr, L"0.2" },
-    { 1, L"nr", L"local_structure",   L"Local structure",    Float, nullptr, L"1.0" },
-    { 1, L"nr", L"skin_structure",    L"Skin structure",     Float, nullptr, L"-1" },
-    { 1, L"nr", L"auto_mask",         L"Auto skin mask",     Bool,  nullptr, L"1" },
-    { 1, L"nr", L"ui_correction",     L"UI correction",      Bool,  nullptr, L"1" },
+    // ---- 1 Filters: ordinary post passes, independent of the neural layer ----------------------
+    { 1, L"filters", L"enabled",      L"Filter layer (F6)",  Bool,  nullptr, L"1" },
+    { 1, L"filters", L"sharpen",      L"Sharpen",            Float, nullptr, L"0.0" },
+    { 1, L"filters", L"saturation",   L"Vibrance",           Float, nullptr, L"1.10" },
 
-    // ---- 2 Filters: ordinary post passes, independent of the neural layer ----------------------
-    { 2, L"filters", L"enabled",      L"Filter layer (F6)",  Bool,  nullptr, L"1" },
-    { 2, L"filters", L"sharpen",      L"Sharpen",            Float, nullptr, L"0.0" },
-    { 2, L"filters", L"saturation",   L"Vibrance",           Float, nullptr, L"1.10" },
+    // ---- 2 Frame generation ---------------------------------------------------------------------
+    { 2, L"fg", L"enabled",           L"Frame generation (F8)", Bool, nullptr, L"1" },
+    { 2, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4", L"2" },
 
-    // ---- 3 Frame generation ---------------------------------------------------------------------
-    { 3, L"fg", L"enabled",           L"Frame generation",   Bool,  nullptr, L"1" },
-    { 3, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4", L"2" },
+    // ---- 3 Display --------------------------------------------------------------------------------
+    { 3, L"ui", L"hud",               L"Status HUD (F7)",    Bool,  nullptr, L"0" },
+    { 3, L"ui", L"hud_corner",        L"HUD corner",         Enum,  L"tl|tr|bl|br", L"tl" },
+    { 3, L"ui", L"hud_scale",         L"HUD size",           Int,   nullptr, L"3" },
+    { 3, L"ui", L"toast",             L"Toasts",             Bool,  nullptr, L"1" },
+    { 3, L"ui", L"mask",              L"JustFlow addon mask",Bool,  nullptr, L"0" },
 
-    // ---- 4 Display --------------------------------------------------------------------------------
-    { 4, L"ui", L"hud",               L"Status HUD (F7)",    Bool,  nullptr, L"0" },
-    { 4, L"ui", L"hud_corner",        L"HUD corner",         Enum,  L"tl|tr|bl|br", L"tl" },
-    { 4, L"ui", L"hud_scale",         L"HUD size",           Int,   nullptr, L"3" },
-    { 4, L"ui", L"toast",             L"Toasts",             Bool,  nullptr, L"1" },
-    { 4, L"ui", L"toast_scale",       L"Toast size",         Int,   nullptr, L"4" },
-    { 4, L"ui", L"mask",              L"JustFlow addon mask",Bool,  nullptr, L"0" },
+    // ---- 4 System: this machine, rarely touched ---------------------------------------------------
+    { 4, L"gpu", L"adapter",          L"GPU (-1 = auto)",    Int,   nullptr, L"-1" },
+    { 4, L"capture", L"mode",         L"Capture",            Enum,  L"dda|wgc", L"dda" },
+    { 4, L"ofa", L"input",            L"Flow input",         Enum,  kFlow,   L"960x540" },
+    { 4, L"nr", L"max_fps",           L"FPS cap (0 = off)",  Int,   nullptr, L"0" },
 
-    // ---- 5 System: this machine, rarely touched ---------------------------------------------------
-    { 5, L"gpu", L"adapter",          L"GPU (-1 = auto)",    Int,   nullptr, L"-1" },
-    { 5, L"capture", L"mode",         L"Capture",            Enum,  L"dda|wgc", L"dda" },
-    { 5, L"overlay", L"mode",         L"Overlay",            Enum,  L"composed|direct", L"composed" },
-    { 5, L"nr", L"max_fps",           L"FPS cap (0 = off)",  Int,   nullptr, L"0" },
-
-    // ---- 6 Hotkeys ---------------------------------------------------------------------------------
-    { 6, L"hotkeys", L"toggle",       L"Neural layer",       Hotkey, nullptr, L"F9" },
-    { 6, L"hotkeys", L"fg",           L"Frame generation",   Hotkey, nullptr, L"F8" },
-    { 6, L"hotkeys", L"filters",      L"Filter layer",       Hotkey, nullptr, L"F6" },
-    { 6, L"hotkeys", L"hud",          L"Status HUD",         Hotkey, nullptr, L"F7" },
-    { 6, L"hotkeys", L"wipe",         L"Wipe compare",       Hotkey, nullptr, L"F10" },
-    { 6, L"hotkeys", L"reload",       L"Reload config",      Hotkey, nullptr, L"F11" },
-    { 6, L"hotkeys", L"quit",         L"Quit",               Hotkey, nullptr, L"Ctrl+F12" },
+    // ---- 5 Hotkeys ---------------------------------------------------------------------------------
+    { 5, L"hotkeys", L"toggle",       L"Neural layer",       Hotkey, nullptr, L"F9" },
+    { 5, L"hotkeys", L"filters",      L"Filter layer",       Hotkey, nullptr, L"F6" },
+    { 5, L"hotkeys", L"fg",           L"Frame generation",   Hotkey, nullptr, L"F8" },
+    { 5, L"hotkeys", L"hud",          L"Status HUD",         Hotkey, nullptr, L"F7" },
+    { 5, L"hotkeys", L"wipe",         L"Wipe compare",       Hotkey, nullptr, L"F10" },
+    { 5, L"hotkeys", L"reload",       L"Reload config",      Hotkey, nullptr, L"F11" },
+    { 5, L"hotkeys", L"quit",         L"Quit",               Hotkey, nullptr, L"Ctrl+F12" },
 };
 const int kCount = (int)(sizeof kSettings / sizeof *kSettings);
 
