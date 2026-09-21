@@ -47,6 +47,15 @@ std::wstring ExeDir()
 // nearest 1080 lines (ties go to the larger): 4K -> 1920x1080, 1440p -> 2560x1440 (1:1, exact),
 // 1080p -> 1920x1080. It used to come from justflow.spike.ini, where the spike had picked 2560x1440
 // on evaluate time alone - and the capture size was not even known when it was read.
+//
+// The loss at a small work size is the model behaving differently at the wrong scale, not missing input:
+// a 640x360 edit could carry 77-90% of the native-4K edit, a 1080p one 87-99%, and we get 53-89%. What does
+// recover it is spending the same budget in TIME instead: on a moving tools/scene sequence, share of the
+// every-frame 4K edit reproduced -
+//   1920x1080 every frame   57%   (3.8 ms/frame)       3840x2160 model_every=4   81%   (12.2 ms / 4 = 3.0)
+//   1920x1080 model_every=3 49%                        3840x2160 model_every=6   76%
+// The edit is low-frequency, so it survives being motion-warped for several frames. NOT the default: the
+// bench cannot see what a 12 ms evaluate does to a game sharing the GPU. work=3840x2160 + model_every=4.
 static void WorkAuto(Config& c, UINT w, UINT h)
 {
     if (!c.work_auto || !w || !h) return;

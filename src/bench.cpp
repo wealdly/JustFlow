@@ -143,9 +143,13 @@ int RunBench(int argc, char** argv)
     static const char* const kToastText = "toast self-test";
     std::vector<uint8_t> with_toast;
     int last_in = 0;   // input index of the final frame: warm-up frames are not counted, so it is not (frames-1) % n
-    for (int i = 0; evaluated < frames && i < frames + slack; ++i)
+    // async: the feature is created on the model thread (~0.5 s) while frames keep flowing, and a bench
+    // frame takes a millisecond - the whole run used to end before the first residual existed. Hold on
+    // input 0 until the model is live (10 s cap), then play the sequence from its start.
+    int seq = 0;
+    for (int i = 0; evaluated < frames && (cfg.nr_async && evaluated == 0 ? NowMs() - t0 < 10000 : seq < frames + slack); ++i)
     {
-        last_in = i % (int)tex.size();
+        last_in = seq % (int)tex.size();
         if (toast_test && i == 5) { p->cfg.toast = true; PipelineToast(p, "%s", kToastText); }
         // The thing every other bench run lacks: a reload while running. Fresh processes create the
         // feature once at the right size, so they could never see a rebuild that failed to rebuild.
@@ -156,7 +160,7 @@ int RunBench(int argc, char** argv)
             PipelineReload(p, nc);
         }
         if (toast_test && i == 6) p->toast_until_ms = 0;
-        if (!PipelineFrame(p, tex[i % tex.size()], nullptr, 0, i == 0)) { Log("[bench] frame %d failed", i); GpuLogDeviceRemoved(g, "bench"); rc = 2; break; }
+        if (!PipelineFrame(p, tex[last_in], nullptr, 0, i == 0)) { Log("[bench] frame %d failed", i); GpuLogDeviceRemoved(g, "bench"); rc = 2; break; }
         // ponytail: idle after each frame so both lists of the frame retire and get sampled (the
         // stamp reader only sees the most recently retired slot). Per-stage GPU times are unaffected;
         // the fps line below is therefore not a throughput number.
@@ -180,10 +184,12 @@ int RunBench(int argc, char** argv)
                 Log("[cs] toast self-test %s (%d px changed in the %dx%d box at %d,%d)", changed >= 100 ? "PASS" : "FAIL", changed, bw, bh, x0, y0);
             }
         }
+        if (!cfg.nr_async || evaluated > 0 || p->last_evaluated) ++seq;
         if (!p->last_evaluated && !p->nr) p->last_evaluated = true;   // NR disabled: count composed frames
         if (p->last_evaluated && ++evaluated == std::max(0, cfg.warmup)) for (auto& s : p->st) s.v.clear();   // drop warm-up samples
     }
     const double wall = NowMs() - t0;
+    Log("[bench] last input frame %d of %zu", last_in, tex.size());   // final_*.png and mv_bench.f32 describe this one
     GpuWaitIdle(g);
     PipelineReadStamps(p);
     if (p->fg)
