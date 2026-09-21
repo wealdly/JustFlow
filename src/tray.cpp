@@ -18,7 +18,7 @@ const UINT WM_TRAY_STATE = WM_APP + 2;
 const UINT WM_TRAY_SETTINGS = WM_APP + 3;   // double-click: open Settings once the menu loop has unwound   // TraySetState -> refresh tooltip on the tray thread
 const UINT ICON_ID = 1;
 
-enum { IDM_STATUS = 1, IDM_NR, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM_MULT3, IDM_MULT4, IDM_WIPE, IDM_RELOAD,
+enum { IDM_STATUS = 1, IDM_NR, IDM_FILTERS, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM_MULT3, IDM_MULT4, IDM_WIPE, IDM_RELOAD,
        IDM_SETTINGS, IDM_NEWPROFILE, IDM_PROFILE_RESET, IDM_PROFILE_REMOVE, IDM_CONFIG, IDM_APPCONFIG, IDM_LOG, IDM_QUIT,
        IDM_PRESET0 = 60, IDM_PROFILE0 = 100 };
 }
@@ -36,7 +36,7 @@ struct Tray
     std::wstring app_ini, profile_ini;   // guarded by mu; the dialog copies them before it blocks
 
     std::mutex mu;   // guards everything below
-    bool nr_on = true, fg_on = false;
+    bool nr_on = true, fg_on = false, filters_on = true;
     int  mult = 2, wipe = 0, profile = -1;
     HWND game = nullptr;
     std::wstring status;
@@ -151,7 +151,9 @@ static HMENU BuildMenu(Tray* t)
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING | MF_GRAYED, IDM_STATUS, t->status.empty() ? t->app.c_str() : t->status.c_str());
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (t->nr_on ? MF_CHECKED : 0), IDM_NR, L"Neural rendering");
+    // the three layer switches, named as they are in Settings and on the HUD
+    AppendMenuW(m, MF_STRING | (t->nr_on ? MF_CHECKED : 0), IDM_NR, L"Neural layer\tF9");
+    AppendMenuW(m, MF_STRING | (t->filters_on ? MF_CHECKED : 0), IDM_FILTERS, L"Filter layer\tF6");
 
     HMENU fg = CreatePopupMenu();
     AppendMenuW(fg, MF_STRING | (t->fg_on ? MF_CHECKED : 0), IDM_FG, L"Enabled");
@@ -226,6 +228,7 @@ static void ShowMenu(Tray* t)
     switch (cmd)
     {
     case IDM_NR:      Push(t, TrayToggleNr); break;
+    case IDM_FILTERS: Push(t, TrayToggleFilters); break;
     case IDM_FG:      Push(t, TrayToggleFg); break;
     case IDM_MULT2: case IDM_MULT3: case IDM_MULT4: Push(t, TrayFgMultiplier, cmd - IDM_MULT2 + 2); break;
     case IDM_WIPE:    Push(t, TrayWipe); break;
@@ -377,7 +380,7 @@ void TraySetState(Tray* t, const TrayState& s)
 {
     {
         std::lock_guard<std::mutex> lk(t->mu);
-        t->nr_on = s.nr_on; t->fg_on = s.fg_on; t->mult = s.fg_multiplier;
+        t->nr_on = s.nr_on; t->fg_on = s.fg_on; t->filters_on = s.filters_on; t->mult = s.fg_multiplier;
         t->wipe = s.wipe_mode; t->profile = s.profile_index; t->game = s.game;
         t->status = s.status ? s.status : L"";
     }

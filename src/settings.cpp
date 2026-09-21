@@ -109,7 +109,7 @@ const Setting kSettings[] = {
 };
 const int kCount = (int)(sizeof kSettings / sizeof *kSettings);
 
-const int ID_TAB = 50, ID_APPLY = 51, ID_CTL0 = 1000, ID_LBL0 = 2000;
+const int ID_TAB = 50, ID_APPLY = 51, ID_PRESET = 52, ID_PRESET_LBL = 53, ID_CTL0 = 1000, ID_LBL0 = 2000;
 
 // "[Ctrl+][Alt+][Shift+]Key", Key = F1..F24 or one letter/digit. ParseHotkey in config.cpp is
 // lenient (it falls back to a default vk); this is the strict check the user's typing needs.
@@ -224,7 +224,7 @@ std::vector<WORD> BuildTemplate()
     const int btn_y = 5 + tab_h + 6, dlg_h = btn_y + 22;
 
     dw(DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU); dw(0);
-    w.push_back((WORD)(1 + kCount * 2 + 3));                  // tab + label/control pairs + 3 buttons
+    w.push_back((WORD)(1 + kCount * 2 + 3 + 2));              // tab + label/control pairs + 3 buttons + quality label/combo
     w.push_back(0); w.push_back(0); w.push_back(300); w.push_back((WORD)dlg_h);
     w.push_back(0); w.push_back(0); str(L"JustFlow settings");
     w.push_back(8); str(L"MS Shell Dlg");
@@ -246,6 +246,9 @@ std::vector<WORD> BuildTemplate()
         else
             item(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 120, y, s.type == Hotkey ? 110 : 70, 12, (WORD)(ID_CTL0 + i), 0x0081, nullptr, L"");
     }
+    // Quality preset, outside the tabs because it reaches across them (neural, filters, flow input).
+    item(SS_LEFT, 7, btn_y + 3, 26, 9, ID_PRESET_LBL, 0x0082, nullptr, L"Quality");
+    item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 34, btn_y + 1, 88, 90, ID_PRESET, 0x0085, nullptr, L"");
     item(BS_PUSHBUTTON | WS_TABSTOP, 128, btn_y, 52, 15, ID_APPLY, 0x0080, nullptr, L"Apply");
     item(BS_DEFPUSHBUTTON | WS_TABSTOP, 185, btn_y, 52, 15, IDOK, 0x0080, nullptr, L"OK");
     item(BS_PUSHBUTTON | WS_TABSTOP, 242, btn_y, 52, 15, IDCANCEL, 0x0080, nullptr, L"Cancel");
@@ -272,6 +275,20 @@ std::wstring CtlValue(HWND h, int i)
     while (!v.empty() && iswspace(v.back())) v.pop_back();
     size_t j = 0; while (j < v.size() && iswspace(v[j])) ++j;
     return v.substr(j);
+}
+
+// Put a value into row i's control, whatever kind of control it is.
+void SetCtl(HWND h, int i, const wchar_t* v)
+{
+    const Setting& st = kSettings[i]; const HWND c = GetDlgItem(h, ID_CTL0 + i);
+    if (st.type == Bool) CheckDlgButton(h, ID_CTL0 + i, (*v && wcscmp(v, L"0") != 0) ? BST_CHECKED : BST_UNCHECKED);
+    else if (st.type == Enum)
+    {
+        LRESULT idx = SendMessageW(c, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)v);
+        if (idx == CB_ERR) idx = SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)v);   // a value outside the list stays selectable
+        SendMessageW(c, CB_SETCURSEL, (WPARAM)idx, 0);
+    }
+    else SetDlgItemTextW(h, ID_CTL0 + i, v);
 }
 
 INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
@@ -312,16 +329,53 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             }
             else SetDlgItemTextW(h, ID_CTL0 + i, v.c_str());
         }
+        {
+            const HWND q = GetDlgItem(h, ID_PRESET);
+            SendMessageW(q, CB_ADDSTRING, 0, (LPARAM)L"(custom)");
+            for (int i = 0; i < kPresetCount; ++i) SendMessageW(q, CB_ADDSTRING, 0, (LPARAM)PresetName(i));
+            SendMessageW(q, CB_SETCURSEL, (d->profile && *d->profile) ? PresetCurrent(d->profile) + 1 : 0, 0);
+        }
         ShowTab(h, 0);
         PlaceClearOf(h, d->avoid);
+        SetTimer(h, 1, 400, nullptr);   // live refresh, see WM_TIMER
         return TRUE;
     }
+    case WM_TIMER:
+        // The hotkeys and the tray write the ini while this window is open (F9/F8/F6 in game), and a
+        // panel showing the old state is worse than no panel. Re-read every row the user has NOT
+        // touched - control still equals what was loaded - and leave edited rows alone, so a live
+        // toggle never eats a pending edit and OK/Apply still write only what the user changed.
+        if (wp == 1 && d)
+            for (int i = 0; i < kCount; ++i)
+            {
+                if (CtlValue(h, i) != d->initial[i]) continue;
+                const Setting& st = kSettings[i];
+                const std::wstring v = Read(FileFor(st, d->app, d->profile), st.sec, st.key, st.def);
+                if (v == d->initial[i]) continue;
+                d->initial[i] = v; SetCtl(h, i, v.c_str());
+            }
+        return TRUE;
     case WM_NOTIFY:
         if (((NMHDR*)lp)->idFrom == ID_TAB && ((NMHDR*)lp)->code == TCN_SELCHANGE)
             ShowTab(h, (int)SendMessageW(GetDlgItem(h, ID_TAB), TCM_GETCURSEL, 0, 0));
         return FALSE;
     case WM_COMMAND:
         if (LOWORD(wp) == IDCANCEL) { EndDialog(h, 0); return TRUE; }
+        if (LOWORD(wp) == ID_PRESET && HIWORD(wp) == CBN_SELCHANGE)
+        {
+            // A preset FILLS IN the rows it owns and writes nothing: what it changes is visible on the
+            // tabs, can be adjusted, and reaches the file through the same Apply/OK as any other edit.
+            const int pi = (int)SendMessageW(GetDlgItem(h, ID_PRESET), CB_GETCURSEL, 0, 0) - 1;
+            if (pi >= 0 && pi < kPresetCount)
+                for (const auto& k : kPreset)
+                    for (int i = 0; i < kCount; ++i)
+                    {
+                        const Setting& st = kSettings[i];
+                        if (wcscmp(st.sec, k.sec) != 0 || wcscmp(st.key, k.key) != 0) continue;
+                        SetCtl(h, i, k.val[pi]);
+                    }
+            return TRUE;
+        }
         if (LOWORD(wp) != IDOK && LOWORD(wp) != ID_APPLY) return FALSE;
         for (int i = 0; i < kCount; ++i)                         // validate before writing anything
         {

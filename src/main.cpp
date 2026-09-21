@@ -925,7 +925,7 @@ static int RealMain(int argc, char** argv)
     {
         if (!tray) return;
         TrayState s; s.profile_index = profile; s.status = status;
-        if (p) { s.nr_on = !p->bypass; s.fg_on = p->cfg.fg_enabled; s.fg_multiplier = p->cfg.fg_multiplier; s.wipe_mode = p->wipe; s.game = p->target; }
+        if (p) { s.nr_on = !p->bypass; s.filters_on = p->cfg.filters_enabled; s.fg_on = p->cfg.fg_enabled; s.fg_multiplier = p->cfg.fg_multiplier; s.wipe_mode = p->wipe; s.game = p->target; }
         TraySetState(tray, s);
     };
     auto apply_hotkeys = [&]   // cfg.hk_* -> overlay registration (a pipeline created later registers from cfg itself)
@@ -984,7 +984,8 @@ static int RealMain(int argc, char** argv)
         if (!p) return; p->cfg.filters_enabled = !p->cfg.filters_enabled;
         cfg.filters_enabled = p->cfg.filters_enabled; persist(L"filters", L"enabled", p->cfg.filters_enabled);
         Log("[main] filters %ls", p->cfg.filters_enabled ? L"on" : L"off");
-        PipelineToast(p, "Filters %s", p->cfg.filters_enabled ? "ON" : "OFF");
+        PipelineToast(p, "Filter layer %s", p->cfg.filters_enabled ? "ON" : "OFF");
+        tray_state();
     };
     auto toggle_hud = [&] { if (!p) return; p->hud = !p->hud; cfg.hud = p->hud; persist(L"ui", L"hud", p->hud); Log("[main] hud %s", p->hud ? "on" : "off"); PipelineToast(p, "Status HUD %s", p->hud ? "ON" : "OFF"); };
     // the caps in force, for the toasts: "uncapped" | "cap 60" | "cap 60  model 30/s" | "model 30/s"
@@ -1039,6 +1040,7 @@ static int RealMain(int argc, char** argv)
         while (tray && TrayPoll(tray, ev, arg)) switch (ev)
         {
         case TrayToggleNr: toggle_nr(); break;
+        case TrayToggleFilters: toggle_filters(); break;
         case TrayToggleFg: toggle_fg(); break;
         case TrayWipe:     cycle_wipe(); break;
         case TrayReload:   reload(); break;

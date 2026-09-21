@@ -7,6 +7,7 @@ enum TrayEvent
 {
     TrayNone = 0,
     TrayToggleNr,
+    TrayToggleFilters,
     TrayToggleFg,
     TrayFgMultiplier,   // arg = 2..4
     TrayWipe,           // cycle wipe mode
@@ -21,7 +22,7 @@ enum TrayEvent
 
 struct TrayState
 {
-    bool nr_on = true, fg_on = false;
+    bool nr_on = true, fg_on = false, filters_on = true;
     int  fg_multiplier = 2;
     int  wipe_mode = 0;         // 0 = off
     int  profile_index = -1;    // -1 = none
