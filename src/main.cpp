@@ -43,7 +43,10 @@ std::wstring ExeDir()
 //   1920x1080   3.79 ms    0.88 / 0.67    106% / 103%    <- 2x: exact
 //   1280x720    2.58 ms    0.73 / 0.55
 //    960x540    2.30 ms    0.44 / 0.53    (cost has a ~1.8 ms floor; below 720p it buys almost nothing)
-// 1080p beat 1440p on BOTH axes, both times. So auto is the integer divisor of the native size
+// 1080p beat 1440p on BOTH axes on those two frames. A third (tools/scene) reversed the fidelity order
+// (1440p 62%, 1080p 53% of the native edit), and replacing our downscale AND upscale with offline Lanczos /
+// bicubic moved no size by more than 2 points: the resampling is innocent, the model is scale-sensitive,
+// non-monotonically and by content. Cost still decides for 1080p; only native is reliably faithful. So auto is the integer divisor of the native size
 // nearest 1080 lines (ties go to the larger): 4K -> 1920x1080, 1440p -> 2560x1440 (1:1, exact),
 // 1080p -> 1920x1080. It used to come from justflow.spike.ini, where the spike had picked 2560x1440
 // on evaluate time alone - and the capture size was not even known when it was read.
@@ -55,10 +58,12 @@ std::wstring ExeDir()
 //   1920x1080 every frame   57%   (3.8 ms/frame)       3840x2160 model_every=4   81%   (12.2 ms / 4 = 3.0)
 //   1920x1080 model_every=3 49%                        3840x2160 model_every=6   76%
 // The edit is low-frequency, so it survives being motion-warped for several frames. NOT the default: the
-// bench cannot see what a 12 ms evaluate does to a game sharing the GPU. work=3840x2160 + model_every=4.
+// bench cannot see what a 12 ms evaluate does to a game sharing the GPU. It is work=native + model_every,
+// which the Balanced and Quality presets select (settings.cpp).
 static void WorkAuto(Config& c, UINT w, UINT h)
 {
     if (!c.work_auto || !w || !h) return;
+    if (c.work_native) { c.work_w = w; c.work_h = h; return; }
     UINT best = 1; long best_d = 1L << 30;
     for (UINT d = 1; d <= 4; ++d)
     {

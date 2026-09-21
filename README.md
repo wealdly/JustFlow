@@ -72,6 +72,19 @@ debounced rebuild, and the handful the capture and overlay only read when they a
 Performance, Balanced, Quality (model resolution, ArtCNN, sharpen, flow resolution). No preset
 touches the look dials, and none sets a frame-rate cap.
 
+The model tiers trade **time, not resolution**. The model's edit is smooth, so it survives being
+motion-warped for several frames, while a smaller model resolution makes the model itself behave
+differently (45-89% of the native edit, depending on content). Measured on a moving 4K sequence:
+
+| tier | setting | native edit reproduced | average model cost |
+|---|---|---|---|
+| Performance | `work=auto` (1080p on 4K), every frame | 57% | 3.8 ms |
+| Balanced | `work=native`, `model_every=6` | 76% | 2.0 ms |
+| Quality | `work=native`, `model_every=3` | 80% | 4.1 ms |
+
+Performance remains the small per-frame evaluate because it cannot hitch a game sharing the GPU; a
+native evaluate is one ~12 ms block at 4K. If Balanced or Quality shows a rhythmic stutter, use Performance.
+
 ### Three layers, three switches
 
 The pipeline is three independent layers, each with one on/off that reaches into nothing else:

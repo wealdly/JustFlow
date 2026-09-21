@@ -106,6 +106,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     const std::wstring work = S(L"nr", L"work", L"auto");
     if (swscanf_s(work.c_str(), L"%ux%u", &c.work_w, &c.work_h) != 2) { c.work_w = c.work_h = 0; }
     c.work_auto = !c.work_w || !c.work_h;
+    c.work_native = work == L"native";
     c.param_block = I(L"nr", L"param_block", c.param_block);
     c.tuning.preset = I(L"nr", L"preset", c.tuning.preset);
     c.tuning.style = I(L"nr", L"style", c.tuning.style);

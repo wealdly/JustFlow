@@ -57,7 +57,7 @@ const wchar_t* const kTabs[] = { L"Neural", L"Filters", L"Frame gen", L"Display"
 const int kTabCount = (int)(sizeof kTabs / sizeof *kTabs);
 
 // Model resolutions: the measured cost is ~1.5 ms/MPix + 1 ms on a 5080, so 4K is a 60 fps tier.
-const wchar_t* const kWork = L"auto|1920x1080|2560x1440|3200x1800|3840x2160";
+const wchar_t* const kWork = L"auto|native|1920x1080|2560x1440|3200x1800|3840x2160";
 // Optical flow input: the largest GPU cost in the pipeline and it scales steeply.
 // Measured on an idle 5080 from a 4K capture: 0.55 / 1.05 / 1.49 / 3.61 ms.
 const wchar_t* const kFlow = L"640x360|960x540|1280x720|1920x1080";
@@ -151,11 +151,19 @@ struct PresetKey { const wchar_t *sec, *key, *val[kPresetCount]; };
 const PresetKey kPreset[] = {
     // High performance runs NO DLSS model at all: ArtCNN alone carries the enhancement at ~2.3 ms
     // against the model's 12 ms in a real scene, which is the difference between fitting a 90 fps
-    // budget alongside frame generation and not. The other three are model tiers.
+    // budget alongside frame generation and not. The other three are model tiers, and they are
+    // tiers of TIME, not of work size: the model's edit is low-frequency and survives being motion-
+    // warped for several frames, while a smaller work size makes the model itself behave differently.
+    // Measured on a moving 4K sequence (share of the every-frame native edit, average model cost):
+    //   auto (1080p) every frame 57% 3.8 ms | native every 6th 76% 2.0 ms | native every 3rd 80% 4.1 ms
+    // Performance stays the small per-frame evaluate because it is the one that cannot hitch a game
+    // sharing the GPU; a native evaluate is one ~12 ms block at 4K. The old 1440p / 1800p tiers were
+    // non-integer ratios of 4K and lost to 1080p on cost AND fidelity (see WorkAuto in main.cpp).
     { L"nr",  L"enabled", { L"1",         L"1",         L"1",         L"1" } },
     { L"nr",  L"model",   { L"0",         L"1",         L"1",         L"1" } },
-    { L"nr",  L"work",    { L"1920x1080", L"1920x1080", L"2560x1440", L"3200x1800" } },
-    { L"nr",  L"artcnn",  { L"1",         L"0",         L"0",         L"1" } },
+    { L"nr",  L"work",    { L"auto",      L"auto",      L"native",    L"native" } },
+    { L"nr",  L"model_every", { L"1",     L"1",         L"6",         L"3" } },
+    { L"nr",  L"artcnn",  { L"1",         L"0",         L"0",         L"0" } },
     { L"filters", L"sharpen", { L"0.4",   L"0.3",       L"0.2",       L"0.0" } },
     { L"ofa", L"input",   { L"640x360",   L"960x540",   L"960x540",   L"1280x720" } },
 };
