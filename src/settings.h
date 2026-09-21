@@ -7,8 +7,11 @@
 // Returns true if anything was written - the caller should reload.
 // keep_clear_of = the game window (may be null): the dialog opens on a monitor that does not hold
 // it, so opening settings mid-game does not put a window over what is being played.
+// on_apply(ctx): called from the Apply button after a write, with the dialog STILL OPEN, so a change
+// can be tried and adjusted without reopening the window each time. The caller reloads in it.
+// What Apply already delivered is not reported again: the return value covers only what OK wrote.
 bool SettingsDialog(HWND parent, const wchar_t* app_ini, const wchar_t* profile_ini, const wchar_t* app_name,
-                    HWND keep_clear_of = nullptr);
+                    HWND keep_clear_of = nullptr, void (*on_apply)(void*) = nullptr, void* ctx = nullptr);
 
 // Lists the open top-level windows and writes a profile for the one picked, then points
 // [app] profile at it. Window title and class only - deliberately no OpenProcess, so the binary

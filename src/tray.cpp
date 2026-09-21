@@ -126,7 +126,9 @@ static void ShowSettingsDialog(Tray* t)
 {
     std::wstring app, profile; HWND game;
     { std::lock_guard<std::mutex> lk(t->mu); app = t->app_ini; profile = t->profile_ini; game = t->game; }
-    if (SettingsDialog(t->hwnd, app.c_str(), profile.c_str(), t->app.c_str(), game)) Push(t, TrayReload);
+    // Apply reloads with the window still open; OK reloads only for what changed after the last Apply.
+    if (SettingsDialog(t->hwnd, app.c_str(), profile.c_str(), t->app.c_str(), game,
+                       [](void* c) { Push((Tray*)c, TrayReload); }, t)) Push(t, TrayReload);
 }
 
 // ---- menu --------------------------------------------------------------------------------------

@@ -109,7 +109,7 @@ const Setting kSettings[] = {
 };
 const int kCount = (int)(sizeof kSettings / sizeof *kSettings);
 
-const int ID_TAB = 50, ID_CTL0 = 1000, ID_LBL0 = 2000;
+const int ID_TAB = 50, ID_APPLY = 51, ID_CTL0 = 1000, ID_LBL0 = 2000;
 
 // "[Ctrl+][Alt+][Shift+]Key", Key = F1..F24 or one letter/digit. ParseHotkey in config.cpp is
 // lenient (it falls back to a default vk); this is the strict check the user's typing needs.
@@ -169,6 +169,7 @@ struct DlgData
     HWND           avoid = nullptr;
     std::wstring   initial[kCount];
     bool           wrote = false;
+    void         (*on_apply)(void*) = nullptr; void* ctx = nullptr;
 };
 
 // Centre the dialog on a monitor that does not hold `avoid`. One monitor, or no game window: leave
@@ -223,7 +224,7 @@ std::vector<WORD> BuildTemplate()
     const int btn_y = 5 + tab_h + 6, dlg_h = btn_y + 22;
 
     dw(DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU); dw(0);
-    w.push_back((WORD)(1 + kCount * 2 + 2));                  // tab + label/control pairs + 2 buttons
+    w.push_back((WORD)(1 + kCount * 2 + 3));                  // tab + label/control pairs + 3 buttons
     w.push_back(0); w.push_back(0); w.push_back(300); w.push_back((WORD)dlg_h);
     w.push_back(0); w.push_back(0); str(L"JustFlow settings");
     w.push_back(8); str(L"MS Shell Dlg");
@@ -245,6 +246,7 @@ std::vector<WORD> BuildTemplate()
         else
             item(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 120, y, s.type == Hotkey ? 110 : 70, 12, (WORD)(ID_CTL0 + i), 0x0081, nullptr, L"");
     }
+    item(BS_PUSHBUTTON | WS_TABSTOP, 128, btn_y, 52, 15, ID_APPLY, 0x0080, nullptr, L"Apply");
     item(BS_DEFPUSHBUTTON | WS_TABSTOP, 185, btn_y, 52, 15, IDOK, 0x0080, nullptr, L"OK");
     item(BS_PUSHBUTTON | WS_TABSTOP, 242, btn_y, 52, 15, IDCANCEL, 0x0080, nullptr, L"Cancel");
     return w;
@@ -320,7 +322,7 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return FALSE;
     case WM_COMMAND:
         if (LOWORD(wp) == IDCANCEL) { EndDialog(h, 0); return TRUE; }
-        if (LOWORD(wp) != IDOK) return FALSE;
+        if (LOWORD(wp) != IDOK && LOWORD(wp) != ID_APPLY) return FALSE;
         for (int i = 0; i < kCount; ++i)                         // validate before writing anything
         {
             if (kSettings[i].type != Hotkey) continue;
@@ -347,6 +349,14 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                 break;
             }
             d->wrote = true;
+            d->initial[i] = v;                                   // Apply then OK must not write (or reload for) it twice
+        }
+        if (LOWORD(wp) == ID_APPLY)
+        {
+            // Stay open: hand the change to the caller now, and start counting afresh so OK only
+            // reports what changes after this point.
+            if (d->wrote && d->on_apply) { d->on_apply(d->ctx); d->wrote = false; }
+            return TRUE;
         }
         EndDialog(h, 1);
         return TRUE;
@@ -480,12 +490,13 @@ bool NewProfileDialog(HWND parent, const wchar_t* profiles_dir, const wchar_t* a
     return d.made;
 }
 
-bool SettingsDialog(HWND parent, const wchar_t* app_ini, const wchar_t* profile_ini, const wchar_t* app_name, HWND keep_clear_of)
+bool SettingsDialog(HWND parent, const wchar_t* app_ini, const wchar_t* profile_ini, const wchar_t* app_name, HWND keep_clear_of,
+                    void (*on_apply)(void*), void* ctx)
 {
     INITCOMMONCONTROLSEX ic = { sizeof ic, ICC_TAB_CLASSES };
     InitCommonControlsEx(&ic);
     static const std::vector<WORD> tmpl = BuildTemplate();
-    DlgData d; d.app = app_ini; d.profile = profile_ini; d.name = app_name; d.avoid = keep_clear_of;
+    DlgData d; d.app = app_ini; d.profile = profile_ini; d.name = app_name; d.avoid = keep_clear_of; d.on_apply = on_apply; d.ctx = ctx;
     DialogBoxIndirectParamW(GetModuleHandleW(nullptr), (const DLGTEMPLATE*)tmpl.data(), parent, DlgProc, (LPARAM)&d);
     return d.wrote;
 }
