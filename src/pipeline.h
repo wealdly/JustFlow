@@ -19,7 +19,10 @@
 struct StageStats
 {
     std::vector<double> v;
-    void   add(double x) { if (x >= 0) v.push_back(x); }
+    // Bounded: every one of these is drained by the [stats] tick, so with stats off nothing
+    // would ever clear them. 4096 samples is ~45 s at 90 fps, far more than any percentile
+    // needs, and the cap costs a compare. (fg.cpp bounds its own ring the same way.)
+    void   add(double x) { if (x >= 0 && v.size() < 4096) v.push_back(x); }
     double pct(double p) const;   // -1 when empty
     double med() const { return pct(0.5); }
     double p95() const { return pct(0.95); }

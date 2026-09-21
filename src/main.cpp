@@ -1128,7 +1128,7 @@ static int RealMain(int argc, char** argv)
             if (!PipelineFrame(p, CaptureTexture(cap), CaptureFence(cap), fv, reset)) { Log("[main] frame failed - exiting"); GpuLogDeviceRemoved(g, "frame"); quit = true; rc = 3; break; }
             reset = false;
             OverlayFollow(p->ov, cfg.reassert_topmost_every);
-            cpu_ms.push_back(NowMs() - t0);
+            if (cfg.stats_every > 0) cpu_ms.push_back(NowMs() - t0);   // only the [stats] tick reads it, and only that tick clears it
             if (p->last_evaluated && dumped < dump) DumpFrame(p, dir, dumped++);
             ++hud_frames;
             if (p->hud && NowMs() - hud_t >= 250.0)   // status HUD: two lines from the live counters
@@ -1164,7 +1164,10 @@ static int RealMain(int argc, char** argv)
                 hud_t = NowMs(); hud_frames = 0; hud_presented = 0; hud_model = 0;
                 hud_gen = 0; hud_nopair = 0; hud_disabled = 0; hud_preempt = 0;
             }
-            if (++frames % (UINT)std::max(1, cfg.stats_every) == 0)
+            // stats_every <= 0 means OFF. It used to clamp to 1, so the one value a user would pick
+            // to silence the log instead ran the most expensive block in the loop - GpuVram, three
+            // vector sorts and a thirty-argument Log - on every single frame.
+            if (cfg.stats_every > 0 && ++frames % (UINT)cfg.stats_every == 0)
             {
                 StageStats cpu{ cpu_ms }, spacing, age, pipe;
                 double gpu = 0;

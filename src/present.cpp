@@ -38,6 +38,7 @@ struct Overlay
     int    nkeys = 0;
     volatile LONG hot[kMaxHot] = {};
     int    follow_calls = 0;
+    ULONGLONG follow_at = 0;   // last DWM geometry query (throttled: see OverlayFollow)
     RECT   last = {};
     LONGLONG present_qpc = 0;
     // present queue: swapchain + backbuffer copies, decoupled from the pipeline queue
@@ -397,6 +398,14 @@ void OverlayFollow(Overlay* o, int reassert_every)
         if (o->shown) { ShowWindow(o->hwnd, SW_HIDE); o->shown = false; Log("[present] target minimised - overlay hidden"); }
         return;
     }
+    // The geometry query is a cross-process round trip to DWM - ~20 us typical, and unbounded when
+    // DWM is busy compositing, which is exactly when we are presenting. It ran once per captured
+    // frame and once per ten skipped ones, so cursor movement (which skips hard) made it worse. A
+    // window that has moved is followed within 50 ms, which no one can see on a click-through
+    // overlay; the same throttle is on the capture side's region query.
+    const ULONGLONG now_ms = GetTickCount64();
+    if (now_ms - o->follow_at < 50) return;
+    o->follow_at = now_ms;
     RECT r = {};
     if (FAILED(DwmGetWindowAttribute(o->target, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof r)) && !GetWindowRect(o->target, &r)) return;
     if (!o->shown && o->revealed) { ShowWindow(o->hwnd, SW_SHOWNOACTIVATE); o->shown = true; Log("[present] target restored - overlay shown"); }
