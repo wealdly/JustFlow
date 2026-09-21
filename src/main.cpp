@@ -650,7 +650,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     GpuBarrier(cl, shown, UAV, CSRC);
     p->shown = shown;
     // the presenter thread presents (passthrough or generation); --no-present has no Fg
-    const bool fg_recorded = p->fg && FgRecord(p->fg, cl, shown, p->mv);
+    const bool fg_recorded = p->fg && FgRecord(p->fg, cl, shown, p->mv, cp.rects, (int)cp.nrects);
     const UINT64 f2 = GpuEnd(g);
     if (!f2) return false;
     if (async && p->cmp_idx >= 0) p->residual_read_fence[p->cmp_idx] = f2;   // the model thread waits for it before rewriting that residual

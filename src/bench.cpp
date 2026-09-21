@@ -179,6 +179,34 @@ int RunBench(int argc, char** argv)
         Log("[fg] bench: %u frames presented (%.1f fps), %u dropped, spacing %.2f/%.2f ms (med/p95, %zu samples)", fs.presented, fs.presented * 1000.0 / wall, fs.drops, sp.med(), sp.p95(), sp.v.size());
     }
 
+    // The UI restore on generated frames: inside a mask rect a generated frame must be pixel-exact
+    // against the composed frame it came from, and outside it must not be (DLSS-G interpolated it).
+    // Both halves matter - "identical everywhere" would mean the generated frame is just a copy.
+    if (p->fg && FgMultiplier(p->fg) > 1 && p->cfg.nrects > 0)
+    {
+        ID3D12Resource* gen = FgDebugGen(p->fg, 0), *real = FgDebugReal(p->fg);
+        std::vector<uint8_t> a((size_t)w * h * 4), b((size_t)w * h * 4);
+        if (gen && real && GpuReadbackTex(g, gen, a.data(), w, h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE)
+                       && GpuReadbackTex(g, real, b.data(), w, h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE))
+        {
+            const UiRect& r = p->cfg.rects[0];
+            size_t in_n = 0, in_diff = 0, out_n = 0, out_diff = 0;
+            for (UINT y = 0; y < h; ++y) for (UINT x = 0; x < w; ++x)
+            {
+                const size_t o = ((size_t)y * w + x) * 4;
+                const bool same = a[o] == b[o] && a[o + 1] == b[o + 1] && a[o + 2] == b[o + 2];
+                const bool inside = (int)x >= r.x0 && (int)x < r.x1 && (int)y >= r.y0 && (int)y < r.y1;
+                if (inside) { ++in_n; if (!same) ++in_diff; } else { ++out_n; if (!same) ++out_diff; }
+            }
+            const double outpct = out_n ? 100.0 * (double)out_diff / (double)out_n : 0.0;
+            const bool pass = in_diff == 0 && out_diff > 0;
+            Log("[bench] FG ui restore: %zu/%zu px differ inside rect1, %.1f%% differ outside - %s",
+                in_diff, in_n, outpct, pass ? "PASS" : "FAIL");
+            printf("FG ui restore: %zu/%zu px differ inside rect1, %.1f%% differ outside - %s\n",
+                   in_diff, in_n, outpct, pass ? "PASS" : "FAIL");
+        }
+    }
+
     // What the spike never checked: that the model wrote the whole work texture. A subrect here is
     // the "renders in the top-left, dark everywhere else" symptom, and it is silent at runtime.
     if (p->nr)

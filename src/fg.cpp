@@ -3,6 +3,7 @@
 #include "ngx_nr.h"          // NgxMutex
 #include "nvsdk_ngx.h"
 #include <algorithm>
+#include <cstring>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -43,6 +44,8 @@ struct FgSlot
     int    state = 0;
     UINT64 seq = 0, fence = 0, eval_fence = 0;
     int    eval_slot = -1;    // ctx ring slot the evaluate stamped, read back when the fence lands
+    UiRect rects[64] = {};    // the addon UI mask for this frame, in output pixels
+    int    nrects = 0;
     bool   interpolate = false;
     double interval = 16.0;   // ms between this and the previous submit (our clock)
     double content_ms = 0;    // ms between this frame and the previous CAPTURED one, in the game's
@@ -53,6 +56,7 @@ struct FgSlot
 struct Fg
 {
     Gpu*     g = nullptr;
+    FgSlot*  dbg = nullptr;   // last slot evaluated, for FgDebugGen
     Overlay* ov = nullptr;
     UINT     w = 0, h = 0, mw = 0, mh = 0;
     int      count = 1;                      // generated frames per real frame (0 = passthrough)
@@ -182,6 +186,27 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate)
         if (code || NVSDK_NGX_FAILED(r)) break;
     }
     GpuBarrier(cl, s->real, NPSR, CSRC);
+    // The UI back onto every generated frame. DLSS-G interpolates the whole image, so text and
+    // action bars smear along whatever motion the world had - the one documented cost of turning the
+    // multiplier up. The rects come from the addon, so they are the game's own frame geometry rather
+    // than a guess, and they are axis-aligned: a copy per rect, no shader and no descriptors.
+    // Real and generated frames then agree inside the rects, which is what stops the UI shimmering.
+    for (int i = 0; i < f->count && s->nrects > 0; ++i)
+    {
+        GpuBarrier(cl, s->gen[i], CSRC, CDST);
+        D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+        src.pResource = s->real; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.pResource = s->gen[i]; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        for (int r = 0; r < s->nrects; ++r)
+        {
+            const UINT x0 = (UINT)std::clamp(s->rects[r].x0, 0, (int)f->w), y0 = (UINT)std::clamp(s->rects[r].y0, 0, (int)f->h);
+            const UINT x1 = (UINT)std::clamp(s->rects[r].x1, 0, (int)f->w), y1 = (UINT)std::clamp(s->rects[r].y1, 0, (int)f->h);
+            if (x1 <= x0 || y1 <= y0) continue;
+            const D3D12_BOX box = { x0, y0, 0, x1, y1, 1 };
+            cl->CopyTextureRegion(&dst, x0, y0, 0, &src, &box);
+        }
+        GpuBarrier(cl, s->gen[i], CDST, CSRC);
+    }
     GpuBarrier(cl, s->mv, NPSR, CDST);
     f->ctx.queue->Wait(g.fence, s->fence);   // GPU-side: the slot's real + mv copies (list 2) are complete on the main queue
     const int slot = f->ctx.slot;
@@ -189,6 +214,7 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate)
     if (!v) return Fail(f, "FG queue submit");
     s->eval_fence = v;
     s->eval_slot = slot;
+    f->dbg = s;
     if (code) { Log("[fg] evaluate raised 0x%08X", code); return Fail(f, "evaluate raised an exception"); }
     if (NVSDK_NGX_FAILED(r)) { Log("[fg] evaluate -> 0x%08X (%s)", r, NgxResultName(r)); return Fail(f, "evaluate failed"); }
     return true;
@@ -490,7 +516,15 @@ void FgStats(Fg* f, FgStatsOut& out)
     f->spacing.clear(); f->age.clear(); f->pipe.clear();
 }
 
-bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* composed, ID3D12Resource* mv)
+ID3D12Resource* FgDebugGen(Fg* f, int i)
+{
+    return (f && f->dbg && i >= 0 && i < f->count) ? f->dbg->gen[i] : nullptr;
+}
+
+ID3D12Resource* FgDebugReal(Fg* f) { return (f && f->dbg) ? f->dbg->real : nullptr; }
+
+bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* composed, ID3D12Resource* mv,
+              const UiRect* rects, int nrects)
 {
     if (f->failed) return false;
     FgSlot* s = nullptr; UINT64 eval = 0;
@@ -518,6 +552,8 @@ bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* composed, ID
         }
         s->state = 1; eval = s->eval_fence;
     }
+    s->nrects = std::clamp(nrects, 0, 64);
+    if (s->nrects) memcpy(s->rects, rects, (size_t)s->nrects * sizeof(UiRect));
     f->pending = s;
     // GPU-side ordering for the reuse: the FG queue's last evaluate of this slot (reads real/mv,
     // writes gen) and the present queue's last copy (reads real/gen) complete before list 2 writes.

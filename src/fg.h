@@ -35,11 +35,13 @@
 //   FgSubmit  (main thread, after GpuEnd): hands the recorded slot to the presenter with the fence
 //             value that completes the copy. reset = no interpolation against the previous frame.
 //             cap_qpc/acq_qpc (QPC ticks, 0 = unknown) feed the age/pipe latency stats.
-// UI rects: the composed frame already has them restored; DLSS-G warps them in generated frames
-// (accepted for v1).
+// UI rects: the composed frame has them restored by the compose pass, and each generated frame
+// gets the same pixels copied back out of s->real before it is presented - axis-aligned boxes,
+// so it is CopyTextureRegion per rect on the FG queue, no shader.
 #pragma once
 #include "d3d.h"
 #include "present.h"
+#include "compose.h"   // UiRect
 #include <vector>
 
 struct Fg;
@@ -51,7 +53,15 @@ Fg*  FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, U
 void FgDestroy(Fg* f);   // stops the presenter (drains the GPU), releases the feature and textures
 int  FgMultiplier(const Fg* f);   // as created (1 = passthrough)
 // mv may be nullptr in passthrough (never read).
-bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* composed_rgba8, ID3D12Resource* mv);
+// rects/nrects: the addon UI mask for THIS frame, in output pixels. The composed frame already
+// has the UI restored; these let the generated frames get it back too (FgRestoreUi).
+// Diagnostics (bench): the generated frames of the slot evaluated most recently, in COPY_SOURCE.
+// i in [0, multiplier-1); nullptr when nothing has been generated yet.
+ID3D12Resource* FgDebugGen(Fg* f, int i);
+ID3D12Resource* FgDebugReal(Fg* f);      // the real frame those generated frames came from
+
+bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* composed_rgba8, ID3D12Resource* mv,
+              const UiRect* rects = nullptr, int nrects = 0);
 void FgSubmit(Fg* f, UINT64 render_fence_value, bool reset, LONGLONG cap_qpc, LONGLONG acq_qpc);
 // Live pacing knob (no rebuild): phase_ms shifts every scheduled present target (negative = earlier).
 void FgSetTiming(Fg* f, double phase_ms);
