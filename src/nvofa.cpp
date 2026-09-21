@@ -152,6 +152,10 @@ Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid, const wchar_t* dll_override)
     ip.mode = NV_OF_MODE_OPTICALFLOW;
     ip.perfLevel = NV_OF_PERF_LEVEL_FAST;
     ip.enableOutputCost = NV_OF_FALSE;   // a cost threshold rejects correct motion and misses low-cost errors (docs/)
+    // Measured on tools/scene (exact motion known): the 2-3 px of motion OFA invents in untextured sky costs
+    // 0.000 photometrically (flat warped onto flat), and beside moving geometry its vectors warp BETTER than
+    // the truth (1.6 vs 9.2 grey levels: they carry the edge instead of tearing at the disocclusion). A
+    // texture gate that catches the sky also rejects a third of real surfaces. Nothing to reject.
     ip.predDirection = NV_OF_PRED_DIRECTION_FORWARD;
     ip.inputBufferFormat = NV_OF_BUFFER_FORMAT_GRAYSCALE8;
     st = o->api.nvOFInit(o->session, &ip);
