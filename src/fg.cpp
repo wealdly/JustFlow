@@ -63,6 +63,7 @@ struct Fg
     bool     vblank = true, mv_dilated = true;
     std::atomic<double> phase{ 0.0 };        // FgSetTiming (main) -> Presenter
     std::atomic<double> min_gain{ 1.5 };     // governor threshold: presented / submitted (0 = governor off)
+    std::atomic<double> max_in{ 90.0 };      // governor floor: no generation while the game already delivers more than this (0 = off)
     std::atomic<bool>   paused{ false };     // governor has generation switched off (HUD)
     std::atomic<UINT>   paused_frames{ 0 };  // real frames presented while paused
     std::wstring dir;
@@ -262,6 +263,9 @@ static void Presenter(Fg* f)
     // failing. The switch itself must not hitch: with generation on, the real frame is held back
     // count*L behind its arrival, so stepping that hold to zero collapses one interval by half.
     // DRAIN and RAMP slew it by 10% a frame instead - about a tenth of a second either way.
+    // A second, simpler rule: above `max_in` input fps generation is off regardless of gain. A game
+    // at 180 fps on a 240 Hz panel measured 0.6-0.95x (2x needs 360 Hz) and paid FG's evaluate
+    // for the probes; and even where 2x fits, doubling 120 is latency for smoothness nobody sees.
     enum { G_ENGAGED, G_DRAIN, G_PAUSED, G_RAMP }; int gstate = G_ENGAGED;
     double hold = 0, gwin_t0 = NowMs(), backoff = 3000.0, resume_at = 0; UINT64 gwin_seq0 = 0; UINT gwin_presented = 0; int gbad = 0;
     auto newer_ready = [&](UINT64 seq) { for (auto& x : f->slots) if (x.state == 2 && x.seq > seq) return true; return false; };
@@ -335,8 +339,8 @@ static void Presenter(Fg* f)
         // every dropped one: fg_drops and fg_nopair came back equal on every single line.
         const bool interp = s->interpolate && prev != 0 && span < 100.0;
         const double full_hold = span * f->count / (f->count + 1);   // how far the real frame trails its arrival while generating
-        const double gmin = f->min_gain.load(std::memory_order_relaxed);
-        if (gmin <= 0 && gstate != G_ENGAGED) { gstate = G_RAMP; }   // governor switched off live: come back smoothly
+        const double gmin = f->min_gain.load(std::memory_order_relaxed), gmax_in = f->max_in.load(std::memory_order_relaxed);
+        if (gmin <= 0 && gmax_in <= 0 && gstate != G_ENGAGED) { gstate = G_RAMP; }   // governor switched off live: come back smoothly
         if (gstate == G_PAUSED && NowMs() >= resume_at) { gstate = G_RAMP; hold = 0; prev = 0; Log("[fg] governor: probing - generation back on"); }
         if (gstate == G_DRAIN || gstate == G_PAUSED)
         {
@@ -394,16 +398,18 @@ static void Presenter(Fg* f)
             if (ok && wait_until(real_target + ph)) { ok = Present(f, s->real, s, true); ++gwin_presented; }
             prev_real_target = real_target;
             const double now = NowMs();
-            if (gmin > 0 && now - gwin_t0 >= 1000.0)
+            if ((gmin > 0 || gmax_in > 0) && now - gwin_t0 >= 1000.0)
             {
                 const UINT64 submitted = seq_now - gwin_seq0;
                 if (submitted >= 20)   // too few frames to judge (a paused game, a loading screen)
                 {
-                    const double gain = (double)gwin_presented / (double)submitted;
-                    if (gain >= gmin) { gbad = 0; backoff = 3000.0; }
+                    const double gain = (double)gwin_presented / (double)submitted, in_fps = submitted * 1000.0 / (now - gwin_t0);
+                    const bool over = gmax_in > 0 && in_fps > gmax_in, low = gmin > 0 && gain < gmin;
+                    if (!over && !low) { gbad = 0; backoff = 3000.0; }
                     else if (++gbad >= 2)
                     {
-                        Log("[fg] governor: gain %.2fx < %.2fx for 2 s - generation paused, next probe in %.0f s", gain, gmin, backoff / 1000.0);
+                        if (over) Log("[fg] governor: %.0f fps in > %.0f floor for 2 s - generation paused, next probe in %.0f s", in_fps, gmax_in, backoff / 1000.0);
+                        else Log("[fg] governor: gain %.2fx < %.2fx for 2 s - generation paused, next probe in %.0f s", gain, gmin, backoff / 1000.0);
                         gstate = G_DRAIN; hold = full_hold; gbad = 0; f->paused = true;
                         resume_at = now + backoff; backoff = std::min(backoff * 2.0, 30000.0);
                     }
@@ -576,10 +582,11 @@ double FgEvalMs(Fg* f, double* p95)
     if (p95) *p95 = v[std::min(v.size() - 1, (size_t)(v.size() * 0.95))];
     return v[v.size() / 2];
 }
-void FgSetTiming(Fg* f, double phase_ms, double min_gain)
+void FgSetTiming(Fg* f, double phase_ms, double min_gain, double max_in_fps)
 {
     f->phase.store(std::clamp(phase_ms, -50.0, 50.0), std::memory_order_relaxed);
     f->min_gain.store(std::clamp(min_gain, 0.0, 8.0), std::memory_order_relaxed);
+    f->max_in.store(std::clamp(max_in_fps, 0.0, 1000.0), std::memory_order_relaxed);
 }
 void FgStats(Fg* f, FgStatsOut& out)
 {

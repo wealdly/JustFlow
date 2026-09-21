@@ -68,7 +68,7 @@ void FgSubmit(Fg* f, UINT64 render_fence_value, bool reset, LONGLONG cap_qpc, LO
 // Live pacing knob (no rebuild): phase_ms shifts every scheduled present target (negative = earlier).
 // min_gain: the governor pauses generation when frames presented / frames submitted stays below
 // this for 2 s (0 = never pause). It re-probes on a 3 s -> 30 s back-off and slews in and out.
-void FgSetTiming(Fg* f, double phase_ms, double min_gain);
+void FgSetTiming(Fg* f, double phase_ms, double min_gain, double max_in_fps);
 bool FgPaused(Fg* f);   // generation currently switched off by the governor
 bool FgFailed(const Fg* f);
 

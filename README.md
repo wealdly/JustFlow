@@ -22,7 +22,8 @@ the three layers and every toggle is remembered; with all of them off JustFlow g
 overlay hidden, capture released - rather than sit on top of the game as a slower copy of it.
 
 Frame generation is off by default on purpose. It only pays when it is really multiplying the
-frame rate (a governor pauses it below 1.5x), and many games ship their own - with real depth and
+frame rate (a governor pauses it below 1.5x gain, and above 90 fps in - `[fg] max_input_fps` - where
+doubling is latency for smoothness nobody sees), and many games ship their own - with real depth and
 motion vectors, which an external tool cannot match. **If the game has its own frame generation,
 use that and leave ours off**: stacking the two interpolates between interpolated frames.
 

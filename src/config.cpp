@@ -167,6 +167,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.fg_mv_dilated = B(L"fg", L"mv_dilated", c.fg_mv_dilated);
     c.fg_phase_ms = F(L"fg", L"phase_ms", c.fg_phase_ms);
     c.fg_min_gain = F(L"fg", L"min_gain", c.fg_min_gain);
+    c.fg_max_in_fps = F(L"fg", L"max_input_fps", c.fg_max_in_fps);
 
     c.overlay_mode = S(L"overlay", L"mode", c.overlay_mode == 1 ? L"direct" : L"composed") == L"direct" ? 1 : 0;
     c.exclude_from_capture = B(L"overlay", L"exclude_from_capture", c.exclude_from_capture);

@@ -84,6 +84,7 @@ const Setting kSettings[] = {
     { 2, L"fg", L"enabled",           L"Frame generation (F8)", Bool, nullptr, L"0" },
     { 2, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4", L"2" },
     { 2, L"fg", L"min_gain",          L"Auto-pause below gain", Float, nullptr, L"1.5" },
+    { 2, L"fg", L"max_input_fps",     L"No FG above input fps", Float, nullptr, L"90" },
 
     // ---- 3 Display --------------------------------------------------------------------------------
     { 3, L"ui", L"hud",               L"Status HUD (F7)",    Bool,  nullptr, L"0" },

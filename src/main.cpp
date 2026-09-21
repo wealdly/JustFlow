@@ -484,7 +484,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
             if (!p->fg && want > 1) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, 1, c.fg_pacing_vblank, c.fg_mv_dilated); }
             if (!p->fg) { Log("[fg] passthrough presenter create failed"); return false; }
         }
-        FgSetTiming(p->fg, c.fg_phase_ms, c.fg_min_gain);   // ponytail: one atomic store per frame, no reload plumbing
+        FgSetTiming(p->fg, c.fg_phase_ms, c.fg_min_gain, c.fg_max_in_fps);   // ponytail: one atomic store per frame, no reload plumbing
     }
     auto stamp = [&](int i) { if (c.gpu_timestamps) GpuStamp(g, cl, i); };
     // async: the residual composed this frame = the newest published one (the queue waits for it once
