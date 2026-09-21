@@ -18,7 +18,7 @@ const UINT WM_TRAY_STATE = WM_APP + 2;   // TraySetState -> refresh tooltip on t
 const UINT ICON_ID = 1;
 
 enum { IDM_STATUS = 1, IDM_NR, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM_MULT3, IDM_MULT4, IDM_WIPE, IDM_RELOAD,
-       IDM_SETTINGS, IDM_NEWPROFILE, IDM_CONFIG, IDM_APPCONFIG, IDM_LOG, IDM_QUIT,
+       IDM_SETTINGS, IDM_NEWPROFILE, IDM_PROFILE_RESET, IDM_PROFILE_REMOVE, IDM_CONFIG, IDM_APPCONFIG, IDM_LOG, IDM_QUIT,
        IDM_PRESET0 = 60, IDM_PROFILE0 = 100 };
 }
 
@@ -83,6 +83,45 @@ static void ShowNewProfileDialog(Tray* t)
         Push(t, TrayRescanProfiles);
 }
 
+// The active profile's name and the shipped default it could be reset to (profiles\\defaults\\ is
+// refreshed by every build and is never live config, so it is always the pristine copy).
+static std::wstring ActiveProfile(Tray* t, std::wstring* path = nullptr, std::wstring* def = nullptr)
+{
+    std::wstring ini; { std::lock_guard<std::mutex> lk(t->mu); ini = t->profile_ini; }
+    if (ini.empty()) return L"";
+    const size_t sl = ini.find_last_of(L"\\/"), dot = ini.rfind(L".ini");
+    const std::wstring name = ini.substr(sl == std::wstring::npos ? 0 : sl + 1, dot == std::wstring::npos ? std::wstring::npos : dot - (sl == std::wstring::npos ? 0 : sl + 1));
+    if (path) *path = ini;
+    if (def) *def = ProfilesDir(ini) + L"\\defaults\\" + name + L".ini";
+    return name;
+}
+
+static void ResetProfile(Tray* t)
+{
+    std::wstring path, def; const std::wstring name = ActiveProfile(t, &path, &def);
+    if (name.empty() || GetFileAttributesW(def.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    const std::wstring q = L"Reset \"" + name + L"\" to its shipped defaults?\n\nEvery setting in this profile is replaced. The app settings (hotkeys, HUD) are not touched.";
+    if (MessageBoxW(t->hwnd, q.c_str(), t->app.c_str(), MB_OKCANCEL | MB_ICONQUESTION | MB_TOPMOST) != IDOK) return;
+    if (CopyFileW(def.c_str(), path.c_str(), FALSE)) Push(t, TrayReload);
+    else MessageBoxW(t->hwnd, L"Could not write the profile.", t->app.c_str(), MB_OK | MB_ICONERROR | MB_TOPMOST);
+}
+
+static void RemoveProfile(Tray* t)
+{
+    std::wstring path, app; const std::wstring name = ActiveProfile(t, &path);
+    if (name.empty()) return;
+    { std::lock_guard<std::mutex> lk(t->mu); app = t->app_ini; }
+    const std::wstring q = L"Remove the profile \"" + name + L"\"?\n\nIt goes to the Recycle Bin, and JustFlow detaches until you pick another profile.";
+    if (MessageBoxW(t->hwnd, q.c_str(), t->app.c_str(), MB_OKCANCEL | MB_ICONWARNING | MB_TOPMOST) != IDOK) return;
+    // Recycle Bin, not DeleteFile: a profile can hold a lot of tuning, and "remove" should be undoable.
+    std::wstring from = path; from.push_back(L'\0');   // SHFileOperation wants a double-NUL-terminated list
+    SHFILEOPSTRUCTW op = {}; op.wFunc = FO_DELETE; op.pFrom = from.c_str();
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+    if (SHFileOperationW(&op) != 0) { MessageBoxW(t->hwnd, L"Could not remove the profile.", t->app.c_str(), MB_OK | MB_ICONERROR | MB_TOPMOST); return; }
+    WritePrivateProfileStringW(L"app", L"profile", L"none", app.c_str());
+    Push(t, TrayRescanProfiles);
+}
+
 static void ShowSettingsDialog(Tray* t)
 {
     std::wstring app, profile; HWND game;
@@ -129,6 +168,16 @@ static HMENU BuildMenu(Tray* t)
     for (size_t i = 0; i < t->profiles.size(); ++i) AppendMenuW(pr, MF_STRING, IDM_PROFILE0 + i, t->profiles[i].c_str());
     if (t->profile >= 0 && t->profile < (int)t->profiles.size())
         CheckMenuRadioItem(pr, IDM_PROFILE0, IDM_PROFILE0 + (UINT)t->profiles.size() - 1, IDM_PROFILE0 + t->profile, MF_BYCOMMAND);
+    {
+        std::wstring def; const std::wstring name = ActiveProfile(t, nullptr, &def);
+        if (!name.empty())
+        {
+            const bool has_def = GetFileAttributesW(def.c_str()) != INVALID_FILE_ATTRIBUTES;
+            AppendMenuW(pr, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(pr, MF_STRING | (has_def ? 0 : MF_GRAYED), IDM_PROFILE_RESET, (L"Reset \"" + name + L"\" to defaults").c_str());
+            AppendMenuW(pr, MF_STRING, IDM_PROFILE_REMOVE, (L"Remove \"" + name + L"\"...").c_str());
+        }
+    }
     AppendMenuW(m, MF_POPUP, (UINT_PTR)pr, L"Profiles");
     AppendMenuW(m, MF_STRING, IDM_NEWPROFILE, L"New profile from window...");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -171,6 +220,8 @@ static void ShowMenu(Tray* t)
     case IDM_QUIT:    Push(t, TrayQuit); break;
     case IDM_SETTINGS: ShowSettingsDialog(t); break;
     case IDM_NEWPROFILE: ShowNewProfileDialog(t); break;
+    case IDM_PROFILE_RESET:  ResetProfile(t); break;
+    case IDM_PROFILE_REMOVE: RemoveProfile(t); break;
     default:
         if (cmd >= IDM_PROFILE0) Push(t, TraySelectProfile, cmd - IDM_PROFILE0);
         else if (cmd >= IDM_PRESET0 && cmd < IDM_PRESET0 + kPresetCount)

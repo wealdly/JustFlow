@@ -75,6 +75,8 @@ add_custom_command(TARGET justflow POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:nvngx_dll_justflow> $<TARGET_FILE_DIR:justflow>
     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:justflow>/profiles
     COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR}/profiles -DDEST=$<TARGET_FILE_DIR:justflow>/profiles -P ${CMAKE_SOURCE_DIR}/cmake/seed_ini.cmake
+    # pristine copies for the tray's "Reset to defaults": never live config, so ALWAYS refreshed
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/profiles $<TARGET_FILE_DIR:justflow>/profiles/defaults
     COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DDEST=$<TARGET_FILE_DIR:justflow> -P ${CMAKE_SOURCE_DIR}/cmake/seed_ini.cmake
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssg.dll $<TARGET_FILE_DIR:justflow>)
 endif()

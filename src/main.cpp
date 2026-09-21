@@ -7,6 +7,7 @@
 #include "tray.h"
 #include "settings.h"
 #include <shellapi.h>
+#include <dwmapi.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -718,14 +719,31 @@ static HWND FindTarget(const Config& c)
     // Both empty matches the FIRST window on the desktop, which is how a profile-less start would
     // attach itself to something arbitrary. A profile that names nothing targets nothing.
     if (c.window_class.empty() && c.window_title.empty()) return nullptr;
+    // The LARGEST plausible match, not the first. A title like "World of Warcraft" is also carried by
+    // launcher pages, taskbar thumbnails, tooltips and browser tabs, and first-in-Z-order once
+    // attached the overlay to a 318x157 popup on the wrong monitor. A game window is a real,
+    // visible, uncloaked top-level window and it is bigger than any of those; a minimised one is
+    // judged by the size it restores to, so alt-tabbing out does not lose the target.
+    HWND best = nullptr; LONGLONG best_area = 0;
     HWND h = nullptr;
     while ((h = FindWindowExW(nullptr, h, c.window_class.empty() ? nullptr : c.window_class.c_str(), nullptr)) != nullptr)
     {
-        if (c.window_title.empty()) return h;
-        wchar_t t[256] = {}; GetWindowTextW(h, t, 256);
-        if (wcsstr(t, c.window_title.c_str())) return h;
+        if (!c.window_title.empty())
+        {
+            wchar_t t[256] = {}; GetWindowTextW(h, t, 256);
+            if (!wcsstr(t, c.window_title.c_str())) continue;
+        }
+        if (!IsWindowVisible(h) || (GetWindowLongW(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)) continue;
+        DWORD cloaked = 0;
+        if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof cloaked)) && cloaked) continue;
+        RECT r = {};
+        WINDOWPLACEMENT wp = { sizeof wp };
+        if (IsIconic(h) && GetWindowPlacement(h, &wp)) r = wp.rcNormalPosition; else if (!GetWindowRect(h, &r)) continue;
+        const LONGLONG w = r.right - r.left, ht = r.bottom - r.top;
+        if (w < 320 || ht < 240) continue;
+        if (w * ht > best_area) { best_area = w * ht; best = h; }
     }
-    return nullptr;
+    return best;
 }
 
 static void DumpFrame(Pipeline* p, const std::wstring& dir, int i)
@@ -876,6 +894,7 @@ static int RealMain(int argc, char** argv)
 
     Pipeline* p = nullptr;   // the live pipeline, null while waiting for the window
     bool quit = false; int pending_profile = -1, dumped = 0, rc = 0;
+    bool go_idle = false;   // the active profile was removed: leave the pipeline and sit in the tray
     wchar_t status[128] = L"";
     auto profile_name = [&]() { return profile >= 0 ? profiles[profile] : Stem(ini_path); };
     auto tray_state = [&]
@@ -1013,6 +1032,7 @@ static int RealMain(int argc, char** argv)
             std::vector<const wchar_t*> pn; for (auto& n : profiles) pn.push_back(n.c_str());
             TraySetProfiles(tray, pn.data(), (int)pn.size());
             if (idx >= 0 && idx != profile) pending_profile = idx;
+            else if (idx < 0 && profile >= 0) go_idle = true;   // [app] profile=none now (the active one was removed)
             Log("[main] profiles rescanned (%zu), selected %d", profiles.size(), idx);
             break;
         }
@@ -1027,6 +1047,7 @@ static int RealMain(int argc, char** argv)
     bool switched = false;   // the next pipeline comes from a tray profile switch (toast "Profile: x" instead of the startup line)
     while (!quit)
     {
+        if (go_idle) { go_idle = false; profile = -1; ini_path.clear(); if (tray) TraySetPaths(tray, app_path.c_str(), L""); Log("[main] no active profile - idle"); }
         if (pending_profile >= 0)   // tray: switch profile (the pipeline is already torn down)
         {
             profile = pending_profile; pending_profile = -1; switched = true;
@@ -1051,10 +1072,10 @@ static int RealMain(int argc, char** argv)
         }
         _snwprintf_s(status, _TRUNCATE, L"%ls  waiting for window", profile_name().c_str()); tray_state();
         HWND target = nullptr;
-        for (int i = 0; !quit && pending_profile < 0 && !(target = FindTarget(cfg)); ++i)
+        for (int i = 0; !quit && !go_idle && pending_profile < 0 && !(target = FindTarget(cfg)); ++i)
         {
             if (i % 30 == 0) Log("[main] waiting for window class=%ls title=%ls", cfg.window_class.c_str(), cfg.window_title.c_str());
-            for (int t = 0; t < 10 && !quit && pending_profile < 0; ++t) { Sleep(100); handle_tray(); }
+            for (int t = 0; t < 10 && !quit && !go_idle && pending_profile < 0; ++t) { Sleep(100); handle_tray(); }
         }
         if (!target) continue;
         Log("[main] target window %p", (void*)target);
@@ -1105,7 +1126,7 @@ static int RealMain(int argc, char** argv)
         for (;;)
         {
             handle_tray();
-            if (quit || pending_profile >= 0) break;
+            if (quit || go_idle || pending_profile >= 0) break;
             if (OverlayHotkey(p->ov, 4)) { Log("[main] quit hotkey"); quit = true; break; }
             if (OverlayHotkey(p->ov, 1)) toggle_nr();
             if (OverlayHotkey(p->ov, 2)) cycle_wipe();
