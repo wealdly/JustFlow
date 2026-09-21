@@ -10,7 +10,6 @@
 // runtime's thread-safety across features is undocumented and each call only records commands.
 inline std::mutex& NgxMutex() { static std::mutex m; return m; }
 
-enum NrCreateStyle { NrCreateA = 0 /* NeuralScreen set */, NrCreateB = 1 /* fork set: plain Width/Height */ };
 enum NrParamBlock  { NrBlockAllocate = 1, NrBlockCapability = 2, NrBlockOwn = 3 };
 
 struct NrTuning
@@ -28,7 +27,6 @@ struct NrTuning
 struct NrConfig
 {
     UINT          work_w = 2560, work_h = 1440;   // model size; Color/Output/MVec are this size
-    NrCreateStyle create_style = NrCreateB;
     NrParamBlock  block = NrBlockCapability;
     NrTuning      tuning;
 };

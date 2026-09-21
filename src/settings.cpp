@@ -2,7 +2,7 @@
 // it (one row per setting, one tab per group) and writes each key back through ConfigIsAppKey, so
 // adding a setting means adding a row here and reading it in config.cpp.
 //
-// Diagnostics stay out of the table on purpose. Ini-only: create_style, param_block, warmup,
+// Diagnostics stay out of the table on purpose. Ini-only: param_block, warmup,
 // rebuild_debounce_frames, selftest, fg.pacing, fg.mv_dilated, fg.phase_ms, nr.exposure_scale,
 // nr.model_max_fps, nr.warp, ofa.input/grid/zero_below, capture.cursor/border, ui.rectN,
 // ui.mask_every, ui.feather. They are for debugging, not for tuning, and a panel that lists

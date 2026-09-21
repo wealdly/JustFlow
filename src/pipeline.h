@@ -117,7 +117,7 @@ struct Pipeline
 };
 
 std::wstring ExeDir();
-// work_w/h == 0 -> justflow.spike.ini [spike] work=WxH (+create_style/param_block) else 2560x1440.
+// work_w/h == 0 -> justflow.spike.ini [spike] work=WxH (+param_block) else 2560x1440.
 void ResolveWork(Config& c, const std::wstring& dir);
 // Profiles: profiles\*.ini next to the exe, `names` = the sorted stems. `ini` (--ini) wins when non-empty
 // (index = its stem's slot in names, -1 if none); else justflow.ini [app] profile=<name> when it is not "auto";

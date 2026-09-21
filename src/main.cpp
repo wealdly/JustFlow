@@ -41,9 +41,8 @@ void ResolveWork(Config& c, const std::wstring& dir)
     GetPrivateProfileStringW(L"spike", L"work", L"", buf, 64, ini.c_str());
     if (swscanf_s(buf, L"%ux%u", &c.work_w, &c.work_h) == 2 && c.work_w && c.work_h)
     {
-        c.create_style = (int)GetPrivateProfileIntW(L"spike", L"create_style", c.create_style, ini.c_str());
         c.param_block = (int)GetPrivateProfileIntW(L"spike", L"param_block", c.param_block, ini.c_str());
-        Log("[nr] work %ux%u style %d block %d from justflow.spike.ini", c.work_w, c.work_h, c.create_style, c.param_block);
+        Log("[nr] work %ux%u block %d from justflow.spike.ini", c.work_w, c.work_h, c.param_block);
     }
     else { c.work_w = 2560; c.work_h = 1440; Log("[nr] work auto -> 2560x1440 (no justflow.spike.ini)"); }
 }

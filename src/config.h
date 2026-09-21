@@ -1,6 +1,6 @@
 // Two ini layers, loaded with GetPrivateProfile*; reload on hotkey.
 //   justflow.ini (next to the exe) = APP: [app], [hotkeys], [overlay], [ui] toast*/hud*, [log] stats_every/
-//     gpu_timestamps/selftest, [ofa] dll_path, [nr] create_style/param_block (machine-level, from the spike).
+//     gpu_timestamps/selftest, [ofa] dll_path, [nr] param_block (machine-level, from the spike).
 //   profiles\<game>.ini = GAME: everything else. The table in config.cpp (kAppKeys) is the authority.
 #pragma once
 #include <windows.h>
@@ -29,7 +29,6 @@ struct Config
     bool  nr_enabled = true;
     bool  nr_model = false;
     UINT  work_w = 0, work_h = 0;          // 0 = auto (from spike results / default 2560x1440)
-    int   create_style = 1;                // 0 = A (NeuralScreen set), 1 = B (plain)   [app layer]
     int   param_block = 1;                 // 1 Allocate, 2 Capability, 3 Own           [app layer]
     NrTuning tuning;
     float exposure_scale = 1.0f;

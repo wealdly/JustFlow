@@ -15,7 +15,7 @@ static const AppKey kAppKeys[] = {
     { L"log", L"stats_every" }, { L"log", L"gpu_timestamps" }, { L"log", L"selftest" },
     { L"gpu", nullptr },
     { L"ofa", L"dll_path" },
-    { L"nr", L"create_style" }, { L"nr", L"param_block" },
+    { L"nr", L"param_block" },
 };
 
 static bool IsAppKey(const wchar_t* sec, const wchar_t* key)
@@ -101,7 +101,6 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.nr_model = B(L"nr", L"model", c.nr_model);
     const std::wstring work = S(L"nr", L"work", L"auto");
     if (swscanf_s(work.c_str(), L"%ux%u", &c.work_w, &c.work_h) != 2) { c.work_w = c.work_h = 0; }
-    c.create_style = I(L"nr", L"create_style", c.create_style);
     c.param_block = I(L"nr", L"param_block", c.param_block);
     c.tuning.preset = I(L"nr", L"preset", c.tuning.preset);
     c.tuning.style = I(L"nr", L"style", c.tuning.style);
@@ -176,7 +175,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
 bool ConfigNeedsRebuild(const Config& a, const Config& b)
 {
     const NrTuning &x = a.tuning, &y = b.tuning;
-    return a.nr_model != b.nr_model || a.work_w != b.work_w || a.work_h != b.work_h || a.create_style != b.create_style || a.param_block != b.param_block ||
+    return a.nr_model != b.nr_model || a.work_w != b.work_w || a.work_h != b.work_h || a.param_block != b.param_block ||
            x.preset != y.preset || x.style != y.style || x.intensity != y.intensity || x.local_tone != y.local_tone ||
            x.local_structure != y.local_structure || x.skin_structure != y.skin_structure || x.auto_mask != y.auto_mask || x.ui_correction != y.ui_correction;
 }
@@ -190,7 +189,6 @@ bool ConfigNeedsRestart(const Config& a, const Config& b)
 NrConfig ConfigToNr(const Config& c)
 {
     NrConfig n; n.work_w = c.work_w; n.work_h = c.work_h;
-    n.create_style = c.create_style == 0 ? NrCreateA : NrCreateB;
     n.block = (NrParamBlock)c.param_block;
     n.tuning = c.tuning;
     return n;

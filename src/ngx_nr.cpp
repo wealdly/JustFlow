@@ -172,15 +172,8 @@ bool NrCreate(Nr* n, ID3D12GraphicsCommandList* cl, const NrConfig& cfg)
     SetU(n, "CreationNodeMask", 1u); SetU(n, "VisibilityNodeMask", 1u);
     SetU(n, "DLSSNR.Enabled", 1u);
     SetU(n, "DLSSNR.Width", cfg.work_w); SetU(n, "DLSSNR.Height", cfg.work_h);
-    if (cfg.create_style == NrCreateA)
-    {
-        SetU(n, "DLSSNR.InputWidth", cfg.work_w); SetU(n, "DLSSNR.InputHeight", cfg.work_h);
-        SetU(n, "DLSSNR.OutputWidth", cfg.work_w); SetU(n, "DLSSNR.OutputHeight", cfg.work_h);
-        SetU(n, "DLSSNR.Output.Width", cfg.work_w); SetU(n, "DLSSNR.Output.Height", cfg.work_h);
-        SetU(n, "DLSSNR.Upscaling", 0u);
-        SetF(n, "DLSSNR.Scale", 1.0f); SetF(n, "DLSSNR.ScalingRatio", 1.0f);
-        SetU(n, "DLSS.Feature.Create.Flags", 0u);
-    }
+    // No Input/Output dims, no Upscaling/Scale: feature 18 ignores them. Measured - the old
+    // "style A" set all six and produced byte-identical output at 1080p and 1440p.
     SetTuning(n, cfg.tuning);
     NVSDK_NGX_Handle* h = nullptr; DWORD code = 0;
     NVSDK_NGX_Result r = (NVSDK_NGX_Result)0x7FFFFFFF;
@@ -188,9 +181,9 @@ bool NrCreate(Nr* n, ID3D12GraphicsCommandList* cl, const NrConfig& cfg)
     __try { r = n->create(cl, NVSDK_NGX_Feature_Reserved18, n->params, &h); } __except (EXCEPTION_EXECUTE_HANDLER) { code = GetExceptionCode(); }
     NgxMutex().unlock();
     if (code) { n->last_error = "CreateFeature raised an exception"; Log("[ngx] CreateFeature raised 0x%08X", code); return false; }
-    if (NVSDK_NGX_FAILED(r) || !h) { n->last_error = NgxResultName(r); Log("[ngx] CreateFeature(18) %ux%u style %c -> 0x%08X (%s)", cfg.work_w, cfg.work_h, cfg.create_style == NrCreateA ? 'A' : 'B', r, NgxResultName(r)); return false; }
+    if (NVSDK_NGX_FAILED(r) || !h) { n->last_error = NgxResultName(r); Log("[ngx] CreateFeature(18) %ux%u -> 0x%08X (%s)", cfg.work_w, cfg.work_h, r, NgxResultName(r)); return false; }
     n->feature = h; n->live = cfg; n->submitted = false;
-    Log("[ngx] feature 18 created %ux%u style %c preset %d (submit before evaluating)", cfg.work_w, cfg.work_h, cfg.create_style == NrCreateA ? 'A' : 'B', cfg.tuning.preset);
+    Log("[ngx] feature 18 created %ux%u preset %d (submit before evaluating)", cfg.work_w, cfg.work_h, cfg.tuning.preset);
     return true;
 }
 
