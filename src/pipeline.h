@@ -28,7 +28,11 @@ struct StageStats
     double p95() const { return pct(0.95); }
 };
 
-enum PipeStage { PS_SWIZZLE, PS_GRAYDS, PS_OFA, PS_EXPAND, PS_EVAL, PS_COMPOSE, PS_OFA2, PS_ARTCNN, PS_FILTER, PS_COUNT };   // PS_OFA/PS_OFA2: bench only (CPU round trip); PS_ARTCNN: sync path only
+// PS_LIST1/PS_LIST2 are whole-submission spans, so they count the barriers and the copies that no
+// per-stage stamp covers. They cannot be one span: GpuEnd advances the ring slot and GpuBegin
+// clears it, so a pair cannot cross a submission. Real frame cost is LIST1 + ofa + LIST2 - the old
+// frame_gpu_ms was a sum of stages with OFA excluded, which reported a fraction of the frame.
+enum PipeStage { PS_SWIZZLE, PS_GRAYDS, PS_OFA, PS_EXPAND, PS_EVAL, PS_COMPOSE, PS_OFA2, PS_ARTCNN, PS_FILTER, PS_LIST1, PS_LIST2, PS_COUNT };   // PS_OFA/PS_OFA2: bench only (CPU round trip); PS_ARTCNN: sync path only
 extern const char* const kPipeStageName[PS_COUNT];
 
 struct Pipeline
