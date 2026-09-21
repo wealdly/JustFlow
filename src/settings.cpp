@@ -8,17 +8,24 @@
 // ui.feather, ui.toast_scale, overlay.mode. They are for debugging, not for tuning, and a panel
 // that lists everything is a panel nobody can read.
 //
-// Four model knobs are ini-only for a stronger reason - they were tested and do nothing useful:
-//   nr.intensity        the runtime clamps it, so it is dead ABOVE 1.0 - below it does change the
-//                       model's output (measured: distinct hashes). It stays ini-only because the
-//                       useful direction is already covered, not because it does nothing. NB it is
-//                       NOT the same lever as residual_strength, which scales the delta in our own
-//                       compose and leaves nr_out untouched.
-//   nr.skin_structure   -1 already means "follow local_structure", which is what anyone wants.
-//   nr.auto_mask        no visible effect in testing.
-//   nr.ui_correction    the addon's UI rects are what actually protects the interface.
-// A control that cannot change the picture is worse than no control: it invites tuning that does
-// nothing and then hides the knob that would have worked.
+// The NR model's real control surface, measured rather than assumed. OpenDLSS-NR reimplements build
+// 310.8.0 - ours - as a 71-block Swin/ViT U-net taking a frame, three lanes of Gaussian noise, the
+// previous output reprojected, and FIVE CONDITIONING SCALARS, emitting an RGB residual plus a
+// temporal-blend logit. We expose exactly five scalars, and all five change the output:
+//   style, intensity, local_tone, local_structure, skin_structure
+// Dead, confirmed by identical output hashes:
+//   preset          DLSSNR.Hint.Render.Preset picks a different network in DLSS SR; for feature 18
+//                   presets 0..5 are byte-identical. It is not one of the five scalars.
+//   ui_correction   no change at 0 or 1. Our addon rects are what protects the interface anyway.
+// Ini-only but LIVE, kept off the panel for room rather than because they do nothing:
+//   intensity       clamped above 1.0, effective below it. NOT interchangeable with
+//                   residual_strength, which scales the delta in our compose and leaves the model's
+//                   own output untouched (identical hash to baseline).
+//   skin_structure  -1 follows local_structure, but 0 and 2 give different pictures.
+//   auto_mask       changes the output even on content with no skin in it.
+// An earlier version of this comment said all four "were tested and do nothing useful". Three of the
+// four were live; the claim came from inherited notes and one upstream remark, and no test.
+
 #include "settings.h"
 #include "config.h"
 #include <commctrl.h>
