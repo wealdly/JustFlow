@@ -42,6 +42,7 @@ struct FgSlot
     ID3D12Resource *real = nullptr, *mv = nullptr, *gen[kMaxGen] = {};
     int    state = 0;
     UINT64 seq = 0, fence = 0, eval_fence = 0;
+    int    eval_slot = -1;    // ctx ring slot the evaluate stamped, read back when the fence lands
     bool   interpolate = false;
     double interval = 16.0;   // ms between this and the previous submit (our clock)
     double content_ms = 0;    // ms between this frame and the previous CAPTURED one, in the game's
@@ -126,7 +127,7 @@ static bool Present(Fg* f, ID3D12Resource* src, const FgSlot* s, bool real)
     return true;
 }
 
-static bool Evaluate(Fg* f, FgSlot* s, bool interpolate, bool& allow)
+static bool Evaluate(Fg* f, FgSlot* s, bool interpolate)
 {
     Gpu& g = *f->g;
     if (!GpuCtxBegin(g, f->ctx)) return Fail(f, "FG queue begin (device removed?)");
@@ -187,14 +188,20 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate, bool& allow)
     const UINT64 v = GpuCtxEnd(f->ctx);
     if (!v) return Fail(f, "FG queue submit");
     s->eval_fence = v;
-    // CPU wait on the FG queue only (the disable flag decides whether the generated frames go out);
-    // the present queue orders itself on eval_fence, never on this thread.
-    if (!GpuCtxWait(f->ctx, f->ctx.fence, v, 10000)) return Fail(f, "evaluate fence wait (device removed?)");
+    s->eval_slot = slot;
     if (code) { Log("[fg] evaluate raised 0x%08X", code); return Fail(f, "evaluate raised an exception"); }
     if (NVSDK_NGX_FAILED(r)) { Log("[fg] evaluate -> 0x%08X (%s)", r, NgxResultName(r)); return Fail(f, "evaluate failed"); }
-    // generation cost of this real frame = the sum of its evaluates (the fence just completed, so the slot is readable)
-    double ms[kMaxGen] = {};
-    if (GpuCtxStampsMsSlot(f->ctx, slot, ms, f->count))
+    return true;
+}
+
+// The blocking half, split off so the caller can pace first: DLSS-G's ~1.5 ms then runs inside a
+// wait the presenter was going to make anyway instead of serialising in front of the schedule.
+// Only the CPU needs this - Present already orders the present queue on eval_fence.
+static bool EvaluateResolve(Fg* f, FgSlot* s, bool& allow)
+{
+    if (!GpuCtxWait(f->ctx, f->ctx.fence, s->eval_fence, 10000)) return Fail(f, "evaluate fence wait (device removed?)");
+    double ms[kMaxGen] = {};   // generation cost of this real frame = the sum of its evaluates
+    if (s->eval_slot >= 0 && GpuCtxStampsMsSlot(f->ctx, s->eval_slot, ms, f->count))
     {
         double sum = 0; bool valid = true;
         for (int i = 0; i < f->count; ++i) { if (ms[i] < 0) valid = false; sum += ms[i]; }
@@ -240,10 +247,10 @@ static void Presenter(Fg* f)
                 }
                 if (f->stop) return false;
             }
-            LARGE_INTEGER vt0, vt1, vf; QueryPerformanceCounter(&vt0);
+            LARGE_INTEGER vt0, vt1; QueryPerformanceCounter(&vt0);
             const bool vok = OverlayWaitVBlank(f->ov);
-            QueryPerformanceCounter(&vt1); QueryPerformanceFrequency(&vf);
-            f->vbw_us += (UINT64)((vt1.QuadPart - vt0.QuadPart) * 1000000 / vf.QuadPart); ++f->vbw_n;
+            QueryPerformanceCounter(&vt1);
+            f->vbw_us += (UINT64)(QpcToMs(vt1.QuadPart - vt0.QuadPart) * 1000.0); ++f->vbw_n;
             // WaitForVBlank only fails structurally (no DXGI output under the overlay), so this one
             // IS permanent and the timer schedule is the right answer. It is logged now rather than
             // silent - a run that quietly lost vblank pacing looked like a pacing bug for hours.
@@ -285,23 +292,29 @@ static void Presenter(Fg* f)
         // which `span` has just measured. Requiring seq == prev + 1 spent a generated frame on
         // every dropped one: fg_drops and fg_nopair came back equal on every single line.
         const bool interp = s->interpolate && prev != 0 && span < 100.0;
-        if (ok) ok = Evaluate(f, s, interp, allow);
+        if (ok) ok = Evaluate(f, s, interp);
         if (ok)
         {
             const double L = span / (f->count + 1);
-            const bool gen = interp && allow;
-            if (!interp) ++f->no_pair; else if (!allow) ++f->disabled;
             // phase shifts every present target; the cadence (prev_real_target) stays unshifted so it never accumulates.
             const double ph = f->phase.load(std::memory_order_relaxed);
             const double anchor = std::max(NowMs(), prev_real_target + L);
             double real_target = anchor;
             bool preempted = false;
+            // Whatever happens next, the first thing to do is wait for `anchor`: generated frame 0
+            // targets it, and with no generation the real frame does. So pace FIRST and collect the
+            // evaluate afterwards - on schedule DLSS-G has had the whole L window to finish and the
+            // fence is already signalled, which turns a ~1.5 ms serial stall into nothing.
+            if (!wait_until(anchor + ph)) { ++f->preempts; preempted = true; }
+            if (!preempted && !EvaluateResolve(f, s, allow)) ok = false;
+            const bool gen = ok && !preempted && interp && allow;
+            if (!interp) ++f->no_pair; else if (!allow) ++f->disabled;
             if (gen)
             {
                 for (int i = 0; i < f->count; ++i)
                 {
                     const double target = anchor + i * L + ph;
-                    if (!wait_until(target)) { preempted = true; ++f->preempts; break; }
+                    if (i && !wait_until(target)) { preempted = true; ++f->preempts; break; }   // i == 0: waited above
                     if (NowMs() - target > L * 0.5 + vb * 0.5) { ++f->drops; continue; }   // stale: skip, never burst
                     if (!Present(f, s->gen[i], s, false)) { ok = false; break; }
                     ++f->gen_shown;
