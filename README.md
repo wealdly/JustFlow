@@ -61,6 +61,24 @@ debounced rebuild, and the handful the capture and overlay only read when they a
 Performance, Balanced, Quality (model resolution, ArtCNN, sharpen, flow resolution). No preset
 touches the look dials, and none sets a frame-rate cap.
 
+### Three layers, three switches
+
+The pipeline is three independent layers, each with one on/off that reaches into nothing else:
+
+| Layer | Switch | Key | What it does |
+|---|---|---|---|
+| Neural | `[nr] enabled` | F9 | ArtCNN and/or the DLSS model, at work resolution, composed back as a residual |
+| Filters | `[filters] enabled` | F6 | sharpen then vibrance, at native resolution, UI rects untouched |
+| Frame gen | `[fg] enabled` | F8 | interpolates the finished frame; the UI is copied back onto generated frames |
+
+They apply in that order, with the UI mask and the HUD between filters and frame generation. The
+order is not arbitrary: sharpening has to see what the model produced, vibrance grades after the
+sharpen rather than feeding it exaggerated contrast, text goes on after both so it stays crisp,
+and frame generation runs last because it interpolates the frame as the viewer sees it.
+
+All eight combinations are valid — a layer that is off passes its input straight through. Turning
+a layer off keeps its tuned values, so an A/B costs nothing. The HUD names the live layers.
+
 Two ini files, both next to the exe:
 
 - `justflow.ini` — **app settings**, this machine, every game: `[hotkeys]`, `[ui]` toast and HUD
@@ -78,8 +96,9 @@ The tray menu switches profiles live, toggles the effect and frame generation, s
 multiplier and the quality preset, opens the settings and hotkey windows, and opens either ini
 and the log for hand editing.
 
-Keys (configurable in `justflow.ini` and the tray menu): F9 toggle the effect, F10 cycle the
-before/after wipe, F8 frame generation, F11 reload both files, F7 status HUD, Ctrl+F12 quit.
+Keys (configurable in `justflow.ini` and the tray menu): F9 neural layer, F6 filter layer, F8
+frame generation, F10 cycle the before/after wipe, F11 reload both files, F7 status HUD,
+Ctrl+F12 quit.
 Every state change shows a 2 s toast at the top of the frame (`[ui] toast=0` turns it off); the
 HUD (`[ui] hud`, corner and scale there too) shows capture/output rate, frame age, model cost and
 mode, FG and mask state. The look defaults keep the game's own art and spend the model on detail: `[nr] style=0`

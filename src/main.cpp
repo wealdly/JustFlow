@@ -47,12 +47,13 @@ void ResolveWork(Config& c, const std::wstring& dir)
     else { c.work_w = 2560; c.work_h = 1440; Log("[nr] work auto -> 2560x1440 (no justflow.spike.ini)"); }
 }
 
-// Overlay hotkey ids: 1 toggle, 2 wipe, 3 reload, 4 quit, 5 fg, 6 hud (OverlayHotkey(p->ov, id) in main).
-static const int kHotkeys = 6;
+// Overlay hotkey ids: 1 toggle, 2 wipe, 3 reload, 4 quit, 5 fg, 6 hud, 7 filters (OverlayHotkey(p->ov, id) in main).
+static const int kHotkeys = 7;
 static void HotkeyDefs(const Config& c, HotkeyDef out[kHotkeys])
 {
     const HotkeyDef k[kHotkeys] = { { 1, c.hk_toggle.mods, c.hk_toggle.vk }, { 2, c.hk_wipe.mods, c.hk_wipe.vk }, { 3, c.hk_reload.mods, c.hk_reload.vk },
-                                    { 4, c.hk_quit.mods, c.hk_quit.vk }, { 5, c.hk_fg.mods, c.hk_fg.vk }, { 6, c.hk_hud.mods, c.hk_hud.vk } };
+                                    { 4, c.hk_quit.mods, c.hk_quit.vk }, { 5, c.hk_fg.mods, c.hk_fg.vk }, { 6, c.hk_hud.mods, c.hk_hud.vk },
+                                    { 7, c.hk_filters.mods, c.hk_filters.vk } };
     memcpy(out, k, sizeof k);
 }
 
@@ -599,7 +600,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // the previous pass had not already computed. Nobody downstream needs to know: the slot texture
     // has the same format, size and resting state (COPY_SOURCE) as the targets it replaces.
     ID3D12Resource* const fg_dst = p->fg ? FgAcquire(p->fg) : nullptr;
-    const bool filt = c.sharpen > 0 || c.saturation != 1.0f;
+    const bool filt = c.filters_enabled && (c.sharpen > 0 || c.saturation != 1.0f);
     ID3D12Resource* const compose_dst = filt ? p->out4k : (fg_dst ? fg_dst : p->out4k);
     GpuBarrier(cl, compose_dst, CSRC, UAV);
     if (async)
@@ -620,9 +621,22 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         GpuBarrier(cl, p->nr_out, NPSR, UAV);
     }
     if (!native && p->model_toast_pending) { p->model_toast_pending = false; PipelineToast(p, "Model ready"); }
-    // Filter layer (out4k -> sharp4k, UI rects untouched): sharpen then vibrance, before the text
-    // so the text stays crisp. Runs when either filter is asked for - vibrance used to live inside
-    // the neural compose, which meant it died with the neural layer while sharpen carried on.
+    // ---- the order of application, in one place ------------------------------------------------
+    // Three layers, three independent switches, and none of them reaches into another:
+    //
+    //   capture -> NEURAL ([nr] enabled, F9)      ArtCNN then the DLSS model, at work resolution,
+    //                                             composed back as a residual at native resolution.
+    //           -> FILTERS ([filters] enabled, F6) sharpen then vibrance, at native resolution.
+    //           -> UI rects + text                the addon mask and the HUD/toasts.
+    //           -> FRAME GEN ([fg] enabled, F8)   interpolates the finished frame; the UI is copied
+    //                                             back onto the generated ones.
+    //
+    // The order is not arbitrary. Sharpening has to see what the model produced or it sharpens the
+    // wrong image, vibrance grades after the sharpen rather than feeding it exaggerated contrast,
+    // text goes on after both so it stays crisp, and FG runs last because it interpolates the frame
+    // as the viewer sees it. Every combination is valid: any layer off just passes its input through.
+    // Vibrance used to live inside the neural compose, which meant it silently died with the neural
+    // layer while sharpen carried on - that is the bug this layout exists to prevent.
     ID3D12Resource* shown = compose_dst;
     if (filt)
     {
@@ -880,6 +894,13 @@ static int RealMain(int argc, char** argv)
         if (p->cfg.fg_enabled) PipelineToast(p, "Frame generation ON %dX", p->cfg.fg_multiplier); else PipelineToast(p, "Frame generation OFF");
         tray_state();
     };
+    auto toggle_filters = [&]
+    {
+        if (!p) return; p->cfg.filters_enabled = !p->cfg.filters_enabled;
+        cfg.filters_enabled = p->cfg.filters_enabled; persist(L"filters", L"enabled", p->cfg.filters_enabled);
+        Log("[main] filters %ls", p->cfg.filters_enabled ? L"on" : L"off");
+        PipelineToast(p, "Filters %s", p->cfg.filters_enabled ? "ON" : "OFF");
+    };
     auto toggle_hud = [&] { if (!p) return; p->hud = !p->hud; cfg.hud = p->hud; persist(L"ui", L"hud", p->hud); Log("[main] hud %s", p->hud ? "on" : "off"); PipelineToast(p, "Status HUD %s", p->hud ? "ON" : "OFF"); };
     // the caps in force, for the toasts: "uncapped" | "cap 60" | "cap 60  model 30/s" | "model 30/s"
     auto caps = [](const Config& c)
@@ -1049,6 +1070,7 @@ static int RealMain(int argc, char** argv)
             if (OverlayHotkey(p->ov, 5)) toggle_fg();
             if (OverlayHotkey(p->ov, 3)) reload();
             if (OverlayHotkey(p->ov, 6)) toggle_hud();
+            if (OverlayHotkey(p->ov, 7)) toggle_filters();
             if (CaptureLost(cap)) { Log("[main] capture lost - back to waiting for the window"); break; }
             UINT nw = 0, nh = 0;
             if (CaptureSizeChanged(cap, nw, nh))
@@ -1120,9 +1142,10 @@ static int RealMain(int argc, char** argv)
                 // snprintf, not sprintf_s: an overflow here must clip the HUD, not fast-fail the
                 // process (sprintf_s calls the invalid-parameter handler, which is a hard kill).
                 char nr[48];
-                // "NR off" would be a lie while ArtCNN is the thing doing the enhancing.
-                if (p->bypass) strcpy_s(nr, "effect off");
-                else if (!p->nr) strcpy_s(nr, cfg.artcnn ? "ArtCNN only" : "no model");
+                // Which LAYERS are live, not which settings are set: the three switches are
+                // independent, so the HUD has to be able to say "neural off, filters on, FG on".
+                if (p->bypass) strcpy_s(nr, "neural off");
+                else if (!p->nr) strcpy_s(nr, cfg.artcnn ? "ArtCNN only" : "neural idle");
                 else if (cfg.nr_async)
                 {
                     double ms; { std::lock_guard<std::mutex> lk(p->pub_mu); ms = p->model_ms.med(); }
@@ -1131,8 +1154,9 @@ static int RealMain(int argc, char** argv)
                 }
                 else snprintf(nr, sizeof nr, "NR %.1f ms %up", std::max(0.0, p->st[PS_EVAL].med()), p->wh);
                 char mask[8]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "-");
-                if (p->fg && FgMultiplier(p->fg) > 1) snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  FG %dX %.1fms  mask %s", nr, FgMultiplier(p->fg), std::max(0.0, FgEvalMs(p->fg, nullptr)), mask);
-                else snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  FG off  mask %s", nr, mask);
+                const char* filt_s = !cfg.filters_enabled ? "off" : (cfg.sharpen > 0 || cfg.saturation != 1.0f) ? "on" : "-";
+                if (p->fg && FgMultiplier(p->fg) > 1) snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG %dX %.1fms  mask %s", nr, filt_s, FgMultiplier(p->fg), std::max(0.0, FgEvalMs(p->fg, nullptr)), mask);
+                else snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG off  mask %s", nr, filt_s, mask);
                 // Why FG is or is not paying off: shown generated frames, then the gate that ate the rest.
                 if (p->fg && FgMultiplier(p->fg) > 1 && hud_frames)
                     snprintf(p->hud_line[2], sizeof p->hud_line[2], "gen %.0f%%  nopair %u  off %u  late %u", hud_gen * 100.0 / hud_frames, hud_nopair, hud_disabled, hud_preempt);

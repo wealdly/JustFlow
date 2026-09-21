@@ -113,14 +113,18 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.exposure_scale = F(L"nr", L"exposure_scale", c.exposure_scale);
     c.residual_strength = F(L"nr", L"residual_strength", c.residual_strength);
     c.chroma = F(L"nr", L"chroma", c.chroma);
-    c.saturation = F(L"nr", L"saturation", c.saturation);
+    // sharpen/saturation used to live in [nr], which put the filter layer's keys inside the neural
+    // layer's section. They read from [filters] now, falling back to the old home so a profile
+    // written before the move keeps its values.
+    c.filters_enabled = B(L"filters", L"enabled", c.filters_enabled);
+    c.sharpen = F(L"filters", L"sharpen", F(L"nr", L"sharpen", c.sharpen));
+    c.saturation = F(L"filters", L"saturation", F(L"nr", L"saturation", c.saturation));
     c.warmup = I(L"nr", L"warmup", c.warmup);
     c.rebuild_debounce_frames = I(L"nr", L"rebuild_debounce_frames", c.rebuild_debounce_frames);
     c.max_fps = I(L"nr", L"max_fps", c.max_fps);
     c.nr_async = S(L"nr", L"mode", c.nr_async ? L"async" : L"sync") == L"async";
     c.warp = F(L"nr", L"warp", c.warp);
     c.model_max_fps = I(L"nr", L"model_max_fps", c.model_max_fps);
-    c.sharpen = F(L"nr", L"sharpen", c.sharpen);
     c.artcnn = B(L"nr", L"artcnn", c.artcnn);
 
     const std::wstring in = S(L"ofa", L"input", L"960x540");
@@ -164,6 +168,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.hk_quit = ParseHotkey(S(L"hotkeys", L"quit", L"Ctrl+F12"), VK_F12);
     c.hk_fg = ParseHotkey(S(L"hotkeys", L"fg", L"F8"), VK_F8);
     c.hk_hud = ParseHotkey(S(L"hotkeys", L"hud", L"F7"), VK_F7);
+    c.hk_filters = ParseHotkey(S(L"hotkeys", L"filters", L"F6"), VK_F6);
 
     c.log_file = S(L"log", L"file", c.log_file);
     c.stats_every = I(L"log", L"stats_every", c.stats_every);

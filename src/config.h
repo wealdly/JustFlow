@@ -41,6 +41,10 @@ struct Config
     bool  nr_async = false;                // mode=sync (evaluate per frame) | async (decoupled model thread, residual compose)
     float warp = 1.0f;                     // async: residual sampled at uv + mv * warp (this frame's mv only, see PipelineFrame)
     int   model_max_fps = 0;               // async: throttle the model thread (0 = as fast as the leftover GPU allows)
+    // [filters] - its own layer, its own section. Three switches, one per layer, and none of them
+    // reaches into another: [nr] enabled, [filters] enabled, [fg] enabled. `enabled` is a bypass
+    // that KEEPS the tuned values, so a filter A/B does not cost you the numbers you arrived at.
+    bool  filters_enabled = true;
     float sharpen = 0.0f;                  // CAS-style sharpen after the compose, 0 = off (0.3-0.5 typical); live (F11)
     bool  artcnn = false;                  // ArtCNN C4F16_DS luma pass on the model input (CsArtCnn nr_in -> nr_in2); live (F11)
     // [ofa]
@@ -72,7 +76,7 @@ struct Config
     bool  exclude_from_capture = false;
     int   reassert_topmost_every = 300;
     // [hotkeys] (app layer)
-    HotkeySpec hk_toggle, hk_wipe, hk_reload, hk_quit, hk_fg, hk_hud;
+    HotkeySpec hk_toggle, hk_wipe, hk_reload, hk_quit, hk_fg, hk_hud, hk_filters;
     // [log] (file is per profile, the rest app layer)
     std::wstring log_file = L"justflow.log";
     int   stats_every = 180;

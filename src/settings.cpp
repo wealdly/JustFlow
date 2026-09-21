@@ -58,8 +58,9 @@ const Setting kSettings[] = {
     { 1, L"nr", L"ui_correction",     L"UI correction",      Bool,  nullptr, L"1" },
 
     // ---- 2 Filters: ordinary post passes, independent of the neural layer ----------------------
-    { 2, L"nr", L"sharpen",           L"Sharpen",            Float, nullptr, L"0.0" },
-    { 2, L"nr", L"saturation",        L"Vibrance",           Float, nullptr, L"1.10" },
+    { 2, L"filters", L"enabled",      L"Filter layer (F6)",  Bool,  nullptr, L"1" },
+    { 2, L"filters", L"sharpen",      L"Sharpen",            Float, nullptr, L"0.0" },
+    { 2, L"filters", L"saturation",   L"Vibrance",           Float, nullptr, L"1.10" },
 
     // ---- 3 Frame generation ---------------------------------------------------------------------
     { 3, L"fg", L"enabled",           L"Frame generation",   Bool,  nullptr, L"1" },
@@ -82,6 +83,7 @@ const Setting kSettings[] = {
     // ---- 6 Hotkeys ---------------------------------------------------------------------------------
     { 6, L"hotkeys", L"toggle",       L"Neural layer",       Hotkey, nullptr, L"F9" },
     { 6, L"hotkeys", L"fg",           L"Frame generation",   Hotkey, nullptr, L"F8" },
+    { 6, L"hotkeys", L"filters",      L"Filter layer",       Hotkey, nullptr, L"F6" },
     { 6, L"hotkeys", L"hud",          L"Status HUD",         Hotkey, nullptr, L"F7" },
     { 6, L"hotkeys", L"wipe",         L"Wipe compare",       Hotkey, nullptr, L"F10" },
     { 6, L"hotkeys", L"reload",       L"Reload config",      Hotkey, nullptr, L"F11" },
@@ -136,7 +138,7 @@ const PresetKey kPreset[] = {
     { L"nr",  L"model",   { L"0",         L"1",         L"1",         L"1" } },
     { L"nr",  L"work",    { L"1920x1080", L"1920x1080", L"2560x1440", L"3200x1800" } },
     { L"nr",  L"artcnn",  { L"1",         L"0",         L"0",         L"1" } },
-    { L"nr",  L"sharpen", { L"0.4",       L"0.3",       L"0.2",       L"0.0" } },
+    { L"filters", L"sharpen", { L"0.4",   L"0.3",       L"0.2",       L"0.0" } },
     { L"ofa", L"input",   { L"640x360",   L"960x540",   L"960x540",   L"1280x720" } },
 };
 const wchar_t* const kPresetNames[kPresetCount] = { L"High performance", L"Performance", L"Balanced", L"Quality" };
@@ -430,8 +432,9 @@ INT_PTR CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         L"[nr]\n; enabled = the effect as a whole (F9). model = the DLSS model (~12 ms).\n"
         L"; artcnn = ArtCNN (~2.3 ms), which needs no model.\n"
         L"enabled=1\nmodel=0\nartcnn=1\nwork=1920x1080\nchroma=0.25\n\n"
-        L"; filters, applied after the neural layer: sharpen then vibrance.\n"
-        L"sharpen=0.4\nsaturation=1.10\n\n"
+        L"[filters]\n; its own layer, applied after the neural one: sharpen then vibrance.\n"
+        L"; enabled=0 bypasses the layer without losing these values (F6).\n"
+        L"enabled=1\nsharpen=0.4\nsaturation=1.10\n\n"
         L"[ofa]\ninput=960x540\n\n"
         L"[ui]\nfeather=12\n\n"
         L"[fg]\nenabled=1\nmultiplier=2\n\n"
