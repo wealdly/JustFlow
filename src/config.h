@@ -71,6 +71,7 @@ struct Config
     int   fg_multiplier = 2;               // presented frames per rendered frame, 2..4
     bool  fg_pacing_vblank = true;         // pacing=vblank | timer
     bool  fg_mv_dilated = true;            // DLSS-G motionVectorsDilated (see fg.cpp Evaluate)
+    float fg_min_gain = 1.5f;              // governor: pause generation while presented/submitted stays below this (0 = never)
     float fg_phase_ms = 0.0f;              // shifts every scheduled present target (negative = earlier); live (F11)
     // [overlay] (app layer)
     // mode: 0 composed (layered, DWM-composed) | 1 direct (monitor-sized, no redirection bitmap;

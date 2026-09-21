@@ -66,7 +66,10 @@ bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv,
               const UiRect* rects = nullptr, int nrects = 0);
 void FgSubmit(Fg* f, UINT64 render_fence_value, bool reset, LONGLONG cap_qpc, LONGLONG acq_qpc);
 // Live pacing knob (no rebuild): phase_ms shifts every scheduled present target (negative = earlier).
-void FgSetTiming(Fg* f, double phase_ms);
+// min_gain: the governor pauses generation when frames presented / frames submitted stays below
+// this for 2 s (0 = never pause). It re-probes on a 3 s -> 30 s back-off and slews in and out.
+void FgSetTiming(Fg* f, double phase_ms, double min_gain);
+bool FgPaused(Fg* f);   // generation currently switched off by the governor
 bool FgFailed(const Fg* f);
 
 struct FgStatsOut
@@ -76,6 +79,7 @@ struct FgStatsOut
     // why a real frame generated nothing: these three plus gen_shown account for every real frame
     UINT no_pair = 0;                  // sequence gap or reset: nothing to interpolate against
     UINT disabled = 0;                 // DLSS-G raised pOutputDisableInterpolation for the pair
+    UINT paused = 0;                   // real frames presented while the governor had generation off
     UINT preempts = 0;                 // a newer slot arrived before the generated frame was due
     // Sums, not means: FgStats is drained every frame and the caller aggregates over its own
     // window. A mean here could not be added up, and silently read as -1.

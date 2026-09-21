@@ -187,7 +187,8 @@ int RunBench(int argc, char** argv)
     if (p->fg)
     {
         FgStatsOut fs; FgStats(p->fg, fs); StageStats sp; sp.v = fs.spacing_ms;
-        Log("[fg] bench: %u frames presented (%.1f fps), %u dropped, spacing %.2f/%.2f ms (med/p95, %zu samples)", fs.presented, fs.presented * 1000.0 / wall, fs.drops, sp.med(), sp.p95(), sp.v.size());
+        const double sp_max = sp.v.empty() ? -1.0 : *std::max_element(sp.v.begin(), sp.v.end());   // a single hitch hides from p95
+        Log("[fg] bench: %u frames presented (%.1f fps), %u dropped, spacing %.2f/%.2f/%.2f ms (med/p95/MAX, %zu samples), %u paused", fs.presented, fs.presented * 1000.0 / wall, fs.drops, sp.med(), sp.p95(), sp_max, sp.v.size(), fs.paused);
     }
 
     // The UI restore on generated frames: inside a mask rect a generated frame must be pixel-exact

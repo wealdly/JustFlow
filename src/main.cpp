@@ -431,7 +431,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
             if (!p->fg && want > 1) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, 1, c.fg_pacing_vblank, c.fg_mv_dilated); }
             if (!p->fg) { Log("[fg] passthrough presenter create failed"); return false; }
         }
-        FgSetTiming(p->fg, c.fg_phase_ms);   // ponytail: one atomic store per frame, no reload plumbing
+        FgSetTiming(p->fg, c.fg_phase_ms, c.fg_min_gain);   // ponytail: one atomic store per frame, no reload plumbing
     }
     auto stamp = [&](int i) { if (c.gpu_timestamps) GpuStamp(g, cl, i); };
     // async: the residual composed this frame = the newest published one (the queue waits for it once
@@ -1091,7 +1091,7 @@ static int RealMain(int argc, char** argv)
                 FgStatsOut fs; FgStats(p->fg, fs);
                 fs_agg.presented += fs.presented; fs_agg.drops += fs.drops; hud_presented += fs.presented;
                 fs_agg.gen_shown += fs.gen_shown; fs_agg.no_pair += fs.no_pair;
-                fs_agg.disabled += fs.disabled; fs_agg.preempts += fs.preempts;
+                fs_agg.disabled += fs.disabled; fs_agg.preempts += fs.preempts; fs_agg.paused += fs.paused;
                 hud_gen += fs.gen_shown; hud_nopair += fs.no_pair;
                 hud_disabled += fs.disabled; hud_preempt += fs.preempts;
                 fs_agg.vblank_wait_sum_ms += fs.vblank_wait_sum_ms; fs_agg.vblank_waits += fs.vblank_waits;
@@ -1197,7 +1197,8 @@ static int RealMain(int argc, char** argv)
                 else snprintf(nr, sizeof nr, "NR %.1f ms %up", std::max(0.0, p->st[PS_EVAL].med()), p->wh);
                 char mask[8]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "-");
                 const char* filt_s = !cfg.filters_enabled ? "off" : (cfg.sharpen > 0 || cfg.saturation != 1.0f) ? "on" : "-";
-                if (p->fg && FgMultiplier(p->fg) > 1) snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG %dX %.1fms  mask %s", nr, filt_s, FgMultiplier(p->fg), std::max(0.0, FgEvalMs(p->fg, nullptr)), mask);
+                if (p->fg && FgMultiplier(p->fg) > 1 && FgPaused(p->fg)) snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG auto-paused  mask %s", nr, filt_s, mask);
+                else if (p->fg && FgMultiplier(p->fg) > 1) snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG %dX %.1fms  mask %s", nr, filt_s, FgMultiplier(p->fg), std::max(0.0, FgEvalMs(p->fg, nullptr)), mask);
                 else snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG off  mask %s", nr, filt_s, mask);
                 // Why FG is or is not paying off: shown generated frames, then the gate that ate the rest.
                 if (p->fg && FgMultiplier(p->fg) > 1 && hud_frames)
@@ -1227,9 +1228,9 @@ static int RealMain(int argc, char** argv)
                 double pres_prev = -1, pres_call = -1, pres_total = -1;
                 if (p->ov) OverlayPresentStats(p->ov, pres_prev, pres_call, pres_total);
                 char mask[16]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "none");
-                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f acq_ms=%.2f dda_accum=%.2f static_skips=%u rate_drops=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u fg_gen=%u fg_nopair=%u fg_disabled=%u fg_preempt=%u fg_eval_ms=%.2f/%.2f(med/p95) pres_ms=%.2f(prev %.2f, call %.2f) vbwait_ms=%.2f recwait_ms=%.2f/%u model_fps=%.1f model_ms=%.2f residual_age_frames=%.1f mask=%s vram_mb=%.0f/%.0f",
+                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f acq_ms=%.2f dda_accum=%.2f static_skips=%u rate_drops=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u fg_gen=%u fg_nopair=%u fg_disabled=%u fg_preempt=%u fg_paused=%u fg_eval_ms=%.2f/%.2f(med/p95) pres_ms=%.2f(prev %.2f, call %.2f) vbwait_ms=%.2f recwait_ms=%.2f/%u model_fps=%.1f model_ms=%.2f residual_age_frames=%.1f mask=%s vram_mb=%.0f/%.0f",
                     cap_fps, p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), acq_ms.med(), CaptureAccumMean(cap), skips, rate_drops, age.med(), pipe.med(),
-                    fg_fps, spacing.med(), spacing.p95(), fs.drops, fs.gen_shown, fs.no_pair, fs.disabled, fs.preempts, fg_eval, fg_eval_p95, pres_total, pres_prev, pres_call, fs.vblank_waits ? fs.vblank_wait_sum_ms / fs.vblank_waits : -1.0,
+                    fg_fps, spacing.med(), spacing.p95(), fs.drops, fs.gen_shown, fs.no_pair, fs.disabled, fs.preempts, fs.paused, fg_eval, fg_eval_p95, pres_total, pres_prev, pres_call, fs.vblank_waits ? fs.vblank_wait_sum_ms / fs.vblank_waits : -1.0,
                     fs.record_waits ? fs.record_wait_sum_ms / fs.record_waits : -1.0, fs.record_waits,
                     model_evals * 1000.0 / span, mm.med(), p->residual_age.med(), mask, vram_used, vram_budget);
                 _snwprintf_s(status, _TRUNCATE, L"%ls  cap %.0f  out %.0f fps  age %.0f ms", profile_name().c_str(), cap_fps, fg_fps, std::max(0.0, age.med()));

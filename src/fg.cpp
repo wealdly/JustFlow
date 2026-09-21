@@ -62,6 +62,9 @@ struct Fg
     int      count = 1;                      // generated frames per real frame (0 = passthrough)
     bool     vblank = true, mv_dilated = true;
     std::atomic<double> phase{ 0.0 };        // FgSetTiming (main) -> Presenter
+    std::atomic<double> min_gain{ 1.5 };     // governor threshold: presented / submitted (0 = governor off)
+    std::atomic<bool>   paused{ false };     // governor has generation switched off (HUD)
+    std::atomic<UINT>   paused_frames{ 0 };  // real frames presented while paused
     std::wstring dir;
     const wchar_t* path_list[1] = {};
     NVSDK_NGX_FeatureCommonInfo common = {};
@@ -115,9 +118,9 @@ static NVSDK_NGX_Result SafeEvaluate(Fg* f, ID3D12GraphicsCommandList* cl, NVSDK
 // Copy src (a texture of slot s) into the overlay backbuffer (present queue, after the slot's
 // evaluate on the FG queue; passthrough: after its render fence) and present. `real`: this is the
 // slot's real frame (latency stats).
-static bool Present(Fg* f, ID3D12Resource* src, const FgSlot* s, bool real)
+static bool Present(Fg* f, ID3D12Resource* src, const FgSlot* s, bool real, bool evaluated = true)
 {
-    const bool ok = f->count ? OverlayPresent(f->ov, src, f->ctx.fence, s->eval_fence) : OverlayPresent(f->ov, src, f->g->fence, s->fence);
+    const bool ok = (f->count && evaluated) ? OverlayPresent(f->ov, src, f->ctx.fence, s->eval_fence) : OverlayPresent(f->ov, src, f->g->fence, s->fence);
     if (!ok) return Fail(f, "Present failed");
     const FgSlot* real_of = real ? s : nullptr;
     const LONGLONG pq = OverlayPresentQpc(f->ov);
@@ -249,6 +252,18 @@ static void Presenter(Fg* f)
     using clock = std::chrono::steady_clock;
     double vb = f->vblank ? OverlayVBlankMs(f->ov) : 0;   // 0 = timer pacing
     UINT64 prev = 0; double prev_real_target = 0;
+    // ---- governor ---------------------------------------------------------------------------------
+    // Frame generation is only worth its GPU time and its added latency while it is actually
+    // multiplying the frame rate. Gain = frames PRESENTED / frames SUBMITTED, per ~1 s window -
+    // against submitted, not against the real frames we happened to show: a window that showed 52
+    // real + 34 generated out of 107 submitted reads 1.65x the naive way and is really 0.8x.
+    // Two bad windows pause generation (no Evaluate at all - dropped generated frames were still
+    // being paid for); a probe re-engages after a back-off that doubles 3 s -> 30 s while it keeps
+    // failing. The switch itself must not hitch: with generation on, the real frame is held back
+    // count*L behind its arrival, so stepping that hold to zero collapses one interval by half.
+    // DRAIN and RAMP slew it by 10% a frame instead - about a tenth of a second either way.
+    enum { G_ENGAGED, G_DRAIN, G_PAUSED, G_RAMP }; int gstate = G_ENGAGED;
+    double hold = 0, gwin_t0 = NowMs(), backoff = 3000.0, resume_at = 0; UINT64 gwin_seq0 = 0; UINT gwin_presented = 0; int gbad = 0;
     auto newer_ready = [&](UINT64 seq) { for (auto& x : f->slots) if (x.state == 2 && x.seq > seq) return true; return false; };
     // Pre-emption is gone, and it is only safe to remove it BECAUSE the pick above now takes the
     // newest slot and frees the rest. Under the old oldest-first FIFO it was load-bearing - the
@@ -286,7 +301,7 @@ static void Presenter(Fg* f)
     };
     while (!f->stop && !f->failed)
     {
-        FgSlot* s = nullptr;
+        FgSlot* s = nullptr; UINT64 seq_now = 0;
         {
             std::unique_lock<std::mutex> lk(f->mu);
             f->cv.wait(lk, [&] { return f->stop || newer_ready(0); });
@@ -304,6 +319,7 @@ static void Presenter(Fg* f)
             for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq > s->seq)) s = &x;
             for (auto& x : f->slots) if (x.state == 2 && &x != s) { x.state = 0; ++f->drops; }
             s->state = 3;
+            seq_now = f->seq;
         }
         bool ok = true;
         bool allow = false;
@@ -318,6 +334,33 @@ static void Presenter(Fg* f)
         // which `span` has just measured. Requiring seq == prev + 1 spent a generated frame on
         // every dropped one: fg_drops and fg_nopair came back equal on every single line.
         const bool interp = s->interpolate && prev != 0 && span < 100.0;
+        const double full_hold = span * f->count / (f->count + 1);   // how far the real frame trails its arrival while generating
+        const double gmin = f->min_gain.load(std::memory_order_relaxed);
+        if (gmin <= 0 && gstate != G_ENGAGED) { gstate = G_RAMP; }   // governor switched off live: come back smoothly
+        if (gstate == G_PAUSED && NowMs() >= resume_at) { gstate = G_RAMP; hold = 0; prev = 0; Log("[fg] governor: probing - generation back on"); }
+        if (gstate == G_DRAIN || gstate == G_PAUSED)
+        {
+            // No Evaluate: the point of pausing is to stop paying. The real frame goes out `hold` after
+            // it lands, and hold drains to zero a tenth at a time so no single interval takes the step.
+            ok = GpuCtxWait(f->ctx, f->g->fence, s->fence, 10000) || Fail(f, "render fence wait (device removed?)");
+            if (gstate == G_DRAIN) { hold = std::min(hold, full_hold) - full_hold * 0.1; if (hold <= 0) { hold = 0; gstate = G_PAUSED; } }
+            if (ok && wait_until(NowMs() + hold)) ok = Present(f, s->real, s, true, false);
+            ++f->paused_frames; prev = 0; prev_real_target = 0;
+        }
+        else if (gstate == G_RAMP)
+        {
+            // Evaluate every frame so DLSS-G's history is warm, show none of it yet, and grow the hold
+            // back to where generation needs it. The cadence is then handed to the engaged path whole:
+            // its next anchor is prev_real_target + L, which is exactly one span after this frame.
+            ok = Evaluate(f, s, interp);
+            hold = std::min(full_hold, hold + full_hold * 0.1);
+            const double target = NowMs() + hold;
+            if (ok && wait_until(target)) { ok = EvaluateResolve(f, s, allow) && Present(f, s->real, s, true); }
+            prev_real_target = target;
+            if (hold >= full_hold) { gstate = G_ENGAGED; f->paused = false; gwin_t0 = NowMs(); gwin_seq0 = seq_now; gwin_presented = 0; gbad = 0; }
+        }
+        else
+        {
         if (ok) ok = Evaluate(f, s, interp);
         if (ok)
         {
@@ -343,15 +386,33 @@ static void Presenter(Fg* f)
                     if (i && !wait_until(target)) { preempted = true; ++f->preempts; break; }   // i == 0: waited above
                     if (NowMs() - target > L * 0.5 + vb * 0.5) { ++f->drops; continue; }   // stale: skip, never burst
                     if (!Present(f, s->gen[i], s, false)) { ok = false; break; }
-                    ++f->gen_shown;
+                    ++f->gen_shown; ++gwin_presented;
                 }
                 real_target = preempted ? NowMs() : anchor + f->count * L;
             }
             // The real frame is never skipped for lateness: only `stop` interrupts (seq MAX = no pre-emption).
-            if (ok && wait_until(real_target + ph)) ok = Present(f, s->real, s, true);
+            if (ok && wait_until(real_target + ph)) { ok = Present(f, s->real, s, true); ++gwin_presented; }
             prev_real_target = real_target;
+            const double now = NowMs();
+            if (gmin > 0 && now - gwin_t0 >= 1000.0)
+            {
+                const UINT64 submitted = seq_now - gwin_seq0;
+                if (submitted >= 20)   // too few frames to judge (a paused game, a loading screen)
+                {
+                    const double gain = (double)gwin_presented / (double)submitted;
+                    if (gain >= gmin) { gbad = 0; backoff = 3000.0; }
+                    else if (++gbad >= 2)
+                    {
+                        Log("[fg] governor: gain %.2fx < %.2fx for 2 s - generation paused, next probe in %.0f s", gain, gmin, backoff / 1000.0);
+                        gstate = G_DRAIN; hold = full_hold; gbad = 0; f->paused = true;
+                        resume_at = now + backoff; backoff = std::min(backoff * 2.0, 30000.0);
+                    }
+                }
+                gwin_t0 = now; gwin_seq0 = seq_now; gwin_presented = 0;
+            }
         }
-        prev = s->seq;
+        }
+        if (gstate != G_DRAIN && gstate != G_PAUSED) prev = s->seq;
         { std::lock_guard<std::mutex> lk(f->mu); s->state = 0; }
         f->cv.notify_all();   // FgRecord may be waiting for a free slot
     }
@@ -515,15 +576,17 @@ double FgEvalMs(Fg* f, double* p95)
     if (p95) *p95 = v[std::min(v.size() - 1, (size_t)(v.size() * 0.95))];
     return v[v.size() / 2];
 }
-void FgSetTiming(Fg* f, double phase_ms)
+void FgSetTiming(Fg* f, double phase_ms, double min_gain)
 {
     f->phase.store(std::clamp(phase_ms, -50.0, 50.0), std::memory_order_relaxed);
+    f->min_gain.store(std::clamp(min_gain, 0.0, 8.0), std::memory_order_relaxed);
 }
 void FgStats(Fg* f, FgStatsOut& out)
 {
     out.presented = f->presented.exchange(0); out.drops = f->drops.exchange(0);
     out.no_pair = f->no_pair.exchange(0); out.disabled = f->disabled.exchange(0);
     out.preempts = f->preempts.exchange(0); out.gen_shown = f->gen_shown.exchange(0);
+    out.paused = f->paused_frames.exchange(0);
     out.vblank_waits = (UINT)f->vbw_n.exchange(0); out.vblank_wait_sum_ms = (double)f->vbw_us.exchange(0) / 1000.0;
     out.record_waits = (UINT)f->rec_n.exchange(0); out.record_wait_sum_ms = (double)f->rec_us.exchange(0) / 1000.0;
     std::lock_guard<std::mutex> lk(f->mu);
@@ -535,6 +598,8 @@ ID3D12Resource* FgDebugGen(Fg* f, int i)
 {
     return (f && f->dbg && i >= 0 && i < f->count) ? f->dbg->gen[i] : nullptr;
 }
+
+bool FgPaused(Fg* f) { return f && f->paused.load(std::memory_order_relaxed); }
 
 ID3D12Resource* FgDebugReal(Fg* f) { return (f && f->dbg) ? f->dbg->real : nullptr; }
 
