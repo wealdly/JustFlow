@@ -67,7 +67,7 @@ add_executable(justflow
 add_dependencies(justflow shaders nvngx_dll_justflow)
 target_include_directories(justflow PRIVATE src ${CMAKE_BINARY_DIR}/gen third_party/ngx/include third_party/nvofa "${CPPWINRT_INC}")
 target_link_directories(justflow PRIVATE third_party/ngx/lib)
-target_link_libraries(justflow PRIVATE d3d11 d3d12 dxgi dwmapi user32 gdi32 shell32 comctl32 windowscodecs WindowsApp nvsdk_ngx_d)
+target_link_libraries(justflow PRIVATE d3d11 d3d12 dxgi dwmapi winmm user32 gdi32 shell32 comctl32 windowscodecs WindowsApp nvsdk_ngx_d)
 target_compile_options(justflow PRIVATE /await:strict)   # C++/WinRT coroutine keywords are not used, but the headers want it on 14.44
 set_target_properties(justflow PROPERTIES WIN32_EXECUTABLE ON)    # tray app: no console window; attaches to a parent console when launched from one
 

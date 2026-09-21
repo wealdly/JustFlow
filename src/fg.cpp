@@ -404,6 +404,19 @@ static bool CreateFeature(Fg* f, const char* how)
     return ok;
 }
 
+// The presenter is latency-critical and tiny: it wakes, presents, and sleeps again, using about 6%
+// of one core. What hurts it is not starvation but being scheduled LATE - and WoW pegs a couple of
+// cores, so landing on one of those costs it a slice of a 4.17 ms vblank budget. Priority, not
+// affinity: we must never inspect the game's threads to find its hot cores (that is exactly the
+// process poking we refuse to do), and a hardcoded core is a guess that makes things worse when it
+// collides. ABOVE_NORMAL just wins the race for the ~50 us it needs, then yields.
+// Fail-safe: a failure here is ignored - the thread runs at normal priority, as it always did.
+static void RaisePresenterPriority(std::thread& t)
+{
+    if (!SetThreadPriority(t.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL))
+        Log("[fg] presenter priority unchanged (err %lu) - normal priority is fine, just jitterier", GetLastError());
+}
+
 Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier, bool vblank_pacing, bool mv_dilated)
 {
     Fg* f = new Fg;
@@ -419,6 +432,7 @@ Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UI
         for (auto& s : f->slots)
             if (!(s.real = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_real"))) return fail("slot textures");
         f->thread = std::thread(Passthrough, f);
+        RaisePresenterPriority(f->thread);
         Log("[fg] passthrough presenter %ux%u pacing=%s", out_w, out_h, vblank_pacing ? "vblank" : "timer");
         return f;
     }
@@ -465,6 +479,7 @@ Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UI
             if (!(s.gen[i] = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_gen"))) return fail("slot textures");
     }
     f->thread = std::thread(Presenter, f);
+    RaisePresenterPriority(f->thread);
     Log("[fg] feature created %ux%u mv %ux%u multiplier %d pacing=%s mv_dilated=%d", out_w, out_h, mv_w, mv_h, f->count + 1, vblank_pacing ? "vblank" : "timer", mv_dilated ? 1 : 0);
     return f;
 }

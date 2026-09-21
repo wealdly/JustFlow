@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <timeapi.h>
 #include <cstdlib>
 #include <cstring>
 
@@ -782,6 +783,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 static int RealMain(int argc, char** argv)
 {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    // 1 ms timer resolution. Windows' default is 15.6 ms, and a Sleep(1) that waited a whole 15.6 ms
+    // in the capture loop was the single worst bug of this project - it stalled a frame every time
+    // the cursor moved. The same granularity applies to condition_variable timed waits, which is how
+    // the presenter paces when vblank pacing is unavailable: a 4.17 ms deadline would become 15.6 ms
+    // and the fallback would be worse than no pacing at all. Per-process since Win10 2004, so this
+    // does not change the timer for the rest of the system.
+    // Fail-safe: if it fails we are exactly where we were, and the vblank path does not need it.
+    // Reported after LogInit, not here - a silent failure is what made the Sleep(1) bug take a day.
+    const bool timer_1ms = timeBeginPeriod(1) == TIMERR_NOERROR;
     int dump = 0, preset = -1; bool settings_only = false;
     std::wstring ini_arg;   // --ini <file>: an explicit profile (next to the exe, or a path); else PickProfile
     for (int i = 1; i < argc; ++i)
@@ -820,6 +830,7 @@ static int RealMain(int argc, char** argv)
     }
     std::wstring log_path = JoinPath(dir, cfg.log_file);
     LogInit(log_path.c_str());
+    if (!timer_1ms) Log("[main] 1 ms timer resolution refused - condition_variable waits fall back to ~15.6 ms, so timer pacing will be coarse");
     LogConfigFiles(app_path, ini_path, have);
     Log("[main] profile %ls (%zu in profiles\\)", ini_path.c_str(), profiles.size());
     Gpu g;
