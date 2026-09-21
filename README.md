@@ -9,13 +9,15 @@ no injection, no input. The same mechanisms OBS and overlay apps use, nothing mo
   carried back to the native frame as a motion-warped residual. Fine detail stays native; lighting,
   tone and materials come from the model.
 - **Frame generation** (DLSS frame generation, desktop path) on the composed frame with hardware
-  optical-flow motion vectors, paced to the display's vblank.
+  optical-flow motion vectors, paced to the display's vblank. Generated frames get the UI copied
+  back out of the real frame, so text and action bars do not smear with the world.
 - **Capture** by DXGI Desktop Duplication at the monitor's refresh rate (window capture fallback).
 - **Per-game profiles**, global hotkeys, a tray menu, a live before/after wipe.
 
 Out of the box it runs as a frame generator: **frame generation on, neural rendering off**
 (`[fg] enabled=1`, `[nr] enabled=0`). FG is the cheap half - about 1.8 ms of GPU per frame at
-4K - while the model costs 6.5 ms at 1440p and wants a frame-rate budget of its own. F9 turns
+4K - while the model costs 6.5 ms at 1440p on an idle card, and noticeably more with a game
+already loading the GPU, so it wants a frame-rate budget of its own. F9 turns
 the model on when you want it, and it is created on demand rather than at startup, so leaving
 it off costs no VRAM. Both toggles are remembered.
 
@@ -48,7 +50,8 @@ justflow.exe --bench frame.png --frames 120   pipeline timing on a PNG, no game 
 ```
 
 Nothing has to be edited by hand: **Settings...** in the tray menu opens a tabbed window over the
-same keys (Quality, Look, Frame gen, Performance, Display, Hotkeys) on a monitor the game is not
+same keys, one tab per pipeline layer (Neural, Model, Filters, Frame gen, Display, System,
+Hotkeys), on a monitor the game is not
 on, so it never lands over what you are playing. It writes each key to the file it belongs
 in, and applies it on OK - live keys immediately, create-latched ones (model size, look) as one
 debounced rebuild, and the handful the capture and overlay only read when they are created
@@ -63,7 +66,7 @@ Two ini files, both next to the exe:
 - `justflow.ini` — **app settings**, this machine, every game: `[hotkeys]`, `[ui]` toast and HUD
   (`toast`, `toast_scale`, `hud`, `hud_corner`, `hud_scale`), `[overlay]`, `[log]` `stats_every` /
   `gpu_timestamps` / `selftest`, `[app] profile` (startup profile: `auto` or a profile name),
-  `[ofa] dll_path`, `[nr] create_style` / `param_block`.
+  `[ofa] dll_path`, `[nr] param_block`.
 - `profiles\<game>.ini` — **game settings**: `[capture]` (mode, window match, cursor, border),
   `[nr]` (work size, look, mode, warp, caps, sharpen...), `[ofa]` input/grid/zero_below,
   `[ui]` mask/mask_every/feather/rectN, `[fg]`, and `[log] file`.

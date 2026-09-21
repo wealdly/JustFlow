@@ -693,9 +693,9 @@ static void DumpFrame(Pipeline* p, const std::wstring& dir, int i)
     std::vector<uint8_t> px((size_t)p->w * p->h * 4);
     wchar_t path[MAX_PATH];
     if (GpuReadbackTex(*p->g, p->color4k, px.data(), p->w, p->h, 4, NPSR))
-    { swprintf_s(path, L"%ls\\dump_%03d_native.png", dir.c_str(), i); SavePngRgba(path, px.data(), p->w, p->h); }
+    { _snwprintf_s(path, _TRUNCATE, L"%ls\\dump_%03d_native.png", dir.c_str(), i); SavePngRgba(path, px.data(), p->w, p->h); }
     if (GpuReadbackTex(*p->g, p->shown, px.data(), p->w, p->h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE))
-    { swprintf_s(path, L"%ls\\dump_%03d_out.png", dir.c_str(), i); SavePngRgba(path, px.data(), p->w, p->h); }
+    { _snwprintf_s(path, _TRUNCATE, L"%ls\\dump_%03d_out.png", dir.c_str(), i); SavePngRgba(path, px.data(), p->w, p->h); }
     Log("[main] dumped frame %d", i);
 }
 

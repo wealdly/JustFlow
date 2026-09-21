@@ -1,9 +1,10 @@
-// Spike 0: does the NR runtime accept a given work size, which create style / parameter block
-// works, and what does one evaluate cost? One child process per cell so a hang cannot poison
-// the next cell; the parent is the watchdog.
+// Spike 0: does the NR runtime accept a given work size, which parameter block works, and what
+// does one evaluate cost? One child process per cell so a hang cannot poison the next cell; the
+// parent is the watchdog. NB: a cell passing here only means it RAN - use --bench for the
+// coverage check that says the model actually wrote the whole frame.
 //
 //   justflow_spike                      run the whole grid, print a table, write spike_results.txt
-//   justflow_spike --cell W H A|B 1|2|3 [--png file]   one cell (what the parent spawns)
+//   justflow_spike --cell W H 1|2|3 [--png file]       one cell (what the parent spawns)
 #include "d3d.h"
 #include "log.h"
 #include "ngx_nr.h"
