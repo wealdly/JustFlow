@@ -142,8 +142,10 @@ int RunBench(int argc, char** argv)
     const bool toast_test = cfg.selftest && tex.size() == 1;
     static const char* const kToastText = "toast self-test";
     std::vector<uint8_t> with_toast;
+    int last_in = 0;   // input index of the final frame: warm-up frames are not counted, so it is not (frames-1) % n
     for (int i = 0; evaluated < frames && i < frames + slack; ++i)
     {
+        last_in = i % (int)tex.size();
         if (toast_test && i == 5) { p->cfg.toast = true; PipelineToast(p, "%s", kToastText); }
         // The thing every other bench run lacks: a reload while running. Fresh processes create the
         // feature once at the right size, so they could never see a rebuild that failed to rebuild.
@@ -243,6 +245,12 @@ int RunBench(int argc, char** argv)
                 const float vx = half(q[0]), vy = half(q[1]);
                 if (!std::isfinite(vx) || !std::isfinite(vy)) { ++bad; continue; }
                 if (vx != 0.0f || vy != 0.0f) { ++nz; xs.push_back(vx); ys.push_back(vy); }
+            }
+            {   // the raw field, for scoring against ground truth (tools/scene exports exact motion)
+                std::vector<float> xy((size_t)ww * wh * 2);
+                for (size_t i = 0; i < (size_t)ww * wh; ++i) { const uint16_t* q = (const uint16_t*)&raw[i * 4]; xy[i * 2] = half(q[0]); xy[i * 2 + 1] = half(q[1]); }
+                FILE* mf = nullptr; if (_wfopen_s(&mf, L"mv_bench.f32", L"wb") == 0 && mf) { fwrite(xy.data(), sizeof(float), xy.size(), mf); fclose(mf); }
+                Log("[bench] mv_bench.f32 = input frame %d vs the one before it%s", last_in, last_in == 0 && tex.size() > 1 ? " (the WRAP pair: a scene cut, not motion)" : "");
             }
             auto med = [](std::vector<float>& v) { if (v.empty()) return 0.0f; std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
             // Left and right halves separately: a rigid pan cannot tell a coarse flow grid from a
