@@ -187,10 +187,26 @@ bool NrCreate(Nr* n, ID3D12GraphicsCommandList* cl, const NrConfig& cfg)
     return true;
 }
 
+bool NrMatches(const Nr* n, UINT w, UINT h) { return n && n->feature && n->live.work_w == w && n->live.work_h == h; }
+
 unsigned NrEvaluate(Nr* n, ID3D12GraphicsCommandList* cl, ID3D12Resource* color, ID3D12Resource* mv, ID3D12Resource* output, bool reset, float exposure_scale)
 {
     if (!n->feature) return NVSDK_NGX_Result_FAIL_FeatureNotFound;
     const UINT w = n->live.work_w, h = n->live.work_h;
+    // The feature and the textures must be the same size, checked HERE because every caller comes
+    // through here. A feature larger than the textures fails with InvalidParameter on every frame; a
+    // feature SMALLER than them succeeds and writes only a top-left subrect, leaving the rest of
+    // the output at zero - which composes to a dark frame with a correct corner. That was the
+    // long-running "renders in the upper left" bug: a live work-size change that left the two out
+    // of step. Refusing the call shows native instead, until the rebuild brings them back in line.
+    {
+        const D3D12_RESOURCE_DESC oc = output->GetDesc(), ic = color->GetDesc();
+        if (oc.Width != w || oc.Height != h || ic.Width != w || ic.Height != h)
+        {
+            n->last_error = "work textures do not match the feature size";
+            return NVSDK_NGX_Result_FAIL_InvalidParameter;
+        }
+    }
     n->params->Reset();
     SetRes(n, "DLSSNR.Color", color); SetRes(n, "DLSSNR.Output", output); SetRes(n, "DLSSNR.MVec", mv);
     SetU(n, "DLSSNR.ColorSubrectBaseX", 0u); SetU(n, "DLSSNR.ColorSubrectBaseY", 0u);

@@ -407,7 +407,11 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         p->create_pending = true; reset = true;
         PipelineToast(p, "Rebuilding model %ux%u...", p->ww, p->wh); p->model_toast_pending = true;
     }
-    const bool async = c.nr_async && p->nr && !p->model_failed;
+    // model_on, not p->nr: the object outlives the setting. Once the model had been on, turning it
+    // off left p->nr alive, so every gate below still fired - measured live as ~5000 failing
+    // EvaluateFeature calls with model=0, each one taking the NgxMutex that DLSS-G also needs.
+    const bool model_on = c.nr_model && p->nr;
+    const bool async = c.nr_async && model_on && !p->model_failed;
     if (async && !p->model_thread.joinable() && !StartModel(p)) return false;
     // The presenter is always on while an overlay exists: passthrough (multiplier 1) with FG off,
     // generation with cfg.fg_enabled (ini, F8). A generation failure turns the flag off (F8 retries)
@@ -469,7 +473,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     CsGray(g, p->sh, cl, p->color4k, p->w, p->h, p->gray, p->gw, p->gh);
     // Only the model and ArtCNN read nr_in. With neither (FG-only, the default), the compose
     // takes the native path and never samples it, so this whole area filter was dead work.
-    if (!async && (p->nr || c.artcnn)) CsDownscale(g, p->sh, cl, p->color4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
+    if (!async && (model_on || c.artcnn)) CsDownscale(g, p->sh, cl, p->color4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
     stamp(3);
     GpuBarrier(cl, p->nr_in, UAV, NPSR);
     if (!async && c.artcnn)   // the evaluate reads nr_in2; compose keeps nr_in so the residual carries the ArtCNN delta too
@@ -556,7 +560,21 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         GpuBarrier(cl, flow3, NPSR, COMMON);
     }
 
-    if (!async && p->nr && !NrReady(p->nr) && p->create_pending)
+    // Self-heal: a ready feature at the wrong size (NrEvaluate refuses it) schedules the ordinary
+    // rebuild, which reallocates and recreates in step. Without this a mismatch would sit on native
+    // forever, because nothing else would notice.
+    // Not while a create is already pending - that create IS the heal, and re-arming the countdown
+    // here starved it forever (the create waits for countdown == 0). --rework in bench caught that.
+    if (!async && model_on && NrReady(p->nr) && !NrMatches(p->nr, p->ww, p->wh) && p->rebuild_countdown == 0 && !p->create_pending)
+    { Log("[nr] feature size does not match the %ux%u work textures - rebuilding", p->ww, p->wh); p->rebuild_countdown = 1; }
+    // Not while a rebuild is counting down: that rebuild reallocates the work textures and then
+    // sets create_pending itself. Creating here used the NEW config size against the OLD textures.
+    // NOT gated on !NrReady: a rebuild leaves the old feature ready, and that gate meant the rebuild
+    // set create_pending, toasted "Rebuilding model" and then never recreated anything - every live
+    // change to a create-latched key (work size, style, local tone/structure) was silently ignored
+    // in sync mode. NrCreate retires the old feature itself, and this branch returns before any
+    // evaluate, so create and evaluate still never share a list.
+    if (!async && model_on && p->create_pending && p->rebuild_countdown == 0)
     {
         p->create_pending = false;
         const bool ok = NrCreate(p->nr, cl, ConfigToNr(c));
@@ -568,7 +586,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     }
 
     bool evaluated = false;
-    if (!async && p->nr && NrReady(p->nr) && !p->bypass)
+    if (!async && model_on && NrReady(p->nr) && !p->bypass)
     {
         stamp(4);
         const unsigned r = NrEvaluate(p->nr, cl, c.artcnn ? p->nr_in2 : p->nr_in, p->mv, p->nr_out, reset, c.exposure_scale);
@@ -898,7 +916,13 @@ static int RealMain(int argc, char** argv)
         cfg.nr_enabled = p->cfg.nr_enabled = !p->bypass;
         persist(L"nr", L"enabled", !p->bypass);
         Log("[main] bypass %s", p->bypass ? "on" : "off");
-        PipelineToast(p, "JustFlow: effect %s", p->bypass ? "OFF" : "ON");
+        // Say what F9 actually switched. The layer can be EMPTY (model=0, artcnn=0 - the FG-only
+        // default), and "effect ON" over nothing read as a broken hotkey.
+        if (p->bypass) PipelineToast(p, "Neural layer OFF");
+        else if (p->cfg.nr_model && p->cfg.artcnn) PipelineToast(p, "Neural layer ON: ArtCNN + DLSS model");
+        else if (p->cfg.nr_model) PipelineToast(p, "Neural layer ON: DLSS model");
+        else if (p->cfg.artcnn) PipelineToast(p, "Neural layer ON: ArtCNN");
+        else PipelineToast(p, "Neural layer ON but EMPTY - pick ArtCNN or DLSS model in Settings");
         tray_state();
     };
     auto cycle_wipe = [&] { if (!p) return; p->wipe = (p->wipe + 1) % 3; p->wipe_t0 = NowMs(); Log("[main] wipe %d", p->wipe); PipelineToast(p, "Wipe: %s", p->wipe == 1 ? "split" : p->wipe == 2 ? "sweep" : "off"); tray_state(); };
@@ -1160,7 +1184,7 @@ static int RealMain(int argc, char** argv)
                 // Which LAYERS are live, not which settings are set: the three switches are
                 // independent, so the HUD has to be able to say "neural off, filters on, FG on".
                 if (p->bypass) strcpy_s(nr, "neural off");
-                else if (!p->nr) strcpy_s(nr, cfg.artcnn ? "ArtCNN only" : "neural idle");
+                else if (!p->nr || !cfg.nr_model) strcpy_s(nr, cfg.artcnn ? "ArtCNN only" : "neural idle");   // the setting, not the object
                 else if (cfg.nr_async)
                 {
                     double ms; { std::lock_guard<std::mutex> lk(p->pub_mu); ms = p->model_ms.med(); }

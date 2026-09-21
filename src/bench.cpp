@@ -84,12 +84,14 @@ static std::vector<std::wstring> ListPngs(const std::wstring& path)
 int RunBench(int argc, char** argv)
 {
     std::wstring input, ini; int frames = 120; UINT work_w = 0, work_h = 0; bool present = true;
+    UINT rework_w = 0, rework_h = 0;   // --rework WxH: change the work size LIVE a third of the way in
     for (int i = 1; i < argc; ++i)
     {
         if (!strcmp(argv[i], "--bench") && i + 1 < argc) { const char* s = argv[++i]; input.assign(s, s + strlen(s)); }
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--work") && i + 1 < argc) sscanf_s(argv[++i], "%ux%u", &work_w, &work_h);
         else if (!strcmp(argv[i], "--no-present")) present = false;
+        else if (!strcmp(argv[i], "--rework") && i + 1 < argc) sscanf_s(argv[++i], "%ux%u", &rework_w, &rework_h);
         else if (!strcmp(argv[i], "--ini") && i + 1 < argc) { const char* s = argv[++i]; ini.assign(s, s + strlen(s)); }   // profile next to the exe, or a path
     }
     const std::wstring dir = ExeDir();
@@ -143,6 +145,14 @@ int RunBench(int argc, char** argv)
     for (int i = 0; evaluated < frames && i < frames + slack; ++i)
     {
         if (toast_test && i == 5) { p->cfg.toast = true; PipelineToast(p, "%s", kToastText); }
+        // The thing every other bench run lacks: a reload while running. Fresh processes create the
+        // feature once at the right size, so they could never see a rebuild that failed to rebuild.
+        if (rework_w && i == frames / 3)
+        {
+            Config nc = p->cfg; nc.work_w = rework_w; nc.work_h = rework_h; nc.rebuild_debounce_frames = 4;
+            Log("[bench] live work-size change %ux%u -> %ux%u at frame %d", p->ww, p->wh, rework_w, rework_h, i);
+            PipelineReload(p, nc);
+        }
         if (toast_test && i == 6) p->toast_until_ms = 0;
         if (!PipelineFrame(p, tex[i % tex.size()], nullptr, 0, i == 0)) { Log("[bench] frame %d failed", i); GpuLogDeviceRemoved(g, "bench"); rc = 2; break; }
         // ponytail: idle after each frame so both lists of the frame retire and get sampled (the
