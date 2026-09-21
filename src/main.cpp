@@ -454,7 +454,13 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
 
     // ---- list 1: swizzle, gray, downscale, gray -> OFA input --------------------------------------
     if (wait_fence) g.queue->Wait(wait_fence, wait_value);
+    // Timestamps live in the ring slot GpuBegin is about to reset. Under GPU load nothing has retired
+    // by the time the after-submit read runs, so every slot was being wiped unread: all stages came
+    // back -1 and the HUD showed "NR 0.0 ms" exactly when the numbers mattered. GpuBegin waits for
+    // this slot to retire anyway - wait here first, read it, and nothing is lost or added.
+    auto harvest = [&] { if (!c.gpu_timestamps) return; const UINT64 v = g.alloc_fence[g.slot]; if (v) GpuWait(g, g.fence, v, 2000); PipelineReadStamps(p); };
     double tw = NowMs();
+    harvest();
     if (!GpuBegin(g)) return false;
     p->cpu_wait[0].add(NowMs() - tw);
     stamp(14);   // PS_LIST1 spans the whole submission, barriers and copies included
@@ -481,10 +487,14 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (need_mv) CsGray(g, p->sh, cl, p->color4k, p->w, p->h, p->gray, p->gw, p->gh);
     // Only the model and ArtCNN read nr_in. With neither (FG-only, the default), the compose
     // takes the native path and never samples it, so this whole area filter was dead work.
-    if (!async && (model_on || c.artcnn)) CsDownscale(g, p->sh, cl, p->color4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
+    // ...and none of it while the layer is switched off (F9): the compose shows native then, so the
+    // downscale and ArtCNN's seven passes were being computed and thrown away - measured live as
+    // ~5 ms a frame at 1800p, holding a 240 fps capture at 146 with the layer OFF.
+    const bool neural_live = !p->bypass;
+    if (!async && neural_live && (model_on || c.artcnn)) CsDownscale(g, p->sh, cl, p->color4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
     stamp(3);
     GpuBarrier(cl, p->nr_in, UAV, NPSR);
-    if (!async && c.artcnn)   // the evaluate reads nr_in2; compose keeps nr_in so the residual carries the ArtCNN delta too
+    if (!async && neural_live && c.artcnn)   // the evaluate reads nr_in2; compose keeps nr_in so the residual carries the ArtCNN delta too
     {
         GpuBarrier(cl, p->nr_in2, NPSR, UAV);
         stamp(10); CsArtCnn(g, p->sh, cl, p->nr_in, p->nr_in2, p->ww, p->wh); stamp(11);
@@ -553,6 +563,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
 
     // ---- list 2: expand, (create | evaluate), compose, hand-off to the presenter -------------------
     tw = NowMs();
+    harvest();
     if (!GpuBegin(g)) return false;
     p->cpu_wait[2].add(NowMs() - tw);
     stamp(16);   // PS_LIST2
@@ -1264,7 +1275,8 @@ static int RealMain(int argc, char** argv)
                     snprintf(nr, sizeof nr, "NR %.1f ms %up async %.0f fps", std::max(0.0, ms), p->wh, hud_model * 1000.0 / dt);
                     if (cfg.model_max_fps > 0) snprintf(nr + strlen(nr), sizeof nr - strlen(nr), " cap %d/s", cfg.model_max_fps);
                 }
-                else snprintf(nr, sizeof nr, "NR %.1f ms %up", std::max(0.0, p->st[PS_EVAL].med()), p->wh);
+                else if (p->st[PS_EVAL].med() < 0) snprintf(nr, sizeof nr, "NR -- ms %up", p->wh);   // no sample is not 0.0 ms
+                else snprintf(nr, sizeof nr, "NR %.1f ms %up", p->st[PS_EVAL].med(), p->wh);
                 char mask[8]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "-");
                 const char* filt_s = !cfg.filters_enabled ? "off" : (cfg.sharpen > 0 || cfg.saturation != 1.0f) ? "on" : "-";
                 if (p->fg && FgMultiplier(p->fg) > 1 && FgPaused(p->fg)) snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG auto-paused  mask %s", nr, filt_s, mask);
