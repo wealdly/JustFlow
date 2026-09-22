@@ -226,7 +226,7 @@ static void ModelThread(Pipeline* p, bool create, NrConfig nc)
         const bool ok = NrCreate(nr, c.list, nc);
         const UINT64 v = GpuCtxEnd(c);
         if (!v) return fail("ctx end (create)");
-        if (ok) { NrMarkSubmitted(nr); Log("[nr] create submitted %ux%u (model thread)", nc.work_w, nc.work_h); }
+        if (ok) { NrMarkSubmitted(nr); p->eval_fails = 0; p->model_dead = false; Log("[nr] create submitted %ux%u (model thread)", nc.work_w, nc.work_h); }
         else Log("[nr] create failed (%s) - native passthrough until reload", NrLastError(nr));
     }
     int prev_held = -1, j = 0; UINT evals = 0; double last_t = 0;
@@ -272,8 +272,12 @@ static void ModelThread(Pipeline* p, bool create, NrConfig nc)
             GpuCtxStamp(c, 0);
             const unsigned r = NrEvaluate(nr, c.list, mp.artcnn ? p->nr_in2_m : p->nr_in_m, p->mv_m, p->nr_out_m, reset, mp.exposure);
             GpuCtxStamp(c, 1);
-            if (r == 1) evaluated = true;
-            else { static unsigned n = 0; if ((n++ % 120) == 0) Log("[nr] model evaluate -> 0x%08X (%s) %s", r, NgxResultName(r), NrLastError(nr)); }
+            if (r == 1) { evaluated = true; p->eval_fails = 0; }
+            else
+            {
+                if ((p->eval_fails++ % 120) == 0) Log("[nr] model evaluate -> 0x%08X (%s) %s", r, NgxResultName(r), NrLastError(nr));
+                if (p->eval_fails >= 30) return fail("30 consecutive evaluate failures");   // -> the sync path, which switches the model off
+            }
         }
         if (evaluated)
         {
@@ -451,7 +455,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // model_on, not p->nr: the object outlives the setting. Once the model had been on, turning it
     // off left p->nr alive, so every gate below still fired - measured live as ~5000 failing
     // EvaluateFeature calls with model=0, each one taking the NgxMutex that DLSS-G also needs.
-    const bool model_on = c.nr_model && p->nr;
+    const bool model_on = c.nr_model && p->nr && !p->model_dead;
     const bool async = c.nr_async && model_on && !p->model_failed;
     // Motion vectors have exactly two consumers: the model (its temporal reprojection) and frame
     // generation. With neither - filters only, ArtCNN only - the gray pass, the OFA execute, the
@@ -653,7 +657,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         const bool ok = NrCreate(p->nr, cl, ConfigToNr(c));
         const UINT64 v = GpuEnd(g);
         if (!v) return false;
-        if (ok) { NrMarkSubmitted(p->nr); p->evals_since_create = 0; p->force_reset = true; Log("[nr] create submitted %ux%u", p->ww, p->wh); }
+        if (ok) { NrMarkSubmitted(p->nr); p->evals_since_create = 0; p->eval_fails = 0; p->model_dead = false; p->force_reset = true; Log("[nr] create submitted %ux%u", p->ww, p->wh); }
         else Log("[nr] create failed (%s) - native passthrough until reload", NrLastError(p->nr));
         return true;   // no evaluate on the create list
     }
@@ -664,8 +668,14 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         stamp(4);
         const unsigned r = NrEvaluate(p->nr, cl, c.artcnn ? p->nr_in2 : p->nr_in, p->mv, p->nr_out, reset, c.exposure_scale);
         stamp(5);
-        if (r == 1) { evaluated = true; ++p->evals_since_create; }
-        else { static unsigned n = 0; if ((n++ % 120) == 0) Log("[nr] evaluate -> 0x%08X (%s) %s", r, NgxResultName(r), NrLastError(p->nr)); }
+        if (r == 1) { evaluated = true; ++p->evals_since_create; p->eval_fails = 0; }
+        else
+        {
+            if ((p->eval_fails++ % 120) == 0) Log("[nr] evaluate -> 0x%08X (%s) %s", r, NgxResultName(r), NrLastError(p->nr));
+            // Paying for a model that never answers is worse than none: after 30 in a row, off until the
+            // next create (reload, resize, rebuild), and say so.
+            if (p->eval_fails == 30) { p->model_dead = true; PipelineToast(p, "DLSS model failing (0x%08X) - off until reload", r); }
+        }
     }
 
     ComposeParams cp;

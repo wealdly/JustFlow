@@ -5,6 +5,11 @@
 // `chroma` scales only the colour part of the model's edit (1 = as the model made it, 0 = keep the
 // game's colour exactly and take only its luminance). The model pulls saturation toward photoreal,
 // which fights a deliberately stylised palette; the detail and lighting it adds live in the luma.
+// Tried and dropped (2026-09-22): the edit as an OkLab lightness RATIO + chroma offset (what Valheim
+// Universal Upscaler does). Measured on three frames: 0% clipping either way, identical hue shift,
+// edit size within 6% - and a ratio from a dark work pixel that lands on a bright native pixel
+// (a footprint edge, or a wrong warp) doubles it: p99 boundary error 88 vs 31 with the ghost guard
+// off. The additive difference is bounded by the model's own edit and needs no guard.
 // Rects live in a 256x1 R32_SINT texture (x0,y0,x1,y1 per rect, up to 64): root constants cap at 64 DWORDs.
 // Addon mask strip (strip_w x strip_h at the top-left, 0 = off): those output pixels take the
 // composed value of the pixel strip_h rows below, so the strip never shows.
