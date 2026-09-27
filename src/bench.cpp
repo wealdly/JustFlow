@@ -94,6 +94,7 @@ int RunBench(int argc, char** argv)
 {
     std::wstring input, ini; int frames = 120; UINT work_w = 0, work_h = 0; bool present = true; double pace = 0; bool lw = false; float lw_a[4] = { 0, 0, 0, 60 };
     UINT rework_w = 0, rework_h = 0;   // --rework WxH: change the work size LIVE a third of the way in
+    int nr_toggle_at = -1;             // --nr-toggle-at N: flip [nr] enabled through PipelineReload at frame N (what Settings and the tray do)
     for (int i = 1; i < argc; ++i)
     {
         if (!strcmp(argv[i], "--bench") && i + 1 < argc) { const char* s = argv[++i]; input.assign(s, s + strlen(s)); }
@@ -103,6 +104,7 @@ int RunBench(int argc, char** argv)
         else if (!strcmp(argv[i], "--pace") && i + 1 < argc) pace = atof(argv[++i]);
         else if (!strcmp(argv[i], "--lwtest") && i + 1 < argc) { lw = true; sscanf_s(argv[++i], "%f,%f,%f,%f", &lw_a[0], &lw_a[1], &lw_a[2], &lw_a[3]); }
         else if (!strcmp(argv[i], "--rework") && i + 1 < argc) sscanf_s(argv[++i], "%ux%u", &rework_w, &rework_h);
+        else if (!strcmp(argv[i], "--nr-toggle-at") && i + 1 < argc) nr_toggle_at = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ini") && i + 1 < argc) { const char* s = argv[++i]; ini.assign(s, s + strlen(s)); }   // profile next to the exe, or a path
     }
     const std::wstring dir = ExeDir();
@@ -185,6 +187,12 @@ int RunBench(int argc, char** argv)
         {
             Config nc = p->cfg; nc.work_w = rework_w; nc.work_h = rework_h; nc.work_auto = false; nc.rebuild_debounce_frames = 4;
             Log("[bench] live work-size change %ux%u -> %ux%u at frame %d", p->ww, p->wh, rework_w, rework_h, i);
+            PipelineReload(p, nc);
+        }
+        if (i == nr_toggle_at)
+        {
+            Config nc = p->cfg; nc.nr_enabled = !nc.nr_enabled;
+            Log("[bench] neural layer %s by reload at frame %d", nc.nr_enabled ? "ON" : "OFF", i);
             PipelineReload(p, nc);
         }
         if (toast_test && i == 6) p->toast_until_ms = 0;

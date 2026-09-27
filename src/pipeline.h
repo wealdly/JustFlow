@@ -60,7 +60,6 @@ struct Pipeline
     UINT evals_since_create = 0;
     bool force_reset = true;
     // user state
-    bool   bypass = false;
     int    wipe = 0;              // 0 off, 1 split 0.5, 2 sweep (2 s period)
     double wipe_t0 = 0;
     bool   measure_ofa = false;   // bench only: CPU-wait around OfaExecute to time it in isolation

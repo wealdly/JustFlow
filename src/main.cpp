@@ -342,7 +342,6 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
     p->gw = w / bx; p->gh = h / by;
     if (p->gw != cfg.ofa_w || p->gh != cfg.ofa_h) Log("[main] ofa input %ux%u adjusted to %ux%u (block %ux%u)", cfg.ofa_w, cfg.ofa_h, p->gw, p->gh, bx, by);
     p->hud = cfg.hud;
-    p->bypass = !cfg.nr_enabled;   // F9 state: the neural layer as a whole
     if (with_overlay)
     {
         HotkeyDef keys[kHotkeys]; HotkeyDefs(cfg, keys);
@@ -413,6 +412,7 @@ void PipelineReload(Pipeline* p, const Config& c_in)
     const bool rebuild = ConfigNeedsRebuild(p->cfg, c);
     // recreated next frame (a multiplier change is caught there: the presenter is rebuilt only when it differs)
     if (c.fg_pacing_vblank != p->cfg.fg_pacing_vblank || c.fg_engine != p->cfg.fg_engine || c.fg_lw_vfov != p->cfg.fg_lw_vfov) DropFg(p);
+    if (c.nr_enabled && !p->cfg.nr_enabled) p->force_reset = true;
     if (c.nr_enabled && !p->nr)
     {
         p->nr = NrInit(*p->g, ExeDir().c_str(), (NrParamBlock)c.param_block);
@@ -474,7 +474,9 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // model_on, not p->nr: the object outlives the setting. Once the model had been on, turning it
     // off left p->nr alive, so every gate below still fired - measured live as ~5000 failing
     // EvaluateFeature calls with model=0, each one taking the NgxMutex that DLSS-G also needs.
-    const bool model_on = p->nr && !p->model_dead;
+    // The layer switch is part of it: with the layer off (F9, Settings, tray) the model does not run at
+    // all - it used to keep evaluating on the async thread, unseen, while the compose showed native.
+    const bool model_on = c.nr_enabled && p->nr && !p->model_dead;
     const bool async = c.nr_async && model_on && !p->model_failed;
     // Motion vectors have two consumers: the model (its temporal reprojection) and the warp engine
     // (it extrapolates along them). DLSS-G is not one - it measures motion itself and ignores the
@@ -483,13 +485,14 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // expand ran for nobody, and they were 82-93% of an FG-only frame.
     const bool warp_fg = c.fg_enabled && c.fg_engine == FG_WARP, lw_fg = c.fg_enabled && c.fg_engine == FG_LATEWARP;   // lw: the mouse model learns from the flow
     if (lw_fg) MouseStart(); else MouseStop();
-    const bool need_mv = (model_on && !p->bypass) || warp_fg || lw_fg;
+    const bool need_mv = model_on || warp_fg || lw_fg;
     if (need_mv && !p->had_mv) reset = true;   // the previous gray is stale: no flow across the gap
     p->had_mv = need_mv;
     // The per-frame flow (pair 0, current -> previous -> p->mv) has two readers: the SYNC evaluate and
     // the warp engine. The async track warps its residual with a different flow (pair 2, current ->
     // the residual's own frame), so it needs no pair 0 for itself.
-    const bool need_pair0 = (model_on && !async && !p->bypass) || warp_fg || lw_fg;
+    const bool need_pair0 = (model_on && !async) || warp_fg || lw_fg;
+    if (!async && p->model_thread.joinable()) StopModel(p);   // layer off or mode changed: the thread stops paying
     if (async && !p->model_thread.joinable() && !StartModel(p)) return false;
     // The presenter is always on while an overlay exists: passthrough (multiplier 1) with FG off,
     // generation with cfg.fg_enabled (ini, F8). A generation failure turns the flag off (F8 retries)
@@ -558,8 +561,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // Only the model reads nr_in. Without it (FG-only, the default), the compose takes the native
     // path and never samples it, so this area filter would be dead work - and none of it while the
     // layer is switched off (F9), when the compose shows native.
-    const bool neural_live = !p->bypass;
-    if (!async && neural_live && model_on) CsDownscale(g, p->sh, cl, p->color4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
+    if (!async && model_on) CsDownscale(g, p->sh, cl, p->color4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
     stamp(2 * PS_GRAYDS + 1);
     GpuBarrier(cl, p->nr_in, UAV, NPSR);
     if (need_mv)
@@ -605,7 +607,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // ---- optical flow (pair 0, per frame; the model track runs its own on pair 1) -----------------
     // async + a residual to compose: a second flow, this frame -> the residual's model frame (its gray
     // is still held in slot cmp_held), pair 2 -> mv_res: the warp then spans the residual's age.
-    const bool warp_res = async && p->cmp_idx >= 0 && !p->bypass;
+    const bool warp_res = async && p->cmp_idx >= 0;
     double ofa_t0 = 0;
     if (p->measure_ofa) { GpuWait(g, g.fence, f1, 5000); ofa_t0 = NowMs(); }
     tw = NowMs();
@@ -700,7 +702,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     }
 
     bool evaluated = false;
-    if (!async && model_on && NrReady(p->nr) && !p->bypass)
+    if (!async && model_on && NrReady(p->nr))
     {
         stamp(2 * PS_EVAL);
         const unsigned r = NrEvaluate(p->nr, cl, p->nr_in, p->mv, p->nr_out, reset, c.exposure_scale);
@@ -724,7 +726,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         cp.strip_w = (int)kStripW; cp.strip_h = (int)kStripH;
     }
     for (int i = 0; i < c.nrects && cp.nrects < 64; ++i) cp.rects[cp.nrects++] = c.rects[i];
-    const bool native = async ? (p->cmp_idx < 0 || p->bypass) : (!evaluated || p->evals_since_create <= (UINT)std::max(0, c.warmup));
+    const bool native = async ? p->cmp_idx < 0 : (!evaluated || p->evals_since_create <= (UINT)std::max(0, c.warmup));
     if (native) cp.wipe_mode = 2;
     else if (p->wipe == 1) { cp.wipe_mode = 1; cp.wipe_x = 0.5f; }
     else if (p->wipe == 2) { cp.wipe_mode = 1; cp.wipe_x = (float)fmod((NowMs() - p->wipe_t0) / 2000.0, 1.0); }
@@ -1020,7 +1022,7 @@ static int RealMain(int argc, char** argv)
     {
         if (!tray) return;
         TrayState s; s.profile_index = profile; s.status = status;
-        if (p) { s.nr_on = !p->bypass; s.filters_on = p->cfg.filters_enabled; s.fg_on = p->cfg.fg_enabled; s.fg_multiplier = p->cfg.fg_multiplier; s.fg_engine = p->cfg.fg_engine; s.wipe_mode = p->wipe; s.game = p->target; }
+        if (p) { s.nr_on = p->cfg.nr_enabled; s.filters_on = p->cfg.filters_enabled; s.fg_on = p->cfg.fg_enabled; s.fg_multiplier = p->cfg.fg_multiplier; s.fg_engine = p->cfg.fg_engine; s.wipe_mode = p->wipe; s.game = p->target; }
         TraySetState(tray, s);
     };
     auto apply_hotkeys = [&]   // cfg.hk_* -> overlay registration (a pipeline created later registers from cfg itself)
@@ -1048,8 +1050,7 @@ static int RealMain(int argc, char** argv)
     auto toggle_nr = [&]
     {
         if (!p) return;
-        p->bypass = !p->bypass;
-        if (!p->bypass)
+        if (flip(p->cfg.nr_enabled, cfg.nr_enabled, L"nr", L"enabled"))
         {
             p->force_reset = true;
             // First time on this session: the model loads now (see PipelineCreate).
@@ -1059,10 +1060,7 @@ static int RealMain(int argc, char** argv)
                 if (p->nr) p->create_pending = true; else Log("[nr] init failed while enabling");
             }
         }
-        cfg.nr_enabled = p->cfg.nr_enabled = !p->bypass;
-        persist(L"nr", L"enabled", p->bypass ? L"0" : L"1");
-        Log("[main] bypass %s", p->bypass ? "on" : "off");
-        if (p->bypass) PipelineToast(p, "Neural layer OFF");
+        if (!p->cfg.nr_enabled) PipelineToast(p, "Neural layer OFF");
         else if (p->nr) PipelineToast(p, "Neural layer ON");
         else PipelineToast(p, "Neural layer ON but the DLSS model did not load - see the log");
         tray_state();
@@ -1287,7 +1285,7 @@ static int RealMain(int argc, char** argv)
             // hotkeys and the tray. Any toggle that enables a layer wakes it within 50 ms.
             {
                 const Config& lc = p->cfg;
-                const bool neural = !p->bypass;
+                const bool neural = lc.nr_enabled;
                 const bool filters = FiltersLive(lc);
                 const bool active = neural || filters || lc.fg_enabled || p->wipe != 0 || dump > dumped;
                 if (!active)
@@ -1374,7 +1372,7 @@ static int RealMain(int argc, char** argv)
                 char nr[48];
                 // Which LAYERS are live, not which settings are set: the three switches are
                 // independent, so the HUD has to be able to say "neural off, filters on, FG on".
-                if (p->bypass) strcpy_s(nr, "neural off");
+                if (!p->cfg.nr_enabled) strcpy_s(nr, "neural off");
                 else if (!p->nr) strcpy_s(nr, "neural: no model");
                 else if (cfg.nr_async)
                 {
