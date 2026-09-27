@@ -41,6 +41,7 @@ static const int kSlots = 3, kMaxGen = 3;
 struct FgSlot
 {
     ID3D12Resource *real = nullptr, *gen[kMaxGen] = {};
+    bool     gen_ok = false;   // engine=warp: the pipeline wrote gen[] for THIS frame (not while paused)
     int    state = 0;
     UINT64 seq = 0, fence = 0, eval_fence = 0;
     int    eval_slot = -1;    // ctx ring slot the evaluate stamped, read back when the fence lands
@@ -60,6 +61,7 @@ struct Fg
     Overlay* ov = nullptr;
     UINT     w = 0, h = 0, mw = 0, mh = 0;
     int      count = 1;                      // generated frames per real frame (0 = passthrough)
+    bool     warp = false;                   // engine=warp: the pipeline extrapolates into s->gen, no DLSS-G
     bool     vblank = true;
     std::atomic<double> phase{ 0.0 };        // FgSetTiming (main) -> Presenter
     std::atomic<double> min_gain{ 1.5 };     // governor threshold: presented / submitted (0 = governor off)
@@ -339,10 +341,11 @@ static void Presenter(Fg* f)
         // which `span` has just measured. Requiring seq == prev + 1 spent a generated frame on
         // every dropped one: fg_drops and fg_nopair came back equal on every single line.
         const bool interp = s->interpolate && prev != 0 && span < 100.0;
-        const double full_hold = span * f->count / (f->count + 1);   // how far the real frame trails its arrival while generating
+        const double full_hold = f->warp ? 0.0 : span * f->count / (f->count + 1);   // how far the real frame trails its arrival while generating (extrapolation: not at all)
         const double gmin = f->min_gain.load(std::memory_order_relaxed), gmax_in = f->max_in.load(std::memory_order_relaxed);
         if (gmin <= 0 && gmax_in <= 0 && gstate != G_ENGAGED) { gstate = G_RAMP; }   // governor switched off live: come back smoothly
         if (gstate == G_PAUSED && NowMs() >= resume_at) { gstate = G_RAMP; hold = 0; prev = 0; Log("[fg] governor: probing - generation back on"); }
+        if (f->warp && gstate == G_RAMP) { gstate = G_ENGAGED; f->paused = false; gwin_t0 = NowMs(); gwin_seq0 = seq_now; gwin_presented = 0; gbad = 0; }   // no history to warm, no hold to grow
         if (gstate == G_DRAIN || gstate == G_PAUSED)
         {
             // No Evaluate: the point of pausing is to stop paying. The real frame goes out `hold` after
@@ -366,38 +369,63 @@ static void Presenter(Fg* f)
         }
         else
         {
-        if (ok) ok = Evaluate(f, s, interp);
+        if (ok && !f->warp) ok = Evaluate(f, s, interp);
         if (ok)
         {
             const double L = span / (f->count + 1);
             // phase shifts every present target; the cadence (prev_real_target) stays unshifted so it never accumulates.
             const double ph = f->phase.load(std::memory_order_relaxed);
-            const double anchor = std::max(NowMs(), prev_real_target + L);
-            double real_target = anchor;
-            bool preempted = false;
-            // Whatever happens next, the first thing to do is wait for `anchor`: generated frame 0
-            // targets it, and with no generation the real frame does. So pace FIRST and collect the
-            // evaluate afterwards - on schedule DLSS-G has had the whole L window to finish and the
-            // fence is already signalled, which turns a ~1.5 ms serial stall into nothing.
-            if (!wait_until(anchor + ph)) { ++f->preempts; preempted = true; }
-            if (!preempted && !EvaluateResolve(f, s, allow)) ok = false;
-            const bool gen = ok && !preempted && interp && allow;
-            if (!interp) ++f->no_pair; else if (!allow) ++f->disabled;
-            if (gen)
+            if (f->warp)
             {
-                for (int i = 0; i < f->count; ++i)
+                // Extrapolation: list 2 already pushed the real frame ahead along its own flow into
+                // s->gen, so nothing is held back. The real frame goes out on the next vblank, each
+                // generated one a further L after it, and a newer real frame cuts the rest short.
+                // No evaluate, no FG queue: the render fence covers the real and generated frames alike.
+                f->dbg = s;
+                const double t0 = NowMs();
+                ok = GpuCtxWait(f->ctx, f->g->fence, s->fence, 10000) || Fail(f, "render fence wait (device removed?)");
+                if (ok && wait_until(t0 + ph)) { ok = Present(f, s->real, s, true, false); ++gwin_presented; }
+                if (!interp) ++f->no_pair;
+                for (int i = 0; ok && interp && s->gen_ok && i < f->count; ++i)
                 {
-                    const double target = anchor + i * L + ph;
-                    if (i && !wait_until(target)) { preempted = true; ++f->preempts; break; }   // i == 0: waited above
-                    if (NowMs() - target > L * 0.5 + vb * 0.5) { ++f->drops; continue; }   // stale: skip, never burst
-                    if (!Present(f, s->gen[i], s, false)) { ok = false; break; }
+                    if (!wait_until(t0 + (i + 1) * L + ph)) break;
+                    bool newer = false;
+                    { std::lock_guard<std::mutex> lk(f->mu); newer = newer_ready(s->seq); }
+                    if (newer) { ++f->preempts; break; }
+                    if (!Present(f, s->gen[i], s, false, false)) { ok = false; break; }
                     ++f->gen_shown; ++gwin_presented;
                 }
-                real_target = preempted ? NowMs() : anchor + f->count * L;
+                prev_real_target = t0;
             }
-            // The real frame is never skipped for lateness: only `stop` interrupts (seq MAX = no pre-emption).
-            if (ok && wait_until(real_target + ph)) { ok = Present(f, s->real, s, true); ++gwin_presented; }
-            prev_real_target = real_target;
+            else
+            {
+                const double anchor = std::max(NowMs(), prev_real_target + L);
+                double real_target = anchor;
+                bool preempted = false;
+                // Whatever happens next, the first thing to do is wait for `anchor`: generated frame 0
+                // targets it, and with no generation the real frame does. So pace FIRST and collect the
+                // evaluate afterwards - on schedule DLSS-G has had the whole L window to finish and the
+                // fence is already signalled, which turns a ~1.5 ms serial stall into nothing.
+                if (!wait_until(anchor + ph)) { ++f->preempts; preempted = true; }
+                if (!preempted && !EvaluateResolve(f, s, allow)) ok = false;
+                const bool gen = ok && !preempted && interp && allow;
+                if (!interp) ++f->no_pair; else if (!allow) ++f->disabled;
+                if (gen)
+                {
+                    for (int i = 0; i < f->count; ++i)
+                    {
+                        const double target = anchor + i * L + ph;
+                        if (i && !wait_until(target)) { preempted = true; ++f->preempts; break; }   // i == 0: waited above
+                        if (NowMs() - target > L * 0.5 + vb * 0.5) { ++f->drops; continue; }   // stale: skip, never burst
+                        if (!Present(f, s->gen[i], s, false)) { ok = false; break; }
+                        ++f->gen_shown; ++gwin_presented;
+                    }
+                    real_target = preempted ? NowMs() : anchor + f->count * L;
+                }
+                // The real frame is never skipped for lateness: only `stop` interrupts (seq MAX = no pre-emption).
+                if (ok && wait_until(real_target + ph)) { ok = Present(f, s->real, s, true); ++gwin_presented; }
+                prev_real_target = real_target;
+            }
             const double now = NowMs();
             if ((gmin > 0 || gmax_in > 0) && now - gwin_t0 >= 1000.0)
             {
@@ -485,12 +513,12 @@ static void RaisePresenterPriority(std::thread& t)
         Log("[fg] presenter priority unchanged (err %lu) - normal priority is fine, just jitterier", GetLastError());
 }
 
-Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier, bool vblank_pacing)
+Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier, bool vblank_pacing, bool warp)
 {
     Fg* f = new Fg;
     f->g = &g; f->ov = ov; f->dir = dir; f->w = out_w; f->h = out_h; f->mw = mv_w; f->mh = mv_h;
     f->count = std::clamp(multiplier, 1, 4) - 1;
-    f->vblank = vblank_pacing;
+    f->vblank = vblank_pacing; f->warp = warp;
     auto fail = [&](const char* why) { Fail(f, why); FgDestroy(f); return (Fg*)nullptr; };
 
     // ponytail: passthrough keeps the ctx too (its event is what the presenter waits on) - one code path.
@@ -505,42 +533,45 @@ Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UI
         return f;
     }
 
-    // NGX core: Init is harmless if ngx_nr already did it; the parameter block comes from the core.
-    f->path_list[0] = f->dir.c_str();
-    f->common.PathListInfo.Path = f->path_list; f->common.PathListInfo.Length = 1;
-    f->common.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;
-    NVSDK_NGX_Result r = NVSDK_NGX_D3D12_Init(0x1000000ULL, dir, g.dev, &f->common, NVSDK_NGX_Version_API);
-    Log("[fg] NVSDK_NGX_D3D12_Init -> 0x%08X (%s)", r, NgxResultName(r));
-    r = NVSDK_NGX_D3D12_AllocateParameters(&f->params);
-    if (NVSDK_NGX_FAILED(r) || !f->params) { Log("[fg] AllocateParameters -> 0x%08X (%s)", r, NgxResultName(r)); return fail("no NGX parameter block"); }
-
-    f->create = NVSDK_NGX_D3D12_CreateFeature; f->release = NVSDK_NGX_D3D12_ReleaseFeature; g_fg_evaluate = NVSDK_NGX_D3D12_EvaluateFeature_C;
-    if (!CreateFeature(f, "NGX core"))
+    if (!warp)   // extrapolation needs no NGX at all
     {
-        // Fallback: drive nvngx_dlssg.dll directly (NeuralScreen path) with the same parameter block.
-        const std::wstring path = f->dir + L"\\nvngx_dlssg.dll";
-        f->dll = LoadLibraryW(path.c_str());
-        if (!f->dll) { Log("[fg] %ls did not load (err %lu)", path.c_str(), GetLastError()); return fail("CreateFeature failed and no direct runtime"); }
-        auto init = (PFN_FgInitExt)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_Init_Ext");
-        f->create = (PFN_FgCreate)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_CreateFeature");
-        f->release = (PFN_FgRelease)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_ReleaseFeature");
-        g_fg_evaluate = (PFN_FgEvaluate)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_EvaluateFeature");
-        if (!init || !f->create || !f->release || !g_fg_evaluate) return fail("nvngx_dlssg.dll exports missing");
-        r = init(0x1000000ULL, dir, g.dev, NVSDK_NGX_Version_API, f->params);
-        Log("[fg] direct Init_Ext -> 0x%08X (%s)", r, NgxResultName(r));
-        if (NVSDK_NGX_FAILED(r) || !CreateFeature(f, "nvngx_dlssg.dll")) return fail("CreateFeature failed (core and direct)");
-    }
+        // NGX core: Init is harmless if ngx_nr already did it; the parameter block comes from the core.
+        f->path_list[0] = f->dir.c_str();
+        f->common.PathListInfo.Path = f->path_list; f->common.PathListInfo.Length = 1;
+        f->common.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;
+        NVSDK_NGX_Result r = NVSDK_NGX_D3D12_Init(0x1000000ULL, dir, g.dev, &f->common, NVSDK_NGX_Version_API);
+        Log("[fg] NVSDK_NGX_D3D12_Init -> 0x%08X (%s)", r, NgxResultName(r));
+        r = NVSDK_NGX_D3D12_AllocateParameters(&f->params);
+        if (NVSDK_NGX_FAILED(r) || !f->params) { Log("[fg] AllocateParameters -> 0x%08X (%s)", r, NgxResultName(r)); return fail("no NGX parameter block"); }
 
-    // guides + outputs
-    f->depth = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_depth");
-    std::vector<float> flat((size_t)mv_w * mv_h, 0.5f);
-    if (!f->depth || !GpuUploadTex(g, f->depth, flat.data(), mv_w, mv_h, 4, NPSR)) return fail("depth texture");
-    f->mv = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_mv");   // zeros, for good: see Evaluate
-    const std::vector<uint32_t> zero((size_t)mv_w * mv_h, 0);
-    if (!f->mv || !GpuUploadTex(g, f->mv, zero.data(), mv_w, mv_h, 4, NPSR)) return fail("mv texture");
-    f->disable = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_DEFAULT, UAV, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, L"fg_disable");
-    f->disable_rb = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"fg_disable_rb");
-    if (!f->disable || !f->disable_rb) return fail("disable buffers");
+        f->create = NVSDK_NGX_D3D12_CreateFeature; f->release = NVSDK_NGX_D3D12_ReleaseFeature; g_fg_evaluate = NVSDK_NGX_D3D12_EvaluateFeature_C;
+        if (!CreateFeature(f, "NGX core"))
+        {
+            // Fallback: drive nvngx_dlssg.dll directly (NeuralScreen path) with the same parameter block.
+            const std::wstring path = f->dir + L"\\nvngx_dlssg.dll";
+            f->dll = LoadLibraryW(path.c_str());
+            if (!f->dll) { Log("[fg] %ls did not load (err %lu)", path.c_str(), GetLastError()); return fail("CreateFeature failed and no direct runtime"); }
+            auto init = (PFN_FgInitExt)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_Init_Ext");
+            f->create = (PFN_FgCreate)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_CreateFeature");
+            f->release = (PFN_FgRelease)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_ReleaseFeature");
+            g_fg_evaluate = (PFN_FgEvaluate)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_EvaluateFeature");
+            if (!init || !f->create || !f->release || !g_fg_evaluate) return fail("nvngx_dlssg.dll exports missing");
+            r = init(0x1000000ULL, dir, g.dev, NVSDK_NGX_Version_API, f->params);
+            Log("[fg] direct Init_Ext -> 0x%08X (%s)", r, NgxResultName(r));
+            if (NVSDK_NGX_FAILED(r) || !CreateFeature(f, "nvngx_dlssg.dll")) return fail("CreateFeature failed (core and direct)");
+        }
+
+        // guides + outputs
+        f->depth = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_depth");
+        std::vector<float> flat((size_t)mv_w * mv_h, 0.5f);
+        if (!f->depth || !GpuUploadTex(g, f->depth, flat.data(), mv_w, mv_h, 4, NPSR)) return fail("depth texture");
+        f->mv = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_mv");   // zeros, for good: see Evaluate
+        const std::vector<uint32_t> zero((size_t)mv_w * mv_h, 0);
+        if (!f->mv || !GpuUploadTex(g, f->mv, zero.data(), mv_w, mv_h, 4, NPSR)) return fail("mv texture");
+        f->disable = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_DEFAULT, UAV, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, L"fg_disable");
+        f->disable_rb = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"fg_disable_rb");
+        if (!f->disable || !f->disable_rb) return fail("disable buffers");
+    }
     for (auto& s : f->slots)
     {
         s.real = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_real");
@@ -550,7 +581,7 @@ Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UI
     }
     f->thread = std::thread(Presenter, f);
     RaisePresenterPriority(f->thread);
-    Log("[fg] feature created %ux%u multiplier %d pacing=%s", out_w, out_h, f->count + 1, vblank_pacing ? "vblank" : "timer");
+    Log("[fg] %s %ux%u multiplier %d pacing=%s", warp ? "warp engine (extrapolation)" : "feature created", out_w, out_h, f->count + 1, vblank_pacing ? "vblank" : "timer");
     return f;
 }
 
@@ -613,6 +644,13 @@ bool FgPaused(Fg* f) { return f && f->paused.load(std::memory_order_relaxed); }
 
 ID3D12Resource* FgDebugReal(Fg* f) { return (f && f->dbg) ? f->dbg->real : nullptr; }
 
+ID3D12Resource* FgWarpTarget(Fg* f, int i)
+{
+    if (!f->warp || !f->pending || i < 0 || i >= f->count) return nullptr;
+    f->pending->gen_ok = true;   // the caller writes it in this list
+    return f->pending->gen[i];
+}
+
 ID3D12Resource* FgAcquire(Fg* f)
 {
     if (f->failed) return nullptr;
@@ -643,7 +681,7 @@ ID3D12Resource* FgAcquire(Fg* f)
             f->rec_us += (UINT64)((NowMs() - t_block) * 1000.0); ++f->rec_n;
             if (!s) return nullptr;
         }
-        s->state = 1; eval = s->eval_fence;
+        s->state = 1; eval = s->eval_fence; s->gen_ok = false;
     }
     f->pending = s;
     // GPU-side ordering for the reuse: the FG queue's last evaluate of this slot (reads real/mv,

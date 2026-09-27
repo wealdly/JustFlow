@@ -410,7 +410,7 @@ void PipelineReload(Pipeline* p, const Config& c_in)
     Config c = c_in; WorkAuto(c, p->w, p->h);   // resolve BEFORE comparing, or every reload of an auto profile looks like a size change
     const bool rebuild = ConfigNeedsRebuild(p->cfg, c);
     // recreated next frame (a multiplier change is caught there: the presenter is rebuilt only when it differs)
-    if (c.fg_pacing_vblank != p->cfg.fg_pacing_vblank) DropFg(p);
+    if (c.fg_pacing_vblank != p->cfg.fg_pacing_vblank || c.fg_warp != p->cfg.fg_warp) DropFg(p);
     if (c.nr_model && !p->nr)
     {
         p->nr = NrInit(*p->g, ExeDir().c_str(), (NrParamBlock)c.param_block);
@@ -457,18 +457,19 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // EvaluateFeature calls with model=0, each one taking the NgxMutex that DLSS-G also needs.
     const bool model_on = c.nr_model && p->nr && !p->model_dead;
     const bool async = c.nr_async && model_on && !p->model_failed;
-    // Motion vectors have exactly one consumer: the model (its temporal reprojection). Frame
-    // generation is not one - DLSS-G measures motion itself and ignores the values it is handed
-    // (fg.cpp, Evaluate: our flow, zeros and a field 50 px wrong score identically). Without the
-    // model the gray pass, the OFA execute, the queue wait on it and the expand ran for nobody, and
-    // they were 82-93% of an FG-only frame.
-    const bool need_mv = model_on && !p->bypass;
+    // Motion vectors have two consumers: the model (its temporal reprojection) and the warp engine
+    // (it extrapolates along them). DLSS-G is not one - it measures motion itself and ignores the
+    // values it is handed (fg.cpp, Evaluate: our flow, zeros and a field 50 px wrong score
+    // identically). Without either, the gray pass, the OFA execute, the queue wait on it and the
+    // expand ran for nobody, and they were 82-93% of an FG-only frame.
+    const bool warp_fg = c.fg_enabled && c.fg_warp;
+    const bool need_mv = (model_on && !p->bypass) || warp_fg;
     if (need_mv && !p->had_mv) reset = true;   // the previous gray is stale: no flow across the gap
     p->had_mv = need_mv;
-    // The per-frame flow (pair 0, current -> previous -> p->mv) has one reader: the SYNC evaluate.
-    // The async track warps its residual with a different flow (pair 2, current -> the residual's
-    // own frame), so it needs no pair 0 at all.
-    const bool need_pair0 = model_on && !async && !p->bypass;
+    // The per-frame flow (pair 0, current -> previous -> p->mv) has two readers: the SYNC evaluate and
+    // the warp engine. The async track warps its residual with a different flow (pair 2, current ->
+    // the residual's own frame), so it needs no pair 0 for itself.
+    const bool need_pair0 = (model_on && !async && !p->bypass) || warp_fg;
     if (async && !p->model_thread.joinable() && !StartModel(p)) return false;
     // The presenter is always on while an overlay exists: passthrough (multiplier 1) with FG off,
     // generation with cfg.fg_enabled (ini, F8). A generation failure turns the flag off (F8 retries)
@@ -484,8 +485,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         if (p->fg && (FgFailed(p->fg) || FgMultiplier(p->fg) != want)) DropFg(p);
         if (!p->fg)
         {
-            p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, want, c.fg_pacing_vblank);
-            if (!p->fg && want > 1) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, 1, c.fg_pacing_vblank); }
+            p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, want, c.fg_pacing_vblank, c.fg_warp);
+            if (!p->fg && want > 1) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, 1, c.fg_pacing_vblank, false); }
             if (!p->fg) { Log("[fg] passthrough presenter create failed"); return false; }
         }
         FgSetTiming(p->fg, c.fg_phase_ms, c.fg_min_gain, c.fg_max_in_fps);   // ponytail: one atomic store per frame, no reload plumbing
@@ -778,6 +779,19 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     GpuBarrier(cl, shown, UAV, CSRC);
     p->shown = shown;
     // the presenter thread presents (passthrough or generation); --no-present has no Fg
+    // engine=warp: the generated frames are this one pushed ahead along its own flow, (i+1)/multiplier
+    // of an interval each, written straight into the slot. Not while the governor has FG paused.
+    if (fg_dst && warp_fg && !FgPaused(p->fg) && FgWarpTarget(p->fg, 0))
+    {
+        GpuBarrier(cl, shown, CSRC, NPSR);
+        for (int i = 0; ID3D12Resource* gen = FgWarpTarget(p->fg, i); ++i)
+        {
+            GpuBarrier(cl, gen, CSRC, UAV);
+            CsWarp(g, p->sh, cl, shown, p->mv, gen, p->w, p->h, p->ww, p->wh, (i + 1.0f) / (float)FgMultiplier(p->fg), (UINT)cp.nrects);
+            GpuBarrier(cl, gen, UAV, CSRC);
+        }
+        GpuBarrier(cl, shown, NPSR, CSRC);
+    }
     const bool fg_recorded = fg_dst && FgRecord(p->fg, cp.rects, (int)cp.nrects);
     stamp(17);
     const UINT64 f2 = GpuEnd(g);

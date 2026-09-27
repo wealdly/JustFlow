@@ -50,7 +50,7 @@ struct Fg;
 
 // vblank_pacing: false = CPU timer schedule (the original path, for comparison).
 Fg*  FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier /* 1 = passthrough, 2..4 */,
-              bool vblank_pacing);
+              bool vblank_pacing, bool warp /* extrapolate (CsWarp) instead of DLSS-G */);
 void FgDestroy(Fg* f);   // stops the presenter (drains the GPU), releases the feature and textures
 int  FgMultiplier(const Fg* f);   // as created (1 = passthrough)
 // rects/nrects: the addon UI mask for THIS frame, in output pixels, restored onto every generated
@@ -61,6 +61,9 @@ ID3D12Resource* FgDebugGen(Fg* f, int i);
 ID3D12Resource* FgDebugReal(Fg* f);      // the real frame those generated frames came from
 
 ID3D12Resource* FgAcquire(Fg* f);
+// engine=warp only: generated frame i of the slot FgAcquire took, for the pipeline to write (CSRC at
+// rest, UAV-capable) in the same list as the real frame. nullptr past the last one, or with DLSS-G.
+ID3D12Resource* FgWarpTarget(Fg* f, int i);
 bool FgRecord(Fg* f, const UiRect* rects = nullptr, int nrects = 0);
 void FgSubmit(Fg* f, UINT64 render_fence_value, bool reset, LONGLONG cap_qpc, LONGLONG acq_qpc);
 // Live pacing knob (no rebuild): phase_ms shifts every scheduled present target (negative = earlier).

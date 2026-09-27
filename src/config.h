@@ -80,6 +80,7 @@ struct Config
     bool  fg_enabled = false;
     int   fg_multiplier = 2;               // presented frames per rendered frame, 2..4
     bool  fg_pacing_vblank = true;         // pacing=vblank | timer
+    bool  fg_warp = false;                 // engine=dlssg (interpolation) | warp (extrapolation: CsWarp, no added latency)
     float fg_min_gain = 1.5f;              // governor: pause generation while presented/submitted stays below this (0 = never)
     float fg_max_in_fps = 90.0f;           // governor: no generation while the game already delivers more than this (0 = never)
     float fg_phase_ms = 0.0f;              // shifts every scheduled present target (negative = earlier); live (F11)

@@ -14,7 +14,7 @@ set(FXC "${WINSDK_ROOT}/bin/${WINSDK_VER}/x64/fxc.exe")
 set(CPPWINRT_INC "${WINSDK_ROOT}/Include/${WINSDK_VER}/cppwinrt")
 
 # ---- shaders: fxc -> gen/<name>.h with g_cs_<name> byte array ----------------------------------
-set(SHADERS swizzle gray downscale expand compose residual compose_residual text sharpen artcnn)
+set(SHADERS swizzle gray downscale expand compose residual compose_residual text sharpen artcnn warp)
 set(SHADER_HEADERS)
 # ponytail: artcnn is a ~250 KB generated blob. Embedding it made the unsigned exe look like a
 # packer to Smart App Control (it blocked the binary outright), so it ships as a .cso data file.

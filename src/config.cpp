@@ -164,6 +164,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.fg_enabled = B(L"fg", L"enabled", c.fg_enabled);
     c.fg_multiplier = I(L"fg", L"multiplier", c.fg_multiplier);
     c.fg_pacing_vblank = S(L"fg", L"pacing", c.fg_pacing_vblank ? L"vblank" : L"timer") != L"timer";
+    c.fg_warp = S(L"fg", L"engine", c.fg_warp ? L"warp" : L"dlssg") == L"warp";
     c.fg_phase_ms = F(L"fg", L"phase_ms", c.fg_phase_ms);
     c.fg_min_gain = F(L"fg", L"min_gain", c.fg_min_gain);
     c.fg_max_in_fps = F(L"fg", L"max_input_fps", c.fg_max_in_fps);

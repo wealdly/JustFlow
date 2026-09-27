@@ -9,7 +9,12 @@ no injection, no input. The same mechanisms OBS and overlay apps use, nothing mo
   carried back to the native frame as a motion-warped residual. Fine detail stays native; lighting,
   tone and materials come from the model.
 - **Frame generation** (DLSS frame generation, desktop path) on the composed frame, paced to the display's
-  vblank. DLSS-G measures the motion itself, so it costs no optical flow of ours. Generated frames get the UI copied
+  vblank. DLSS-G measures the motion itself, so it costs no optical flow of ours.
+  `[fg] engine=warp` swaps DLSS-G for extrapolation: the newest frame pushed ahead along its own
+  optical flow. Nothing is held back, so it adds no latency (DLSS-G interpolates and shows every real
+  frame half an interval late), and it costs about half the GPU time (0.8 vs 1.7 ms per real frame
+  at 4K). It is a little less exact: scored against the true frame, 1.21 vs 1.09 grey levels at
+  normal motion, 4.2 vs 3.2 on fast motion, where repeating the frame scores 5.9 / 14.4. Generated frames get the UI copied
   back out of the real frame, so text and action bars do not smear with the world.
 - **Capture** by Windows.Graphics.Capture, uncapped on Windows 11 24H2+ (`MinUpdateInterval`), or DXGI
   Desktop Duplication where that is unavailable (`[capture] mode=auto|wgc|dda`).
