@@ -32,7 +32,7 @@ static const D3D12_RESOURCE_STATES CSRC = D3D12_RESOURCE_STATE_COPY_SOURCE;
 static const D3D12_RESOURCE_STATES CDST = D3D12_RESOURCE_STATE_COPY_DEST;
 static const int kSlots = 3, kMaxGen = 3;
 
-// Rest states: real CSRC, mv CDST, gen[] CSRC, depth NPSR, disable UAV. state: 0 free, 1 writing
+// Rest states: real CSRC, gen[] CSRC, mv/depth NPSR, disable UAV. state: 0 free, 1 writing
 // (producer), 2 ready, 3 presenting; guarded by Fg::mu.
 // Queues: the main queue writes real/mv (FgRecord copies, fence = Gpu::fence value); the FG queue
 // (Fg::ctx) reads them + writes gen[] (eval_fence = ctx fence value); the present queue reads
@@ -40,7 +40,7 @@ static const int kSlots = 3, kMaxGen = 3;
 // present copy before the next FgRecord copies into the slot.
 struct FgSlot
 {
-    ID3D12Resource *real = nullptr, *mv = nullptr, *gen[kMaxGen] = {};
+    ID3D12Resource *real = nullptr, *gen[kMaxGen] = {};
     int    state = 0;
     UINT64 seq = 0, fence = 0, eval_fence = 0;
     int    eval_slot = -1;    // ctx ring slot the evaluate stamped, read back when the fence lands
@@ -60,7 +60,7 @@ struct Fg
     Overlay* ov = nullptr;
     UINT     w = 0, h = 0, mw = 0, mh = 0;
     int      count = 1;                      // generated frames per real frame (0 = passthrough)
-    bool     vblank = true, mv_dilated = true;
+    bool     vblank = true;
     std::atomic<double> phase{ 0.0 };        // FgSetTiming (main) -> Presenter
     std::atomic<double> min_gain{ 1.5 };     // governor threshold: presented / submitted (0 = governor off)
     std::atomic<double> max_in{ 90.0 };      // governor floor: no generation while the game already delivers more than this (0 = off)
@@ -73,7 +73,7 @@ struct Fg
     PFN_FgCreate create = nullptr; PFN_FgRelease release = nullptr;
     NVSDK_NGX_Parameter* params = nullptr;
     NVSDK_NGX_Handle* feature = nullptr;
-    ID3D12Resource *depth = nullptr, *disable = nullptr, *disable_rb = nullptr;
+    ID3D12Resource *mv = nullptr, *depth = nullptr, *disable = nullptr, *disable_rb = nullptr;
     FgSlot   slots[kSlots];
     FgSlot*  pending = nullptr;              // reserved by FgRecord, handed over by FgSubmit
     UINT64   seq = 0; double last_submit = 0; bool history = false;
@@ -141,7 +141,6 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate)
     if (!GpuCtxBegin(g, f->ctx)) return Fail(f, "FG queue begin (device removed?)");
     ID3D12GraphicsCommandList* cl = f->ctx.list;
     GpuBarrier(cl, s->real, CSRC, NPSR);
-    GpuBarrier(cl, s->mv, CDST, NPSR);
     NVSDK_NGX_DLSSG_Opt_Eval_Params opt = {};
     for (int i = 0; i < 4; ++i)
         opt.cameraViewToClip[i][i] = opt.clipToCameraView[i][i] = opt.clipToLensClip[i][i] = opt.clipToPrevClip[i][i] = opt.prevClipToClip[i][i] = 1.0f;
@@ -158,12 +157,15 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate)
     //  motionVectorsInvalidValue: "which value represents an invalid (un-initialized) value" - the
     //    zero-init default (0) would flag every static pixel and every zero_below-zeroed vector as
     //    invalid. -65504 (min half) never comes out of the expand shader (R16G16_FLOAT, |v| < 4K).
-    //  motionVectorsDilated: "already dilated or not". Ours are a dense per-pixel field (bilinear
-    //    expand of a 1-px OFA grid), not depth-dilated - the honest value is false, but DLSS-G's
-    //    dilation pass keys on depth, which is flat here, so true (the NeuralScreen setting) just
-    //    skips a no-op pass. Default 1; [fg] mv_dilated=0 A/Bs it live (F11 rebuilds the Fg).
+    //  The motion vectors are a constant ZERO field, and that is not a shortcut: DLSS-G measures the
+    //    motion itself and, with this camera model, ignores the values it is given. Scored against
+    //    the true in-between frame (tools/scene rendered at 2x, fed every other frame): our optical
+    //    flow, zeros and a field deliberately 50 px wrong all give 1.089 grey levels at 10 px/frame
+    //    and 3.22 at 5x that motion (run-to-run noise 0.01). Only the validity flag counts - the
+    //    invalid value is worse (1.32). The OFA pass it used to cost was 0.4-0.6 ms a frame.
+    //  motionVectorsDilated = true: skips DLSS-G's dilation pass over a field with nothing in it.
     opt.cameraMotionIncluded = opt.orthoProjection = true;
-    opt.motionVectorsDilated = f->mv_dilated;
+    opt.motionVectorsDilated = true;
     opt.motionVectorsInvalidValue = -65504.0f;
     opt.colorBuffersHDR = false;
     opt.reset = !interpolate;
@@ -171,7 +173,7 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate)
     opt.backbufferSubrectSize = opt.outputInterpSubrectSize = { f->w, f->h };
     opt.multiFrameCount = (unsigned)f->count;
     NVSDK_NGX_D3D12_DLSSG_Eval_Params ep = {};
-    ep.pBackbuffer = s->real; ep.pMVecs = s->mv; ep.pDepth = f->depth; ep.pOutputDisableInterpolation = f->disable;
+    ep.pBackbuffer = s->real; ep.pMVecs = f->mv; ep.pDepth = f->depth; ep.pOutputDisableInterpolation = f->disable;
     f->params->Reset();
     f->params->Set(NVSDK_NGX_DLSSG_Parameter_BackbufferFrameID, (unsigned long long)s->seq);
     NVSDK_NGX_Result r = NVSDK_NGX_Result_Success; DWORD code = 0;
@@ -211,8 +213,7 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate)
         }
         GpuBarrier(cl, s->gen[i], CDST, CSRC);
     }
-    GpuBarrier(cl, s->mv, NPSR, CDST);
-    f->ctx.queue->Wait(g.fence, s->fence);   // GPU-side: the slot's real + mv copies (list 2) are complete on the main queue
+    f->ctx.queue->Wait(g.fence, s->fence);   // GPU-side: the slot's real frame (list 2) is complete on the main queue
     const int slot = f->ctx.slot;
     const UINT64 v = GpuCtxEnd(f->ctx);
     if (!v) return Fail(f, "FG queue submit");
@@ -484,12 +485,12 @@ static void RaisePresenterPriority(std::thread& t)
         Log("[fg] presenter priority unchanged (err %lu) - normal priority is fine, just jitterier", GetLastError());
 }
 
-Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier, bool vblank_pacing, bool mv_dilated)
+Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier, bool vblank_pacing)
 {
     Fg* f = new Fg;
     f->g = &g; f->ov = ov; f->dir = dir; f->w = out_w; f->h = out_h; f->mw = mv_w; f->mh = mv_h;
     f->count = std::clamp(multiplier, 1, 4) - 1;
-    f->vblank = vblank_pacing; f->mv_dilated = mv_dilated;
+    f->vblank = vblank_pacing;
     auto fail = [&](const char* why) { Fail(f, why); FgDestroy(f); return (Fg*)nullptr; };
 
     // ponytail: passthrough keeps the ctx too (its event is what the presenter waits on) - one code path.
@@ -534,20 +535,22 @@ Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UI
     f->depth = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_depth");
     std::vector<float> flat((size_t)mv_w * mv_h, 0.5f);
     if (!f->depth || !GpuUploadTex(g, f->depth, flat.data(), mv_w, mv_h, 4, NPSR)) return fail("depth texture");
+    f->mv = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_mv");   // zeros, for good: see Evaluate
+    const std::vector<uint32_t> zero((size_t)mv_w * mv_h, 0);
+    if (!f->mv || !GpuUploadTex(g, f->mv, zero.data(), mv_w, mv_h, 4, NPSR)) return fail("mv texture");
     f->disable = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_DEFAULT, UAV, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, L"fg_disable");
     f->disable_rb = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"fg_disable_rb");
     if (!f->disable || !f->disable_rb) return fail("disable buffers");
     for (auto& s : f->slots)
     {
         s.real = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_real");
-        s.mv = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, CDST, L"fg_mv");
-        if (!s.real || !s.mv) return fail("slot textures");
+        if (!s.real) return fail("slot textures");
         for (int i = 0; i < f->count; ++i)
             if (!(s.gen[i] = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_gen"))) return fail("slot textures");
     }
     f->thread = std::thread(Presenter, f);
     RaisePresenterPriority(f->thread);
-    Log("[fg] feature created %ux%u mv %ux%u multiplier %d pacing=%s mv_dilated=%d", out_w, out_h, mv_w, mv_h, f->count + 1, vblank_pacing ? "vblank" : "timer", mv_dilated ? 1 : 0);
+    Log("[fg] feature created %ux%u multiplier %d pacing=%s", out_w, out_h, f->count + 1, vblank_pacing ? "vblank" : "timer");
     return f;
 }
 
@@ -563,8 +566,8 @@ void FgDestroy(Fg* f)
     if (f->feature) { std::lock_guard<std::mutex> lk(NgxMutex()); f->release(f->feature); f->feature = nullptr; }
     // ponytail: no Shutdown1 - NR's parameter block lives in the same core; the refcount leaks until exit.
     if (f->params) NVSDK_NGX_D3D12_DestroyParameters(f->params);
-    for (auto& s : f->slots) { REL(s.real); REL(s.mv); for (auto& t : s.gen) REL(t); }
-    REL(f->depth); REL(f->disable); REL(f->disable_rb);
+    for (auto& s : f->slots) { REL(s.real); for (auto& t : s.gen) REL(t); }
+    REL(f->mv); REL(f->depth); REL(f->disable); REL(f->disable_rb);
     GpuCtxShutdown(*f->g, f->ctx);
     if (f->dll) FreeLibrary(f->dll);
     delete f;
@@ -651,16 +654,12 @@ ID3D12Resource* FgAcquire(Fg* f)
     return s->real;
 }
 
-bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, const UiRect* rects, int nrects)
+bool FgRecord(Fg* f, const UiRect* rects, int nrects)
 {
     FgSlot* s = f->pending;
     if (f->failed || !s) return false;
     s->nrects = std::clamp(nrects, 0, 64);
     if (s->nrects) memcpy(s->rects, rects, (size_t)s->nrects * sizeof(UiRect));
-    if (!f->count) return true;   // passthrough: no mv
-    GpuBarrier(cl, mv, NPSR, CSRC);
-    cl->CopyResource(s->mv, mv);
-    GpuBarrier(cl, mv, CSRC, NPSR);
     return true;
 }
 

@@ -8,8 +8,8 @@ no injection, no input. The same mechanisms OBS and overlay apps use, nothing mo
 - **Neural rendering** (DLSS 5, feature 18) on a downscaled working copy, with the model's edit
   carried back to the native frame as a motion-warped residual. Fine detail stays native; lighting,
   tone and materials come from the model.
-- **Frame generation** (DLSS frame generation, desktop path) on the composed frame with hardware
-  optical-flow motion vectors, paced to the display's vblank. Generated frames get the UI copied
+- **Frame generation** (DLSS frame generation, desktop path) on the composed frame, paced to the display's
+  vblank. DLSS-G measures the motion itself, so it costs no optical flow of ours. Generated frames get the UI copied
   back out of the real frame, so text and action bars do not smear with the world.
 - **Capture** by Windows.Graphics.Capture, uncapped on Windows 11 24H2+ (`MinUpdateInterval`), or DXGI
   Desktop Duplication where that is unavailable (`[capture] mode=auto|wgc|dda`).

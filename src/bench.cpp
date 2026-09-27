@@ -83,7 +83,7 @@ static std::vector<std::wstring> ListPngs(const std::wstring& path)
 
 int RunBench(int argc, char** argv)
 {
-    std::wstring input, ini; int frames = 120; UINT work_w = 0, work_h = 0; bool present = true;
+    std::wstring input, ini; int frames = 120; UINT work_w = 0, work_h = 0; bool present = true; double pace = 0;
     UINT rework_w = 0, rework_h = 0;   // --rework WxH: change the work size LIVE a third of the way in
     for (int i = 1; i < argc; ++i)
     {
@@ -91,6 +91,7 @@ int RunBench(int argc, char** argv)
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--work") && i + 1 < argc) sscanf_s(argv[++i], "%ux%u", &work_w, &work_h);
         else if (!strcmp(argv[i], "--no-present")) present = false;
+        else if (!strcmp(argv[i], "--pace") && i + 1 < argc) pace = atof(argv[++i]);
         else if (!strcmp(argv[i], "--rework") && i + 1 < argc) sscanf_s(argv[++i], "%ux%u", &rework_w, &rework_h);
         else if (!strcmp(argv[i], "--ini") && i + 1 < argc) { const char* s = argv[++i]; ini.assign(s, s + strlen(s)); }   // profile next to the exe, or a path
     }
@@ -160,6 +161,7 @@ int RunBench(int argc, char** argv)
             PipelineReload(p, nc);
         }
         if (toast_test && i == 6) p->toast_until_ms = 0;
+        if (pace > 0) { const double due = t0 + i * 1000.0 / pace; while (NowMs() < due) Sleep(1); }
         if (!PipelineFrame(p, tex[last_in], nullptr, 0, i == 0)) { Log("[bench] frame %d failed", i); GpuLogDeviceRemoved(g, "bench"); rc = 2; break; }
         // ponytail: idle after each frame so both lists of the frame retire and get sampled (the
         // stamp reader only sees the most recently retired slot). Per-stage GPU times are unaffected;
@@ -198,6 +200,13 @@ int RunBench(int argc, char** argv)
         const double sp_max = sp.v.empty() ? -1.0 : *std::max_element(sp.v.begin(), sp.v.end());   // a single hitch hides from p95
         double ev95 = -1; const double ev = FgEvalMs(p->fg, &ev95);
         Log("[fg] bench: %u frames presented (%.1f fps), %u dropped, spacing %.2f/%.2f/%.2f ms (med/p95/MAX, %zu samples), %u paused, eval %.2f/%.2f ms (med/p95)", fs.presented, fs.presented * 1000.0 / wall, fs.drops, sp.med(), sp.p95(), sp_max, sp.v.size(), fs.paused, ev, ev95);
+    }
+
+    if (p->fg && FgMultiplier(p->fg) > 1)
+    {
+        std::vector<uint8_t> px((size_t)w * h * 4);
+        if (ID3D12Resource* t = FgDebugGen(p->fg, 0)) if (GpuReadbackTex(g, t, px.data(), w, h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE)) SavePngRgba(L"fg_gen.png", px.data(), w, h);
+        if (ID3D12Resource* t = FgDebugReal(p->fg)) if (GpuReadbackTex(g, t, px.data(), w, h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE)) SavePngRgba(L"fg_real.png", px.data(), w, h);
     }
 
     // The UI restore on generated frames: inside a mask rect a generated frame must be pixel-exact
