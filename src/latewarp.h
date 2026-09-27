@@ -3,9 +3,10 @@
 // JustFlow has no camera or depth from the game, so it feeds what a capture can honestly say: a flat
 // depth, zero motion vectors, an identity source camera and a target camera rotated by (yaw, pitch,
 // roll). UI pixels come in through the UI layer (alpha = coverage) and are never warped.
-// Measured (bench --lwtest, tools/scene): an unchanged camera returns the frame byte-exact except that
-// RED AND BLUE COME BACK SWAPPED (the runtime assumes a BGRA backbuffer) - the caller swizzles. 2 deg of
-// yaw moves the centre 66 px at 60 deg vfov (edges more), as a real turn does. It is a ROTATION: right for a
+// Measured (bench --lwtest, tools/scene): an unchanged camera returns the frame byte-exact; RGBA8 and
+// BGRA8 in, RGBA8 out, no channel games. The flat depth must be FAR: Frame Warp leaves pixels close to
+// the camera unwarped (a first-person weapon). 2 deg of yaw moves the centre 66 px at 60 deg vfov (edges
+// more), as a real turn does. It is a ROTATION: right for a
 // camera turning in place (mouse-look), wrong for an orbit camera, whose pivot does not move - warping a
 // third-person frame by its true rotation scored 8.35 against 5.87 for not warping at all. Orbit
 // cameras need the no-warp mask on what stays put.

@@ -116,6 +116,10 @@ struct Pipeline
     bool       model_reset_pending = true;             // main: reset flags accumulated since the last hand-off
     ID3D12Resource* model_src = nullptr;               // RGBA8 native, COPY_DEST at rest
     ID3D12Resource *nr_in_m = nullptr, *nr_out_m = nullptr, *mv_m = nullptr;   // work res: NPSR, UAV, NPSR
+    // latewarp engine: the flow averaged on a 32x18 grid, read back a few frames later for the mouse model
+    ID3D12Resource* mvgrid = nullptr; ID3D12Resource* mvgrid_rb[4] = {};
+    struct { UINT64 fence = 0; LONGLONG t0 = 0, t1 = 0; } mvgrid_q[4];
+    LONGLONG lw_prev_cap = 0;
     ID3D12Resource* mv_res = nullptr;                  // main: motion current frame -> residual's model frame (work res, NPSR)
     ID3D12Resource* residual[2] = {};                  // RGBA16F work res, NPSR at rest
     std::mutex pub_mu;                                 // guards pub_* and model_ms

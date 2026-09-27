@@ -3,7 +3,7 @@
 // adding a setting means adding a row here and reading it in config.cpp.
 //
 // Diagnostics stay out of the table on purpose. Ini-only: param_block, warmup,
-// rebuild_debounce_frames, selftest, fg.pacing, fg.phase_ms, nr.exposure_scale,
+// rebuild_debounce_frames, selftest, fg.pacing, fg.phase_ms, fg.lw_fov, nr.exposure_scale,
 // nr.mode, nr.model_max_fps, nr.warp, nr.warp_reject, ofa.grid/zero_below, capture.cursor/border, ui.rectN, ui.mask_every,
 // ui.feather, ui.toast_scale, overlay.mode. They are for debugging, not for tuning, and a panel
 // that lists everything is a panel nobody can read.
@@ -83,7 +83,7 @@ const Setting kSettings[] = {
     // ---- 2 Frame generation ---------------------------------------------------------------------
     { 2, L"fg", L"enabled",           L"Frame generation (F8)", Bool, nullptr, L"0" },
     { 2, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4", L"2" },
-    { 2, L"fg", L"engine",            L"Engine",             Enum,  L"dlssg|warp", L"dlssg" },
+    { 2, L"fg", L"engine",            L"Engine",             Enum,  L"dlssg|warp|latewarp", L"dlssg" },
     { 2, L"fg", L"min_gain",          L"Auto-pause below gain", Float, nullptr, L"1.5" },
     { 2, L"fg", L"max_input_fps",     L"No FG above input fps", Float, nullptr, L"90" },
 

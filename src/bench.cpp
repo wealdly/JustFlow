@@ -1,5 +1,6 @@
 // WIC PNG load/save and --bench: PNG frames through the same pipeline as live capture.
 #include "latewarp.h"
+#include "mouse.h"
 #include "pipeline.h"
 #include <cmath>
 #include "log.h"
@@ -125,7 +126,7 @@ int RunBench(int argc, char** argv)
     if (lw)   // --lwtest yaw,pitch,roll,vfov (degrees): Frame Warp the LAST input frame to a turned camera -> lw_out.png
     {
         const float k = 3.14159265f / 180.0f; int rc = 1;
-        ID3D12Resource* in = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"lw_in");
+        ID3D12Resource* in = GpuMakeTex(g, w, h, DXGI_FORMAT_B8G8R8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"lw_in");
         ID3D12Resource* out = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"lw_out");
         Latewarp* l = LatewarpCreate(g, dir.c_str(), w, h, w / 2, h / 2);
         if (in && out && l && GpuUploadTex(g, in, images.back().data(), w, h, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) && GpuBegin(g))
@@ -140,7 +141,7 @@ int RunBench(int argc, char** argv)
         Log("[bench] latewarp test yaw %.3f pitch %.3f roll %.3f vfov %.1f -> %s", lw_a[0], lw_a[1], lw_a[2], lw_a[3], rc ? "FAILED" : "lw_out.png");
         LatewarpDestroy(l); if (in) in->Release(); if (out) out->Release(); GpuShutdown(g); return rc;
     }
-    if (cfg.selftest) { ComposeSelfTest(g); ArtCnnSelfTest(g); }
+    if (cfg.selftest) { ComposeSelfTest(g); ArtCnnSelfTest(g); MouseSelfTest(); }
     ResolveWork(cfg, dir);
     Pipeline* p = PipelineCreate(g, cfg, w, h, present, nullptr);
     if (!p) { GpuShutdown(g); return 1; }

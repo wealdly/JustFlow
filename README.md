@@ -14,7 +14,16 @@ no injection, no input. The same mechanisms OBS and overlay apps use, nothing mo
   optical flow. Nothing is held back, so it adds no latency (DLSS-G interpolates and shows every real
   frame half an interval late), and it costs about half the GPU time (0.8 vs 1.7 ms per real frame
   at 4K). It is a little less exact: scored against the true frame, 1.21 vs 1.09 grey levels at
-  normal motion, 4.2 vs 3.2 on fast motion, where repeating the frame scores 5.9 / 14.4. Generated frames get the UI copied
+  normal motion, 4.2 vs 3.2 on fast motion, where repeating the frame scores 5.9 / 14.4.
+  `[fg] engine=latewarp` is Reflex 2's idea from outside the game: at every refresh the newest frame is
+  re-projected by NVIDIA Frame Warp (`nvngx_latewarp.dll` next to the exe, not included) to where the
+  mouse has turned the camera since the game drew it, so turning answers at the display's rate. It
+  reads raw mouse input - its own hidden window, mouse only, read-only, only while this engine runs - and
+  learns pixels-per-count and the game's input delay from our optical flow, separately with and without
+  a button held (WoW turns only with a button held, so cursor movement never warps). It warps nothing
+  until that fit is reliable. The warp is a camera rotation: exact for first-person mouse-look; for
+  third-person cameras the character, which orbits with the camera, still slides with the background.
+ Generated frames get the UI copied
   back out of the real frame, so text and action bars do not smear with the world.
 - **Capture** by Windows.Graphics.Capture, uncapped on Windows 11 24H2+ (`MinUpdateInterval`), or DXGI
   Desktop Duplication where that is unavailable (`[capture] mode=auto|wgc|dda`).

@@ -164,7 +164,8 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.fg_enabled = B(L"fg", L"enabled", c.fg_enabled);
     c.fg_multiplier = I(L"fg", L"multiplier", c.fg_multiplier);
     c.fg_pacing_vblank = S(L"fg", L"pacing", c.fg_pacing_vblank ? L"vblank" : L"timer") != L"timer";
-    c.fg_warp = S(L"fg", L"engine", c.fg_warp ? L"warp" : L"dlssg") == L"warp";
+    { const std::wstring e = S(L"fg", L"engine", c.fg_engine == 1 ? L"warp" : c.fg_engine == 2 ? L"latewarp" : L"dlssg"); c.fg_engine = e == L"warp" ? 1 : e == L"latewarp" ? 2 : 0; }
+    c.fg_lw_vfov = F(L"fg", L"lw_fov", c.fg_lw_vfov);
     c.fg_phase_ms = F(L"fg", L"phase_ms", c.fg_phase_ms);
     c.fg_min_gain = F(L"fg", L"min_gain", c.fg_min_gain);
     c.fg_max_in_fps = F(L"fg", L"max_input_fps", c.fg_max_in_fps);

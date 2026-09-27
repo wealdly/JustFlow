@@ -54,6 +54,8 @@ void CsComposeResidual(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12
 // Frame generation by extrapolation (engine=warp): src pushed t real-frame intervals ahead along mv.
 void CsWarp(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* mv, ID3D12Resource* out,
             UINT w, UINT h, UINT ww, UINT wh, float t, UINT nrects);
+// mv (ww x wh, NPSR) averaged into a 32x18 R32G32_FLOAT grid (UAV), for the latewarp mouse model.
+void CsMvGrid(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* grid);
 // ---- on-screen text -------------------------------------------------------------------------
 // Draws `text` (ASCII 32..126, up to 64 chars, 8x8 font at `scale` px per font pixel) white with a
 // 1 px dark outline on a rounded dark box (padding box_pad) into an RGBA8 UAV (w x h). x/y = box

@@ -6,6 +6,7 @@
 #include "log.h"
 #include "tray.h"
 #include "settings.h"
+#include "mouse.h"
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <algorithm>
@@ -379,6 +380,8 @@ void PipelineDestroy(Pipeline* p)
     REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->nr_in); REL(p->nr_in2); REL(p->nr_out); REL(p->mv);
     REL(p->model_src); ReleaseModelWork(p);
     for (auto& r : p->strip_rb) REL(r);
+    REL(p->mvgrid); for (auto& r : p->mvgrid_rb) REL(r);
+    MouseStop();
     if (p->model_ctx.queue) GpuCtxShutdown(*p->g, p->model_ctx);   // its queue may hold a Wait on the OFA fence: before OfaDestroy
     if (p->ofa) OfaDestroy(p->ofa);
     if (p->nr) NrShutdown(p->nr);
@@ -410,7 +413,7 @@ void PipelineReload(Pipeline* p, const Config& c_in)
     Config c = c_in; WorkAuto(c, p->w, p->h);   // resolve BEFORE comparing, or every reload of an auto profile looks like a size change
     const bool rebuild = ConfigNeedsRebuild(p->cfg, c);
     // recreated next frame (a multiplier change is caught there: the presenter is rebuilt only when it differs)
-    if (c.fg_pacing_vblank != p->cfg.fg_pacing_vblank || c.fg_warp != p->cfg.fg_warp) DropFg(p);
+    if (c.fg_pacing_vblank != p->cfg.fg_pacing_vblank || c.fg_engine != p->cfg.fg_engine || c.fg_lw_vfov != p->cfg.fg_lw_vfov) DropFg(p);
     if (c.nr_model && !p->nr)
     {
         p->nr = NrInit(*p->g, ExeDir().c_str(), (NrParamBlock)c.param_block);
@@ -444,6 +447,22 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
 {
     Gpu& g = *p->g; const Config& c = p->cfg; ID3D12GraphicsCommandList* cl = g.list;
     p->last_evaluated = false; ++p->frame_index;
+    for (auto& q : p->mvgrid_q)   // latewarp: flow grids whose frames have finished -> the mouse model
+        if (q.fence && g.fence->GetCompletedValue() >= q.fence)
+        {
+            const int i = (int)(&q - p->mvgrid_q);
+            float* d = nullptr; D3D12_RANGE rr = { 0, 256 * 18 };
+            if (SUCCEEDED(p->mvgrid_rb[i]->Map(0, &rr, (void**)&d)))
+            {
+                float xs[576], ys[576];
+                for (int j = 0; j < 576; ++j) { xs[j] = d[(j / 32) * 64 + (j % 32) * 2]; ys[j] = d[(j / 32) * 64 + (j % 32) * 2 + 1]; }
+                D3D12_RANGE none = { 0, 0 }; p->mvgrid_rb[i]->Unmap(0, &none);
+                std::nth_element(xs, xs + 288, xs + 576); std::nth_element(ys, ys + 288, ys + 576);
+                const float k = -(float)p->w / (float)p->ww;   // backward flow, work px -> where the content went, output px
+                MouseObserve(q.t0, q.t1, xs[288] * k, ys[288] * k);
+            }
+            q.fence = 0;
+        }
     if (p->force_reset) { reset = true; p->force_reset = false; }
     if (p->rebuild_countdown > 0 && --p->rebuild_countdown == 0)
     {
@@ -462,14 +481,15 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // values it is handed (fg.cpp, Evaluate: our flow, zeros and a field 50 px wrong score
     // identically). Without either, the gray pass, the OFA execute, the queue wait on it and the
     // expand ran for nobody, and they were 82-93% of an FG-only frame.
-    const bool warp_fg = c.fg_enabled && c.fg_warp;
-    const bool need_mv = (model_on && !p->bypass) || warp_fg;
+    const bool warp_fg = c.fg_enabled && c.fg_engine == 1, lw_fg = c.fg_enabled && c.fg_engine == 2;   // lw: the mouse model learns from the flow
+    if (lw_fg) MouseStart(); else MouseStop();
+    const bool need_mv = (model_on && !p->bypass) || warp_fg || lw_fg;
     if (need_mv && !p->had_mv) reset = true;   // the previous gray is stale: no flow across the gap
     p->had_mv = need_mv;
     // The per-frame flow (pair 0, current -> previous -> p->mv) has two readers: the SYNC evaluate and
     // the warp engine. The async track warps its residual with a different flow (pair 2, current ->
     // the residual's own frame), so it needs no pair 0 for itself.
-    const bool need_pair0 = (model_on && !async && !p->bypass) || warp_fg;
+    const bool need_pair0 = (model_on && !async && !p->bypass) || warp_fg || lw_fg;
     if (async && !p->model_thread.joinable() && !StartModel(p)) return false;
     // The presenter is always on while an overlay exists: passthrough (multiplier 1) with FG off,
     // generation with cfg.fg_enabled (ini, F8). A generation failure turns the flag off (F8 retries)
@@ -485,8 +505,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         if (p->fg && (FgFailed(p->fg) || FgMultiplier(p->fg) != want)) DropFg(p);
         if (!p->fg)
         {
-            p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, want, c.fg_pacing_vblank, c.fg_warp);
-            if (!p->fg && want > 1) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, 1, c.fg_pacing_vblank, false); }
+            p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, want, c.fg_pacing_vblank, c.fg_engine, p->sh, c.fg_lw_vfov * 3.14159265f / 180.0f);
+            if (!p->fg && want > 1) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, 1, c.fg_pacing_vblank, 0); }
             if (!p->fg) { Log("[fg] passthrough presenter create failed"); return false; }
         }
         FgSetTiming(p->fg, c.fg_phase_ms, c.fg_min_gain, c.fg_max_in_fps);   // ponytail: one atomic store per frame, no reload plumbing
@@ -628,6 +648,30 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         GpuBarrier(cl, p->mv, UAV, NPSR);
         GpuBarrier(cl, flow, NPSR, D3D12_RESOURCE_STATE_COMMON);
     }
+    int grid_q = -1;   // latewarp: this frame's flow, averaged and queued for the mouse model
+    if (lw_fg && need_pair0 && !reset && p->cap_qpc && p->lw_prev_cap)
+    {
+        if (!p->mvgrid)
+        {
+            p->mvgrid = GpuMakeTex(g, 32, 18, DXGI_FORMAT_R32G32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"mvgrid");
+            for (auto& r : p->mvgrid_rb) r = GpuMakeBuffer(g, 256 * 18, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE, L"mvgrid_rb");
+        }
+        for (int i = 0; i < 4 && grid_q < 0; ++i) if (!p->mvgrid_q[i].fence && p->mvgrid_rb[i]) grid_q = i;
+        if (p->mvgrid && grid_q >= 0)
+        {
+            GpuBarrier(cl, p->mvgrid, CSRC, UAV);
+            CsMvGrid(g, p->sh, cl, p->mv, p->ww, p->wh, p->mvgrid);
+            GpuBarrier(cl, p->mvgrid, UAV, CSRC);
+            D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+            src.pResource = p->mvgrid; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.pResource = p->mvgrid_rb[grid_q]; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            dst.PlacedFootprint.Footprint = { DXGI_FORMAT_R32G32_FLOAT, 32, 18, 1, 256 };
+            cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            p->mvgrid_q[grid_q].t0 = p->lw_prev_cap; p->mvgrid_q[grid_q].t1 = p->cap_qpc;
+        }
+        else grid_q = -1;
+    }
+    p->lw_prev_cap = lw_fg ? p->cap_qpc : 0;
     if (warp_res)
     {
         ID3D12Resource* flow3 = OfaFlow3(p->ofa);
@@ -796,6 +840,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     stamp(17);
     const UINT64 f2 = GpuEnd(g);
     if (!f2) return false;
+    if (grid_q >= 0) p->mvgrid_q[grid_q].fence = f2;
     if (async && p->cmp_idx >= 0) p->residual_read_fence[p->cmp_idx] = f2;   // the model thread waits for it before rewriting that residual
     PipelineReadStamps(p);
     tw = NowMs();

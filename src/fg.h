@@ -50,7 +50,8 @@ struct Fg;
 
 // vblank_pacing: false = CPU timer schedule (the original path, for comparison).
 Fg*  FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier /* 1 = passthrough, 2..4 */,
-              bool vblank_pacing, bool warp /* extrapolate (CsWarp) instead of DLSS-G */);
+              bool vblank_pacing, int engine /* 0 DLSS-G, 1 warp (CsWarp extrapolation), 2 latewarp (Frame Warp to the mouse) */,
+              Shaders* sh = nullptr /* engines 1-2 */, float lw_vfov = 1.0472f /* radians, engine 2 */);
 void FgDestroy(Fg* f);   // stops the presenter (drains the GPU), releases the feature and textures
 int  FgMultiplier(const Fg* f);   // as created (1 = passthrough)
 // rects/nrects: the addon UI mask for THIS frame, in output pixels, restored onto every generated
