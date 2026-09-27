@@ -210,8 +210,6 @@ static void ReleaseBuffers(Overlay* o)
     for (int i = 0; i < kBuffers; ++i) if (o->bb[i]) { o->bb[i]->Release(); o->bb[i] = nullptr; }
 }
 
-bool OverlayIsDirect(const Overlay* o) { return o->direct; }
-
 Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, int mode)
 {
     Overlay* o = new Overlay();
@@ -302,8 +300,6 @@ void OverlayDestroy(Overlay* o)
     if (o->ready) CloseHandle(o->ready);
     delete o;
 }
-
-HWND OverlayHwnd(Overlay* o) { return o->hwnd; }
 
 static double UsSince(LARGE_INTEGER a)
 {

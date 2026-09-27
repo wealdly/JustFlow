@@ -8,14 +8,11 @@
 
 struct Latewarp
 {
-    Gpu* g = nullptr;
     UINT w = 0, h = 0, dw = 0, dh = 0;
     NVSDK_NGX_Parameter* params = nullptr;
     NVSDK_NGX_Handle* feature = nullptr;
     ID3D12Resource *depth = nullptr, *mv = nullptr, *no_ui = nullptr;
     unsigned long long frame_id = 0;
-    std::wstring dir; const wchar_t* path_list[1] = {};
-    NVSDK_NGX_FeatureCommonInfo common = {};
 };
 
 static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -39,14 +36,10 @@ void LatewarpDestroy(Latewarp* l)
 Latewarp* LatewarpCreate(Gpu& g, const wchar_t* dir, UINT w, UINT h, UINT dw, UINT dh)
 {
     Latewarp* l = new Latewarp;
-    l->g = &g; l->w = w; l->h = h; l->dw = dw; l->dh = dh; l->dir = dir;
+    l->w = w; l->h = h; l->dw = dw; l->dh = dh;
     auto fail = [&](const char* why) { Log("[latewarp] disabled: %s", why); LatewarpDestroy(l); return (Latewarp*)nullptr; };
-    l->path_list[0] = l->dir.c_str();
-    l->common.PathListInfo.Path = l->path_list; l->common.PathListInfo.Length = 1;
-    l->common.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;
-    NVSDK_NGX_Result r = NVSDK_NGX_D3D12_Init(0x1000000ULL, dir, g.dev, &l->common, NVSDK_NGX_Version_API);   // harmless if NR/FG already did it
-    if (NVSDK_NGX_FAILED(r)) { Log("[latewarp] NGX init -> 0x%08X (%s)", r, NgxResultName(r)); return fail("NGX init"); }
-    if (NVSDK_NGX_FAILED(NVSDK_NGX_D3D12_AllocateParameters(&l->params)) || !l->params) return fail("no parameter block");
+    if (!(l->params = NgxCoreParams(g, dir, "[latewarp]"))) return fail("no NGX parameter block");
+    NVSDK_NGX_Result r;
 
     // flat depth, zero motion, no UI: what a capture can say about a frame it did not render
     l->depth = GpuMakeTex(g, dw, dh, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"lw_depth");
@@ -92,7 +85,7 @@ static void TurnedView(float m[16], float yaw, float pitch, float roll)
     memcpy(m, v, sizeof v);
 }
 
-bool LatewarpEvaluate(Latewarp* l, ID3D12GraphicsCommandList* cl, ID3D12Resource* color, ID3D12Resource* ui, ID3D12Resource* out,
+bool LatewarpEvaluate(Latewarp* l, ID3D12GraphicsCommandList* cl, ID3D12Resource* color, ID3D12Resource* out,
                       bool rendered, float yaw, float pitch, float roll, float vfov)
 {
     static float proj[16], src[16], dst[16];   // the runtime reads these while recording: keep them alive
@@ -100,7 +93,7 @@ bool LatewarpEvaluate(Latewarp* l, ID3D12GraphicsCommandList* cl, ID3D12Resource
     TurnedView(src, 0, 0, 0); TurnedView(dst, yaw, pitch, roll);
     NVSDK_NGX_Parameter* p = l->params;
     p->Set("Latewarp.Backbuffer", color); p->Set("Latewarp.HudlessColor", color);
-    p->Set("Latewarp.UIColorAlpha", ui ? ui : l->no_ui);
+    p->Set("Latewarp.UIColorAlpha", l->no_ui);
     p->Set("Depth", l->depth); p->Set("MotionVectors", l->mv); p->Set("Output", out);
     p->Set("Latewarp.NoWarpMask", (ID3D12Resource*)nullptr);
     auto rect = [&](const char* k, UINT rw, UINT rh)

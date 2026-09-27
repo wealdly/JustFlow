@@ -25,7 +25,7 @@ struct TrayState
 {
     bool nr_on = true, fg_on = false, filters_on = true;
     int  fg_multiplier = 2;
-    int  fg_engine = 0;         // 0 dlssg, 1 warp, 2 latewarp
+    int  fg_engine = 0;         // FgEngine (config.h)
     int  wipe_mode = 0;         // 0 = off
     int  profile_index = -1;    // -1 = none
     HWND game = nullptr;        // the captured window; the settings dialog opens on a different monitor
@@ -34,7 +34,7 @@ struct TrayState
 
 struct Tray;
 
-Tray* TrayCreate(const wchar_t* app_name, const wchar_t* icon_path_or_null);   // null = generated icon
+Tray* TrayCreate(const wchar_t* app_name);   // the icon is generated
 void  TrayDestroy(Tray*);
 void  TraySetProfiles(Tray*, const wchar_t* const* names, int count);          // Profiles submenu (radio)
 // The two ini files the Settings dialog and the quality presets write to. Call again on a profile

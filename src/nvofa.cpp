@@ -21,9 +21,8 @@ struct Ofa
     UINT64 value = 0;
     ID3D12Resource* inputs[kIn] = {};
     ID3D12Resource* flow[kOut] = {};
-    NvOFGPUBufferHandle reg[kIn + 2 * kOut] = {};
+    NvOFGPUBufferHandle reg[kIn + kOut] = {};
     UINT w = 0, h = 0, grid = 0, fw = 0, fh = 0;
-    int current = 0;
     std::mutex mu;   // nvOFExecute + value from two threads (per-frame path, model track)
 };
 
@@ -209,13 +208,10 @@ void OfaDestroy(Ofa* o)
 }
 
 ID3D12Resource* OfaInput(Ofa* o, int which) { return o->inputs[std::clamp(which, 0, kIn - 1)]; }
-int             OfaCurrent(Ofa* o)          { return o->current; }
 ID3D12Fence*    OfaFence(Ofa* o)            { return o->fence; }
-UINT64          OfaFenceValue(Ofa* o)       { return o->value; }
 ID3D12Resource* OfaFlow(Ofa* o)             { return o->flow[0]; }
 UINT            OfaFlowWidth(Ofa* o)        { return o->fw; }
 UINT            OfaFlowHeight(Ofa* o)       { return o->fh; }
-UINT            OfaGrid(Ofa* o)             { return o->grid; }
 ID3D12Resource* OfaFlow2(Ofa* o)            { return o->flow[1]; }
 ID3D12Resource* OfaFlow3(Ofa* o)            { return o->flow[2]; }
 
@@ -237,10 +233,3 @@ UINT64 OfaExecuteRef(Ofa* o, ID3D12Fence* in_fence, UINT64 in_value, int input_i
     return o->value;
 }
 
-bool OfaExecute(Ofa* o, ID3D12Fence* in_fence, UINT64 in_value, bool reset)
-{
-    // current -> previous (NR convention) into pair 0
-    if (!OfaExecuteRef(o, in_fence, in_value, o->current, 1 - o->current, 0, reset)) return false;
-    o->current = 1 - o->current;
-    return true;
-}

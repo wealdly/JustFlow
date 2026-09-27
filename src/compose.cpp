@@ -218,7 +218,7 @@ void CsMvGrid(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource*
 {
     const UINT c[2] = { ww, wh };
     const GpuView srv = { mv, DXGI_FORMAT_R16G16_FLOAT }, uav = { grid, DXGI_FORMAT_R32G32_FLOAT };
-    GpuDispatch(g, cl, s->mvgrid, &srv, &uav, c, GpuGroups(32, 8), GpuGroups(18, 8));
+    GpuDispatch(g, cl, s->mvgrid, &srv, &uav, c, GpuGroups(kMvGridW, 8), GpuGroups(kMvGridH, 8));
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -26,7 +26,6 @@ struct ComposeParams
 {
     float residual_strength = 1.0f;   // res = native + (nr_out^ - nr_in^) * strength
     float chroma = 1.0f;              // how much of the model's COLOUR change to keep (0 = luma only)
-    float saturation = 1.0f;          // vibrance of the composed colour, applied last (1 = untouched)
     int   wipe_mode = 0;              // 0 off, 1 split at wipe_x, 2 show native only (bypass)
     float wipe_x = 0.5f;              // 0..1 of width
     int   feather = 12;               // px
@@ -54,7 +53,9 @@ void CsComposeResidual(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12
 // Frame generation by extrapolation (engine=warp): src pushed t real-frame intervals ahead along mv.
 void CsWarp(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* mv, ID3D12Resource* out,
             UINT w, UINT h, UINT ww, UINT wh, float t, UINT nrects);
-// mv (ww x wh, NPSR) averaged into a 32x18 R32G32_FLOAT grid (UAV), for the latewarp mouse model.
+// mv (ww x wh, NPSR) averaged into a kMvGridW x kMvGridH R32G32_FLOAT grid (UAV), for the latewarp mouse
+// model. The shader (mvgrid.hlsl) has the same two numbers.
+constexpr UINT kMvGridW = 32, kMvGridH = 18, kMvGridPitch = kMvGridW * 8;   // readback row pitch: 256, already aligned
 void CsMvGrid(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* grid);
 // ---- on-screen text -------------------------------------------------------------------------
 // Draws `text` (ASCII 32..126, up to 64 chars, 8x8 font at `scale` px per font pixel) white with a

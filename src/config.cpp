@@ -62,17 +62,6 @@ HotkeySpec ParseHotkey(std::wstring s, UINT def_vk)
     return h;
 }
 
-std::wstring FormatHotkey(const HotkeySpec& h)
-{
-    std::wstring s;
-    if (h.mods & MOD_CONTROL) s += L"Ctrl+";
-    if (h.mods & MOD_ALT) s += L"Alt+";
-    if (h.mods & MOD_SHIFT) s += L"Shift+";
-    if (h.vk >= VK_F1 && h.vk <= VK_F24) s += L"F" + std::to_wstring(h.vk - VK_F1 + 1);
-    else if (h.vk) s += (wchar_t)h.vk;   // letters/digits: vk == the character
-    return s;
-}
-
 int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
 {
     auto exists = [](const wchar_t* p) { return p && *p && GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES; };
@@ -162,7 +151,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.fg_enabled = B(L"fg", L"enabled", c.fg_enabled);
     c.fg_multiplier = I(L"fg", L"multiplier", c.fg_multiplier);
     c.fg_pacing_vblank = S(L"fg", L"pacing", c.fg_pacing_vblank ? L"vblank" : L"timer") != L"timer";
-    { const std::wstring e = S(L"fg", L"engine", c.fg_engine == 1 ? L"warp" : c.fg_engine == 2 ? L"latewarp" : L"dlssg"); c.fg_engine = e == L"warp" ? 1 : e == L"latewarp" ? 2 : 0; }
+    { const std::wstring e = S(L"fg", L"engine", FgEngineName(c.fg_engine)); c.fg_engine = FG_DLSSG; for (int i = 0; i < FG_ENGINE_COUNT; ++i) if (e == FgEngineName(i)) c.fg_engine = i; }
     c.fg_lw_vfov = F(L"fg", L"lw_fov", c.fg_lw_vfov);
     c.fg_phase_ms = F(L"fg", L"phase_ms", c.fg_phase_ms);
     c.fg_min_gain = F(L"fg", L"min_gain", c.fg_min_gain);

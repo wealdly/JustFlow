@@ -3,6 +3,7 @@
 // through Tray::mu; the menu is rebuilt from the snapshot each time it pops, so there is no
 // check-mark state to keep in sync.
 #include "tray.h"
+#include "config.h"   // FgEngine
 #include <algorithm>
 #include "settings.h"
 #include <shellapi.h>
@@ -15,8 +16,8 @@
 namespace
 {
 const UINT WM_TRAY_ICON  = WM_APP + 1;   // Shell_NotifyIcon callback
-const UINT WM_TRAY_STATE = WM_APP + 2;
-const UINT WM_TRAY_SETTINGS = WM_APP + 3;   // double-click: open Settings once the menu loop has unwound   // TraySetState -> refresh tooltip on the tray thread
+const UINT WM_TRAY_STATE = WM_APP + 2;   // TraySetState -> refresh tooltip on the tray thread
+const UINT WM_TRAY_SETTINGS = WM_APP + 3;   // double-click: open Settings once the menu loop has unwound
 const UINT ICON_ID = 1;
 
 enum { IDM_STATUS = 1, IDM_NR, IDM_FILTERS, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM_MULT3, IDM_MULT4, IDM_ENG0, IDM_ENG1, IDM_ENG2, IDM_WIPE, IDM_RELOAD,
@@ -26,7 +27,7 @@ enum { IDM_STATUS = 1, IDM_NR, IDM_FILTERS, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM
 
 struct Tray
 {
-    std::wstring app, icon_path;
+    std::wstring app;
     std::thread  thread;
     HANDLE ready = nullptr;
     HWND   hwnd = nullptr;
@@ -162,9 +163,9 @@ static HMENU BuildMenu(Tray* t)
     AppendMenuW(fg, MF_STRING, IDM_ENG0, L"DLSS-G (interpolate)");
     AppendMenuW(fg, MF_STRING, IDM_ENG1, L"Warp (extrapolate, no added latency)");
     AppendMenuW(fg, MF_STRING, IDM_ENG2, L"Latewarp (Frame Warp to the mouse)");
-    CheckMenuRadioItem(fg, IDM_ENG0, IDM_ENG2, IDM_ENG0 + std::clamp(t->engine, 0, 2), MF_BYCOMMAND);
+    CheckMenuRadioItem(fg, IDM_ENG0, IDM_ENG2, IDM_ENG0 + std::clamp(t->engine, 0, FG_ENGINE_COUNT - 1), MF_BYCOMMAND);
     AppendMenuW(fg, MF_SEPARATOR, 0, nullptr);
-    const UINT per_frame = t->engine == 2 ? MF_GRAYED : 0;   // latewarp runs at the display's refresh, not a multiple
+    const UINT per_frame = t->engine == FG_LATEWARP ? MF_GRAYED : 0;   // latewarp runs at the display's refresh, not a multiple
     AppendMenuW(fg, MF_STRING | per_frame, IDM_MULT2, L"2X");
     AppendMenuW(fg, MF_STRING | per_frame, IDM_MULT3, L"3X");
     AppendMenuW(fg, MF_STRING | per_frame, IDM_MULT4, L"4X");
@@ -332,9 +333,7 @@ static void TrayThread(Tray* t)
     wc.lpfnWndProc = TrayWndProc; wc.hInstance = inst; wc.lpszClassName = L"JustFlowTray";
     RegisterClassW(&wc);   // second registration in-process just fails; CreateWindow still works
     t->taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
-    t->icon = t->icon_path.empty() ? nullptr :
-        (HICON)LoadImageW(nullptr, t->icon_path.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
-    if (!t->icon) t->icon = MakeIcon();
+    t->icon = MakeIcon();
     t->hwnd = CreateWindowExW(0, wc.lpszClassName, t->app.c_str(), WS_OVERLAPPED, 0, 0, 0, 0, nullptr, nullptr, inst, t);
     // A popup menu is drawn above its OWNER. The taskbar is topmost, so a menu owned by an ordinary
     // hidden window comes up behind it and the bottom entries (Quit) cannot be clicked. Topmost owner,
@@ -349,11 +348,10 @@ static void TrayThread(Tray* t)
 
 // ---- public API --------------------------------------------------------------------------------
 
-Tray* TrayCreate(const wchar_t* app_name, const wchar_t* icon_path_or_null)
+Tray* TrayCreate(const wchar_t* app_name)
 {
     Tray* t = new Tray;
     t->app = app_name;
-    if (icon_path_or_null) t->icon_path = icon_path_or_null;
     t->ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     t->thread = std::thread(TrayThread, t);
     WaitForSingleObject(t->ready, INFINITE);

@@ -533,12 +533,6 @@ void GpuCtxStamp(GpuCtx& c, int i)
     c.ts_written[c.slot][i] = true;
 }
 
-bool GpuCtxStampsMs(GpuCtx& c, double* ms, int pairs)
-{
-    const int s = RetiredSlot(c.slot, c.alloc_fence, c.fence);
-    return s >= 0 && ReadStamps(c.ts_readback, &c.ts_written[0][0], c.ts_freq, s, ms, pairs);
-}
-
 bool GpuCtxStampsMsSlot(GpuCtx& c, int s, double* ms, int pairs)
 {
     const UINT64 v = c.alloc_fence[s];

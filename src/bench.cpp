@@ -67,6 +67,13 @@ done:
     return ok;
 }
 
+// A texture (8-bit RGBA or BGRA, w x h, resting in `state`) read back and written as a PNG.
+bool SaveTexPng(Gpu& g, ID3D12Resource* tex, UINT w, UINT h, D3D12_RESOURCE_STATES state, const wchar_t* path)
+{
+    std::vector<uint8_t> px((size_t)w * h * 4);
+    return tex && GpuReadbackTex(g, tex, px.data(), w, h, 4, state) && SavePngRgba(path, px.data(), w, h);
+}
+
 // ---- bench ----------------------------------------------------------------------------------------
 static std::vector<std::wstring> ListPngs(const std::wstring& path)
 {
@@ -131,11 +138,10 @@ int RunBench(int argc, char** argv)
         Latewarp* l = LatewarpCreate(g, dir.c_str(), w, h, w / 2, h / 2);
         if (in && out && l && GpuUploadTex(g, in, images.back().data(), w, h, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) && GpuBegin(g))
         {
-            const bool ok = LatewarpEvaluate(l, g.list, in, nullptr, out, true, lw_a[0] * k, lw_a[1] * k, lw_a[2] * k, lw_a[3] * k);
+            const bool ok = LatewarpEvaluate(l, g.list, in, out, true, lw_a[0] * k, lw_a[1] * k, lw_a[2] * k, lw_a[3] * k);
             if (GpuEnd(g) && GpuWaitIdle(g) && ok)
             {
-                std::vector<uint8_t> px((size_t)w * h * 4);
-                if (GpuReadbackTex(g, out, px.data(), w, h, 4, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)) { SavePngRgba(L"lw_out.png", px.data(), w, h); rc = 0; }
+                if (SaveTexPng(g, out, w, h, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"lw_out.png")) rc = 0;
             }
         }
         Log("[bench] latewarp test yaw %.3f pitch %.3f roll %.3f vfov %.1f -> %s", lw_a[0], lw_a[1], lw_a[2], lw_a[3], rc ? "FAILED" : "lw_out.png");
@@ -225,9 +231,8 @@ int RunBench(int argc, char** argv)
 
     if (p->fg && FgMultiplier(p->fg) > 1)
     {
-        std::vector<uint8_t> px((size_t)w * h * 4);
-        if (ID3D12Resource* t = FgDebugGen(p->fg, 0)) if (GpuReadbackTex(g, t, px.data(), w, h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE)) SavePngRgba(L"fg_gen.png", px.data(), w, h);
-        if (ID3D12Resource* t = FgDebugReal(p->fg)) if (GpuReadbackTex(g, t, px.data(), w, h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE)) SavePngRgba(L"fg_real.png", px.data(), w, h);
+        SaveTexPng(g, FgDebugGen(p->fg, 0), w, h, D3D12_RESOURCE_STATE_COPY_SOURCE, L"fg_gen.png");
+        SaveTexPng(g, FgDebugReal(p->fg), w, h, D3D12_RESOURCE_STATE_COPY_SOURCE, L"fg_real.png");
     }
 
     // The UI restore on generated frames: inside a mask rect a generated frame must be pixel-exact
@@ -258,7 +263,7 @@ int RunBench(int argc, char** argv)
         }
     }
 
-    // The motion vectors, checked against KNOWN motion. These feed BOTH the NR model and DLSS-G, so
+    // The motion vectors, checked against KNOWN motion. These feed the NR model and the warp engines, so
     // a wrong sign, scale or reference frame shows up as warping and temporal instability rather
     // than as an error - which is why it can hide for a long time behind "FG is unstable".
     // Feed --bench a panning sequence and the expected magnitude is arithmetic: a shift of N native
@@ -332,12 +337,9 @@ int RunBench(int argc, char** argv)
     // survives being composed up from a small work size).
     if (p->shown && p->color4k)
     {
-        std::vector<uint8_t> px((size_t)w * h * 4);
-        wchar_t f[64];
-        if (GpuReadbackTex(g, p->shown, px.data(), w, h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE))
-        { _snwprintf_s(f, _TRUNCATE, L"final_%ux%u.png", p->ww, p->wh); SavePngRgba(f, px.data(), w, h); }
-        if (GpuReadbackTex(g, p->color4k, px.data(), w, h, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
-            SavePngRgba(L"final_native.png", px.data(), w, h);
+        wchar_t f[64]; _snwprintf_s(f, _TRUNCATE, L"final_%ux%u.png", p->ww, p->wh);
+        SaveTexPng(g, p->shown, w, h, D3D12_RESOURCE_STATE_COPY_SOURCE, f);
+        SaveTexPng(g, p->color4k, w, h, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"final_native.png");
     }
 
     // What the spike never checked: that the model wrote the whole work texture. A subrect here is

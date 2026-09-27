@@ -17,9 +17,9 @@
 #include <cstring>
 
 int  RunBench(int argc, char** argv);                                             // bench.cpp
-bool SavePngRgba(const wchar_t* path, const uint8_t* rgba, UINT w, UINT h);       // bench.cpp
+bool SaveTexPng(Gpu& g, ID3D12Resource* tex, UINT w, UINT h, D3D12_RESOURCE_STATES state, const wchar_t* path);   // bench.cpp
 
-const char* const kPipeStageName[PS_COUNT] = { "swizzle", "gray+downscale", "ofa", "expand", "eval", "compose", "ofa2", "filter", "list1(all)", "list2(all)" };
+const char* const kPipeStageName[PS_COUNT] = { "swizzle", "gray+downscale", "eval", "compose", "expand", "filter", "list1(all)", "list2(all)", "ofa", "ofa2" };
 
 double StageStats::pct(double p) const
 {
@@ -435,10 +435,10 @@ void PipelineReadStamps(Pipeline* p)
     {
         const UINT64 v = g.alloc_fence[s];
         if (!v || v == p->last_stamp_fence_slot[s]) continue;
-        double ms[9];
-        if (!GpuStampsMsSlot(g, s, ms, 9)) continue;
+        double ms[PS_STAMPED];
+        if (!GpuStampsMsSlot(g, s, ms, PS_STAMPED)) continue;
         p->last_stamp_fence_slot[s] = v;
-        p->st[PS_SWIZZLE].add(ms[0]); p->st[PS_GRAYDS].add(ms[1]); p->st[PS_EVAL].add(ms[2]); p->st[PS_COMPOSE].add(ms[3]); p->st[PS_EXPAND].add(ms[4]); p->st[PS_FILTER].add(ms[6]); p->st[PS_LIST1].add(ms[7]); p->st[PS_LIST2].add(ms[8]);   // ms[5]: stamps 10/11, unused
+        for (int i = 0; i < PS_STAMPED; ++i) p->st[i].add(ms[i]);
     }
 }
 
@@ -450,15 +450,16 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         if (q.fence && g.fence->GetCompletedValue() >= q.fence)
         {
             const int i = (int)(&q - p->mvgrid_q);
-            float* d = nullptr; D3D12_RANGE rr = { 0, 256 * 18 };
+            float* d = nullptr; D3D12_RANGE rr = { 0, kMvGridPitch * kMvGridH };
             if (SUCCEEDED(p->mvgrid_rb[i]->Map(0, &rr, (void**)&d)))
             {
-                float xs[576], ys[576];
-                for (int j = 0; j < 576; ++j) { xs[j] = d[(j / 32) * 64 + (j % 32) * 2]; ys[j] = d[(j / 32) * 64 + (j % 32) * 2 + 1]; }
+                constexpr UINT n = kMvGridW * kMvGridH;   // rows are exactly one pitch of float2s: the buffer is dense
+                float xs[n], ys[n];
+                for (UINT j = 0; j < n; ++j) { xs[j] = d[2 * j]; ys[j] = d[2 * j + 1]; }
                 D3D12_RANGE none = { 0, 0 }; p->mvgrid_rb[i]->Unmap(0, &none);
-                std::nth_element(xs, xs + 288, xs + 576); std::nth_element(ys, ys + 288, ys + 576);
+                std::nth_element(xs, xs + n / 2, xs + n); std::nth_element(ys, ys + n / 2, ys + n);
                 const float k = -(float)p->w / (float)p->ww;   // backward flow, work px -> where the content went, output px
-                MouseObserve(q.t0, q.t1, xs[288] * k, ys[288] * k);
+                MouseObserve(q.t0, q.t1, xs[n / 2] * k, ys[n / 2] * k);
             }
             q.fence = 0;
         }
@@ -480,7 +481,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // values it is handed (fg.cpp, Evaluate: our flow, zeros and a field 50 px wrong score
     // identically). Without either, the gray pass, the OFA execute, the queue wait on it and the
     // expand ran for nobody, and they were 82-93% of an FG-only frame.
-    const bool warp_fg = c.fg_enabled && c.fg_engine == 1, lw_fg = c.fg_enabled && c.fg_engine == 2;   // lw: the mouse model learns from the flow
+    const bool warp_fg = c.fg_enabled && c.fg_engine == FG_WARP, lw_fg = c.fg_enabled && c.fg_engine == FG_LATEWARP;   // lw: the mouse model learns from the flow
     if (lw_fg) MouseStart(); else MouseStop();
     const bool need_mv = (model_on && !p->bypass) || warp_fg || lw_fg;
     if (need_mv && !p->had_mv) reset = true;   // the previous gray is stale: no flow across the gap
@@ -504,7 +505,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         if (p->fg && (FgFailed(p->fg) || FgMultiplier(p->fg) != want)) DropFg(p);
         if (!p->fg)
         {
-            p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, want, c.fg_pacing_vblank, c.fg_engine, p->sh, c.fg_lw_vfov * 3.14159265f / 180.0f);
+            p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, want, c.fg_pacing_vblank, c.fg_engine, c.fg_lw_vfov * 3.14159265f / 180.0f);
             if (!p->fg && want > 1) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, 1, c.fg_pacing_vblank, 0); }
             if (!p->fg) { Log("[fg] passthrough presenter create failed"); return false; }
         }
@@ -532,10 +533,10 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     harvest();
     if (!GpuBegin(g)) return false;
     p->cpu_wait[0].add(NowMs() - tw);
-    stamp(14);   // PS_LIST1 spans the whole submission, barriers and copies included
+    stamp(2 * PS_LIST1);   // spans the whole submission, barriers and copies included
     GpuBarrier(cl, cap, D3D12_RESOURCE_STATE_COMMON, NPSR);
     GpuBarrier(cl, p->color4k, NPSR, UAV);
-    stamp(0); CsSwizzle(g, p->sh, cl, cap, p->color4k, p->w, p->h); stamp(1);
+    stamp(2 * PS_SWIZZLE); CsSwizzle(g, p->sh, cl, cap, p->color4k, p->w, p->h); stamp(2 * PS_SWIZZLE + 1);
     GpuBarrier(cl, p->color4k, UAV, NPSR);
     // addon mask: the top-left strip of this frame -> this slot's readback buffer (decoded once retired)
     int strip_slot = -1;
@@ -552,14 +553,14 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         GpuBarrier(cl, p->color4k, CSRC, NPSR);
     }
     GpuBarrier(cl, p->nr_in, NPSR, UAV);
-    stamp(2);
+    stamp(2 * PS_GRAYDS);
     if (need_mv) CsGray(g, p->sh, cl, p->color4k, p->w, p->h, p->gray, p->gw, p->gh);
     // Only the model reads nr_in. Without it (FG-only, the default), the compose takes the native
     // path and never samples it, so this area filter would be dead work - and none of it while the
     // layer is switched off (F9), when the compose shows native.
     const bool neural_live = !p->bypass;
     if (!async && neural_live && model_on) CsDownscale(g, p->sh, cl, p->color4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
-    stamp(3);
+    stamp(2 * PS_GRAYDS + 1);
     GpuBarrier(cl, p->nr_in, UAV, NPSR);
     if (need_mv)
     {
@@ -588,7 +589,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     }
     if (need_mv) GpuBarrier(cl, p->gray, CSRC, UAV);   // pairs with the UAV->CSRC above (async implies need_mv)
     GpuBarrier(cl, cap, NPSR, COMMON);
-    stamp(15);
+    stamp(2 * PS_LIST1 + 1);
     const UINT64 f1 = GpuEnd(g);
     if (!f1) return false;
     if (strip_slot >= 0) p->strip_fence[strip_slot] = f1;
@@ -627,15 +628,15 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     harvest();
     if (!GpuBegin(g)) return false;
     p->cpu_wait[2].add(NowMs() - tw);
-    stamp(16);   // PS_LIST2
+    stamp(2 * PS_LIST2);
     if (need_pair0)
     {
         ID3D12Resource* flow = OfaFlow(p->ofa);
         GpuBarrier(cl, flow, D3D12_RESOURCE_STATE_COMMON, NPSR);
         GpuBarrier(cl, p->mv, NPSR, UAV);
-        stamp(8);
+        stamp(2 * PS_EXPAND);
         CsExpand(g, p->sh, cl, flow, OfaFlowWidth(p->ofa), OfaFlowHeight(p->ofa), p->gw, p->gh, p->mv, p->ww, p->wh, c.zero_below, reset);
-        stamp(9);
+        stamp(2 * PS_EXPAND + 1);
         GpuBarrier(cl, p->mv, UAV, NPSR);
         GpuBarrier(cl, flow, NPSR, D3D12_RESOURCE_STATE_COMMON);
     }
@@ -644,8 +645,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     {
         if (!p->mvgrid)
         {
-            p->mvgrid = GpuMakeTex(g, 32, 18, DXGI_FORMAT_R32G32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"mvgrid");
-            for (auto& r : p->mvgrid_rb) r = GpuMakeBuffer(g, 256 * 18, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE, L"mvgrid_rb");
+            p->mvgrid = GpuMakeTex(g, kMvGridW, kMvGridH, DXGI_FORMAT_R32G32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"mvgrid");
+            for (auto& r : p->mvgrid_rb) r = GpuMakeBuffer(g, kMvGridPitch * kMvGridH, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE, L"mvgrid_rb");
         }
         for (int i = 0; i < 4 && grid_q < 0; ++i) if (!p->mvgrid_q[i].fence && p->mvgrid_rb[i]) grid_q = i;
         if (p->mvgrid && grid_q >= 0)
@@ -656,7 +657,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
             D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
             src.pResource = p->mvgrid; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
             dst.pResource = p->mvgrid_rb[grid_q]; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-            dst.PlacedFootprint.Footprint = { DXGI_FORMAT_R32G32_FLOAT, 32, 18, 1, 256 };
+            dst.PlacedFootprint.Footprint = { DXGI_FORMAT_R32G32_FLOAT, kMvGridW, kMvGridH, 1, kMvGridPitch };
             cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
             p->mvgrid_q[grid_q].t0 = p->lw_prev_cap; p->mvgrid_q[grid_q].t1 = p->cap_qpc;
         }
@@ -701,9 +702,9 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     bool evaluated = false;
     if (!async && model_on && NrReady(p->nr) && !p->bypass)
     {
-        stamp(4);
+        stamp(2 * PS_EVAL);
         const unsigned r = NrEvaluate(p->nr, cl, p->nr_in, p->mv, p->nr_out, reset, c.exposure_scale);
-        stamp(5);
+        stamp(2 * PS_EVAL + 1);
         if (r == 1) { evaluated = true; ++p->evals_since_create; p->eval_fails = 0; }
         else
         {
@@ -716,7 +717,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
 
     ComposeParams cp;
     cp.residual_strength = c.residual_strength; cp.feather = c.feather; cp.warp = c.warp; cp.reject = c.warp_reject;
-    cp.chroma = c.chroma; cp.saturation = c.saturation;
+    cp.chroma = c.chroma;
     if (p->mask_active)   // addon rects first, the strip itself hidden; manual ini rects appended
     {
         cp.nrects = p->mask_n; memcpy(cp.rects, p->mask_rects, (size_t)p->mask_n * sizeof(UiRect));
@@ -733,24 +734,24 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // the previous pass had not already computed. Nobody downstream needs to know: the slot texture
     // has the same format, size and resting state (COPY_SOURCE) as the targets it replaces.
     ID3D12Resource* const fg_dst = p->fg ? FgAcquire(p->fg) : nullptr;
-    const bool filt = c.filters_enabled && (c.sharpen > 0 || c.saturation != 1.0f);
+    const bool filt = FiltersLive(c);
     ID3D12Resource* const compose_dst = filt ? p->out4k : (fg_dst ? fg_dst : p->out4k);
     GpuBarrier(cl, compose_dst, CSRC, UAV);
     if (async)
     {
         // The residual is from model frame M; mv_res is this frame's motion current -> M (the flow
         // against M's held gray), scaled by [nr] warp. mv (current -> previous) stays with FG.
-        stamp(6);
+        stamp(2 * PS_COMPOSE);
         CsComposeResidual(g, p->sh, cl, p->color4k, p->residual[std::max(p->cmp_idx, 0)], p->ww, p->wh, p->mv_res, compose_dst, p->w, p->h, cp);
-        stamp(7);
+        stamp(2 * PS_COMPOSE + 1);
         if (!native) { evaluated = true; p->residual_age.add((double)(p->frame_index - residual_frame)); }
     }
     else
     {
         GpuBarrier(cl, p->nr_out, UAV, NPSR);
-        stamp(6);
+        stamp(2 * PS_COMPOSE);
         CsCompose(g, p->sh, cl, p->color4k, p->nr_in, p->nr_out, p->ww, p->wh, compose_dst, p->w, p->h, cp);
-        stamp(7);
+        stamp(2 * PS_COMPOSE + 1);
         GpuBarrier(cl, p->nr_out, NPSR, UAV);
     }
     if (!native && p->model_toast_pending) { p->model_toast_pending = false; PipelineToast(p, "Model ready"); }
@@ -776,7 +777,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         ID3D12Resource* const filt_dst = fg_dst ? fg_dst : p->sharp4k;
         GpuBarrier(cl, p->out4k, UAV, NPSR);
         GpuBarrier(cl, filt_dst, CSRC, UAV);
-        stamp(12); CsSharpen(g, p->sh, cl, p->out4k, filt_dst, p->w, p->h, c.sharpen, c.saturation, (UINT)cp.nrects); stamp(13);   // rect_tex holds this frame's rects (compose above)
+        stamp(2 * PS_FILTER); CsSharpen(g, p->sh, cl, p->out4k, filt_dst, p->w, p->h, c.sharpen, c.saturation, (UINT)cp.nrects); stamp(2 * PS_FILTER + 1);   // rect_tex holds this frame's rects (compose above)
         GpuBarrier(cl, p->out4k, NPSR, CSRC);
         shown = filt_dst;
     }
@@ -820,7 +821,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         GpuBarrier(cl, shown, NPSR, CSRC);
     }
     const bool fg_recorded = fg_dst && FgRecord(p->fg, cp.rects, (int)cp.nrects);
-    stamp(17);
+    stamp(2 * PS_LIST2 + 1);
     const UINT64 f2 = GpuEnd(g);
     if (!f2) return false;
     if (grid_q >= 0) p->mvgrid_q[grid_q].fence = f2;
@@ -869,12 +870,9 @@ static HWND FindTarget(const Config& c)
 
 static void DumpFrame(Pipeline* p, const std::wstring& dir, int i)
 {
-    std::vector<uint8_t> px((size_t)p->w * p->h * 4);
     wchar_t path[MAX_PATH];
-    if (GpuReadbackTex(*p->g, p->color4k, px.data(), p->w, p->h, 4, NPSR))
-    { _snwprintf_s(path, _TRUNCATE, L"%ls\\dump_%03d_native.png", dir.c_str(), i); SavePngRgba(path, px.data(), p->w, p->h); }
-    if (GpuReadbackTex(*p->g, p->shown, px.data(), p->w, p->h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE))
-    { _snwprintf_s(path, _TRUNCATE, L"%ls\\dump_%03d_out.png", dir.c_str(), i); SavePngRgba(path, px.data(), p->w, p->h); }
+    _snwprintf_s(path, _TRUNCATE, L"%ls\\dump_%03d_native.png", dir.c_str(), i); SaveTexPng(*p->g, p->color4k, p->w, p->h, NPSR, path);
+    _snwprintf_s(path, _TRUNCATE, L"%ls\\dump_%03d_out.png", dir.c_str(), i); SaveTexPng(*p->g, p->shown, p->w, p->h, D3D12_RESOURCE_STATE_COPY_SOURCE, path);
     Log("[main] dumped frame %d", i);
 }
 
@@ -1007,7 +1005,7 @@ static int RealMain(int argc, char** argv)
     LARGE_INTEGER qpf; QueryPerformanceFrequency(&qpf);
 
     SetConsoleTitleW(L"JustFlow");
-    Tray* tray = TrayCreate(L"JustFlow", nullptr);
+    Tray* tray = TrayCreate(L"JustFlow");
     if (!tray) Log("[tray] not available (no icon; hotkeys still work)");
     std::vector<const wchar_t*> pnames; for (auto& n : profiles) pnames.push_back(n.c_str());
     if (tray) TraySetProfiles(tray, pnames.data(), (int)pnames.size());
@@ -1034,11 +1032,18 @@ static int RealMain(int argc, char** argv)
     // F9 / F10 / F8 / F11 and their tray menu items
     // A toggle is a setting, not session state: write it back through its own layer so a restart
     // keeps it. Wipe is deliberately not persisted - it is a comparison view, not a preference.
-    auto persist = [&](const wchar_t* sec, const wchar_t* key, bool on)
+    auto persist = [&](const wchar_t* sec, const wchar_t* key, const wchar_t* value)
     {
         const std::wstring& file = ConfigIsAppKey(sec, key) ? app_path : ini_path;
-        if (!WritePrivateProfileStringW(sec, key, on ? L"1" : L"0", file.c_str()))
+        if (!WritePrivateProfileStringW(sec, key, value, file.c_str()))
             Log("[main] could not write [%ls] %ls to %ls", sec, key, file.c_str());
+    };
+    // flip a switch in the live pipeline and in the loaded config, and save it; returns the new state
+    auto flip = [&](bool& live, bool& loaded, const wchar_t* sec, const wchar_t* key)
+    {
+        loaded = live = !live; persist(sec, key, live ? L"1" : L"0");
+        Log("[main] [%ls] %ls=%d", sec, key, (int)live);
+        return live;
     };
     auto toggle_nr = [&]
     {
@@ -1055,7 +1060,7 @@ static int RealMain(int argc, char** argv)
             }
         }
         cfg.nr_enabled = p->cfg.nr_enabled = !p->bypass;
-        persist(L"nr", L"enabled", !p->bypass);
+        persist(L"nr", L"enabled", p->bypass ? L"0" : L"1");
         Log("[main] bypass %s", p->bypass ? "on" : "off");
         if (p->bypass) PipelineToast(p, "Neural layer OFF");
         else if (p->nr) PipelineToast(p, "Neural layer ON");
@@ -1065,22 +1070,19 @@ static int RealMain(int argc, char** argv)
     auto cycle_wipe = [&] { if (!p) return; p->wipe = (p->wipe + 1) % 3; p->wipe_t0 = NowMs(); Log("[main] wipe %d", p->wipe); PipelineToast(p, "Wipe: %s", p->wipe == 1 ? "split" : p->wipe == 2 ? "sweep" : "off"); tray_state(); };
     auto toggle_fg = [&]
     {
-        if (!p) return; p->cfg.fg_enabled = !p->cfg.fg_enabled; Log("[main] fg %s", p->cfg.fg_enabled ? "on" : "off");
-        cfg.fg_enabled = p->cfg.fg_enabled; persist(L"fg", L"enabled", p->cfg.fg_enabled);
-        if (!p->cfg.fg_enabled) PipelineToast(p, "Frame generation OFF");
-        else if (p->cfg.fg_engine == 2) PipelineToast(p, "Frame generation ON: latewarp");
-        else PipelineToast(p, "Frame generation ON %dX%s", p->cfg.fg_multiplier, p->cfg.fg_engine == 1 ? " (warp)" : "");
+        if (!p) return;
+        if (!flip(p->cfg.fg_enabled, cfg.fg_enabled, L"fg", L"enabled")) PipelineToast(p, "Frame generation OFF");
+        else if (p->cfg.fg_engine == FG_LATEWARP) PipelineToast(p, "Frame generation ON: latewarp");
+        else PipelineToast(p, "Frame generation ON %dX (%ls)", p->cfg.fg_multiplier, FgEngineName(p->cfg.fg_engine));
         tray_state();
     };
     auto toggle_filters = [&]
     {
-        if (!p) return; p->cfg.filters_enabled = !p->cfg.filters_enabled;
-        cfg.filters_enabled = p->cfg.filters_enabled; persist(L"filters", L"enabled", p->cfg.filters_enabled);
-        Log("[main] filters %ls", p->cfg.filters_enabled ? L"on" : L"off");
-        PipelineToast(p, "Filter layer %s", p->cfg.filters_enabled ? "ON" : "OFF");
+        if (!p) return;
+        PipelineToast(p, "Filter layer %s", flip(p->cfg.filters_enabled, cfg.filters_enabled, L"filters", L"enabled") ? "ON" : "OFF");
         tray_state();
     };
-    auto toggle_hud = [&] { if (!p) return; p->hud = !p->hud; cfg.hud = p->hud; persist(L"ui", L"hud", p->hud); Log("[main] hud %s", p->hud ? "on" : "off"); PipelineToast(p, "Status HUD %s", p->hud ? "ON" : "OFF"); };
+    auto toggle_hud = [&] { if (!p) return; PipelineToast(p, "Status HUD %s", flip(p->hud, cfg.hud, L"ui", L"hud") ? "ON" : "OFF"); };
     // the caps in force, for the toasts: "uncapped" | "cap 60" | "cap 60  model 30/s" | "model 30/s"
     auto caps = [](const Config& c)
     {
@@ -1105,7 +1107,7 @@ static int RealMain(int argc, char** argv)
         // The device is created once at startup, so this one cannot be applied by any reload.
         if (nc.gpu_adapter != cfg.gpu_adapter)
         {
-            Log("[gpu] [gpu] adapter %d -> %d takes effect when JustFlow restarts", cfg.gpu_adapter, nc.gpu_adapter);
+            Log("[gpu] adapter %d -> %d takes effect when JustFlow restarts", cfg.gpu_adapter, nc.gpu_adapter);
             PipelineToast(p, "GPU change applies on restart");
         }
         if (ok && profile >= 0 && ConfigNeedsRestart(cfg, nc))
@@ -1140,16 +1142,15 @@ static int RealMain(int argc, char** argv)
         case TrayFgMultiplier:
             if (p) { Config nc = p->cfg; nc.fg_multiplier = arg; PipelineReload(p, nc); }   // like a reload: FG is recreated next frame
             cfg.fg_multiplier = arg; Log("[main] fg multiplier %d", arg); tray_state();
-            WritePrivateProfileStringW(L"fg", L"multiplier", std::to_wstring(arg).c_str(), ini_path.c_str());   // saved, like every other toggle
+            persist(L"fg", L"multiplier", std::to_wstring(arg).c_str());   // saved, like every other toggle
             break;
         case TrayFgEngine:
         {
-            static const wchar_t* const kEngine[] = { L"dlssg", L"warp", L"latewarp" };
-            const int e = std::clamp(arg, 0, 2);
+            const int e = std::clamp(arg, 0, FG_ENGINE_COUNT - 1);
             if (p) { Config nc = p->cfg; nc.fg_engine = e; PipelineReload(p, nc); }
-            cfg.fg_engine = e; Log("[main] fg engine %ls", kEngine[e]); tray_state();
-            WritePrivateProfileStringW(L"fg", L"engine", kEngine[e], ini_path.c_str());
-            if (p) PipelineToast(p, "Frame generation engine: %ls%s", kEngine[e], p->cfg.fg_enabled ? "" : " (FG is off - F8)");
+            cfg.fg_engine = e; Log("[main] fg engine %ls", FgEngineName(e)); tray_state();
+            persist(L"fg", L"engine", FgEngineName(e));
+            if (p) PipelineToast(p, "Frame generation engine: %ls%s", FgEngineName(e), p->cfg.fg_enabled ? "" : " (FG is off - F8)");
             break;
         }
         case TraySelectProfile: if (arg >= 0 && arg < (int)profiles.size() && arg != profile) pending_profile = arg; break;
@@ -1287,7 +1288,7 @@ static int RealMain(int argc, char** argv)
             {
                 const Config& lc = p->cfg;
                 const bool neural = !p->bypass;
-                const bool filters = lc.filters_enabled && (lc.sharpen > 0 || lc.saturation != 1.0f);
+                const bool filters = FiltersLive(lc);
                 const bool active = neural || filters || lc.fg_enabled || p->wipe != 0 || dump > dumped;
                 if (!active)
                 {
@@ -1384,7 +1385,7 @@ static int RealMain(int argc, char** argv)
                 else if (p->st[PS_EVAL].med() < 0) snprintf(nr, sizeof nr, "NR -- ms %up", p->wh);   // no sample is not 0.0 ms
                 else snprintf(nr, sizeof nr, "NR %.1f ms %up", p->st[PS_EVAL].med(), p->wh);
                 char mask[8]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "-");
-                const char* filt_s = !cfg.filters_enabled ? "off" : (cfg.sharpen > 0 || cfg.saturation != 1.0f) ? "on" : "-";
+                const char* filt_s = !cfg.filters_enabled ? "off" : FiltersLive(cfg) ? "on" : "-";
                 if (p->fg && FgMultiplier(p->fg) > 1 && FgPaused(p->fg)) snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG auto-paused  mask %s", nr, filt_s, mask);
                 else if (p->fg && FgMultiplier(p->fg) > 1) snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG %dX %.1fms  mask %s", nr, filt_s, FgMultiplier(p->fg), std::max(0.0, FgEvalMs(p->fg, nullptr)), mask);
                 else snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG off  mask %s", nr, filt_s, mask);

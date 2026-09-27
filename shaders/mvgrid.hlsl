@@ -1,4 +1,4 @@
-// The flow field averaged over a 32x18 grid, for the latewarp engine's mouse model (mouse.cpp): read
+// The flow field averaged over a 32x18 grid (kMvGridW x kMvGridH in compose.h), for the latewarp engine's mouse model (mouse.cpp): read
 // back a few frames later, its median is how far the picture moved. mv: backward flow, work-res px.
 Texture2D<float2>   mv  : register(t0);
 RWTexture2D<float2> dst : register(u0);

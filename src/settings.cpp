@@ -70,7 +70,7 @@ const Setting kSettings[] = {
     { 0, L"nr", L"work",              L"Model resolution",   Enum,  kWork,   L"auto" },
     { 0, L"nr", L"model_every",       L"Model every Nth frame", Enum, L"1|2|3|4|6|8", L"1" },
     { 0, L"nr", L"residual_strength", L"Neural strength",    Float, nullptr, L"1.0" },
-    { 0, L"nr", L"chroma",            L"Keep model colour",  Float, nullptr, L"0.25" },
+    { 0, L"nr", L"chroma",            L"Keep model colour",  Float, nullptr, L"1.0" },
     { 0, L"nr", L"style",             L"Style 0=std 1=nat 2=cine", Int, nullptr, L"0" },
     { 0, L"nr", L"local_tone",        L"Local tone/colour",  Float, nullptr, L"0.2" },
     { 0, L"nr", L"local_structure",   L"Local structure",    Float, nullptr, L"1.0" },
@@ -78,7 +78,7 @@ const Setting kSettings[] = {
     // ---- 1 Filters: ordinary post passes, independent of the neural layer ----------------------
     { 1, L"filters", L"enabled",      L"Filter layer (F6)",  Bool,  nullptr, L"0" },
     { 1, L"filters", L"sharpen",      L"Sharpen",            Float, nullptr, L"0.0" },
-    { 1, L"filters", L"saturation",   L"Vibrance",           Float, nullptr, L"1.10" },
+    { 1, L"filters", L"saturation",   L"Vibrance",           Float, nullptr, L"1.0" },
 
     // ---- 2 Frame generation ---------------------------------------------------------------------
     { 2, L"fg", L"enabled",           L"Frame generation (F8)", Bool, nullptr, L"1" },
@@ -157,8 +157,6 @@ const PresetKey kPreset[] = {
     // warped for several frames, while a smaller work size makes the model itself behave differently.
     // Measured on a moving 4K sequence (share of the every-frame native edit, average model cost):
     //   auto (1080p) every 3rd 49% 1.3 ms | every frame 57% 3.8 ms | native every 6th 76% 2.0 ms | every 3rd 80% 4.1 ms
-    // (High performance was ArtCNN on its own until ArtCNN was removed: it cost ~2.3 ms and did almost
-    // nothing the model does not.)
     // Performance stays the small per-frame evaluate because it is the one that cannot hitch a game
     // sharing the GPU; a native evaluate is one ~12 ms block at 4K. The old 1440p / 1800p tiers were
     // non-integer ratios of 4K and lost to 1080p on cost AND fidelity (see WorkAuto in main.cpp).
@@ -272,7 +270,7 @@ void SyncFgRows(HWND h)
     auto row = [](const wchar_t* key) { for (int i = 0; i < kCount; ++i) if (!wcscmp(kSettings[i].sec, L"fg") && !wcscmp(kSettings[i].key, key)) return i; return -1; };
     const int eng = row(L"engine"); if (eng < 0) return;
     wchar_t v[32] = {}; GetDlgItemTextW(h, ID_CTL0 + eng, v, 32);
-    const BOOL on = wcscmp(v, L"latewarp") != 0;
+    const BOOL on = wcscmp(v, FgEngineName(FG_LATEWARP)) != 0;
     for (const wchar_t* k : { L"multiplier", L"min_gain", L"max_input_fps" })
         if (const int i = row(k); i >= 0) { EnableWindow(GetDlgItem(h, ID_CTL0 + i), on); EnableWindow(GetDlgItem(h, ID_LBL0 + i), on); }
 }
@@ -332,24 +330,15 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             const Setting& s = kSettings[i];
             const std::wstring v = Read(FileFor(s, d->app, d->profile), s.sec, s.key, s.def);
             d->initial[i] = v;
-            const HWND c = GetDlgItem(h, ID_CTL0 + i);
-            if (s.type == Bool) CheckDlgButton(h, ID_CTL0 + i, v != L"0" && !v.empty() ? BST_CHECKED : BST_UNCHECKED);
-            else if (s.type == Enum)
-            {
-                int sel = -1;
+            if (s.type == Enum)   // the list first; SetCtl then selects (a hand-edited value outside it is added)
                 for (const wchar_t* p = s.opts; p; )
                 {
                     const wchar_t* bar = wcschr(p, L'|');
                     const std::wstring opt(p, bar ? bar - p : wcslen(p));
-                    const int idx = (int)SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)opt.c_str());
-                    if (_wcsicmp(opt.c_str(), v.c_str()) == 0) sel = idx;
+                    SendMessageW(GetDlgItem(h, ID_CTL0 + i), CB_ADDSTRING, 0, (LPARAM)opt.c_str());
                     p = bar ? bar + 1 : nullptr;
                 }
-                // A hand-edited value that is not in the list (a work= size of its own) stays put.
-                if (sel < 0) { sel = (int)SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)v.c_str()); }
-                SendMessageW(c, CB_SETCURSEL, sel, 0);
-            }
-            else SetDlgItemTextW(h, ID_CTL0 + i, v.c_str());
+            SetCtl(h, i, v.c_str());
         }
         {
             const HWND q = GetDlgItem(h, ID_PRESET);
