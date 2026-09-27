@@ -26,10 +26,9 @@ struct Config
     // measured as a self-sustaining 240 'frames' a second from a window that never changes.
     bool dda = false;
     // [nr]
-    //   enabled = the neural layer, which is what F9 toggles and what persists.
-    //   model   = the DLSS neural-rendering model (4-12 ms) - the layer's only content since ArtCNN went.
+    //   enabled = the neural layer - the DLSS neural-rendering model (4-12 ms) - which is what F9 toggles
+    //   and what persists. There used to be a separate [nr] model switch, for "layer on, ArtCNN only".
     bool  nr_enabled = false;              // out of the box: frame generation only (README)
-    bool  nr_model = true;
     UINT  work_w = 0, work_h = 0;          // 0 = auto until the capture size is known (WorkAuto in main.cpp)
     bool  work_auto = false;               // [nr] work=auto: re-derived from the native size, never from a fixed number
     bool  work_native = false;             // [nr] work=native: the model at the capture size, 1:1 (pair it with model_every)

@@ -351,7 +351,9 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
     }
     p->sh = ShadersCreate(g);
     if (!p->sh) { PipelineDestroy(p); return nullptr; }
-    if (cfg.nr_model)
+    // The model loads when the neural layer is ON, not at startup regardless: with the layer off (the
+    // default) it would hold its feature - hundreds of MB of VRAM - for nothing. F9 brings it up.
+    if (cfg.nr_enabled)
     {
         p->nr = NrInit(g, ExeDir().c_str(), (NrParamBlock)cfg.param_block);
         if (!p->nr) { PipelineDestroy(p); return nullptr; }
@@ -411,7 +413,7 @@ void PipelineReload(Pipeline* p, const Config& c_in)
     const bool rebuild = ConfigNeedsRebuild(p->cfg, c);
     // recreated next frame (a multiplier change is caught there: the presenter is rebuilt only when it differs)
     if (c.fg_pacing_vblank != p->cfg.fg_pacing_vblank || c.fg_engine != p->cfg.fg_engine || c.fg_lw_vfov != p->cfg.fg_lw_vfov) DropFg(p);
-    if (c.nr_model && !p->nr)
+    if (c.nr_enabled && !p->nr)
     {
         p->nr = NrInit(*p->g, ExeDir().c_str(), (NrParamBlock)c.param_block);
         if (p->nr) p->create_pending = true; else Log("[nr] init failed on reload");
@@ -471,7 +473,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // model_on, not p->nr: the object outlives the setting. Once the model had been on, turning it
     // off left p->nr alive, so every gate below still fired - measured live as ~5000 failing
     // EvaluateFeature calls with model=0, each one taking the NgxMutex that DLSS-G also needs.
-    const bool model_on = c.nr_model && p->nr && !p->model_dead;
+    const bool model_on = p->nr && !p->model_dead;
     const bool async = c.nr_async && model_on && !p->model_failed;
     // Motion vectors have two consumers: the model (its temporal reprojection) and the warp engine
     // (it extrapolates along them). DLSS-G is not one - it measures motion itself and ignores the
@@ -1045,9 +1047,8 @@ static int RealMain(int argc, char** argv)
         if (!p->bypass)
         {
             p->force_reset = true;
-            // Bring up the model only if this profile actually wants one. F9 is the effect
-            // switch, not the model switch: a profile with model=0 keeps F9 cheap.
-            if (!p->nr && p->cfg.nr_model)
+            // First time on this session: the model loads now (see PipelineCreate).
+            if (!p->nr)
             {
                 p->nr = NrInit(g, ExeDir().c_str(), (NrParamBlock)p->cfg.param_block);
                 if (p->nr) p->create_pending = true; else Log("[nr] init failed while enabling");
@@ -1056,11 +1057,9 @@ static int RealMain(int argc, char** argv)
         cfg.nr_enabled = p->cfg.nr_enabled = !p->bypass;
         persist(L"nr", L"enabled", !p->bypass);
         Log("[main] bypass %s", p->bypass ? "on" : "off");
-        // Say what F9 actually switched. The layer can be EMPTY (model=0), and "effect ON" over
-        // nothing read as a broken hotkey.
         if (p->bypass) PipelineToast(p, "Neural layer OFF");
-        else if (p->cfg.nr_model) PipelineToast(p, "Neural layer ON: DLSS model");
-        else PipelineToast(p, "Neural layer ON but EMPTY - turn the DLSS model on in Settings");
+        else if (p->nr) PipelineToast(p, "Neural layer ON");
+        else PipelineToast(p, "Neural layer ON but the DLSS model did not load - see the log");
         tray_state();
     };
     auto cycle_wipe = [&] { if (!p) return; p->wipe = (p->wipe + 1) % 3; p->wipe_t0 = NowMs(); Log("[main] wipe %d", p->wipe); PipelineToast(p, "Wipe: %s", p->wipe == 1 ? "split" : p->wipe == 2 ? "sweep" : "off"); tray_state(); };
@@ -1287,7 +1286,7 @@ static int RealMain(int argc, char** argv)
             // hotkeys and the tray. Any toggle that enables a layer wakes it within 50 ms.
             {
                 const Config& lc = p->cfg;
-                const bool neural = !p->bypass && lc.nr_model;
+                const bool neural = !p->bypass;
                 const bool filters = lc.filters_enabled && (lc.sharpen > 0 || lc.saturation != 1.0f);
                 const bool active = neural || filters || lc.fg_enabled || p->wipe != 0 || dump > dumped;
                 if (!active)
@@ -1375,7 +1374,7 @@ static int RealMain(int argc, char** argv)
                 // Which LAYERS are live, not which settings are set: the three switches are
                 // independent, so the HUD has to be able to say "neural off, filters on, FG on".
                 if (p->bypass) strcpy_s(nr, "neural off");
-                else if (!p->nr || !cfg.nr_model) strcpy_s(nr, "neural idle");   // the setting, not the object
+                else if (!p->nr) strcpy_s(nr, "neural: no model");
                 else if (cfg.nr_async)
                 {
                     double ms; { std::lock_guard<std::mutex> lk(p->pub_mu); ms = p->model_ms.med(); }

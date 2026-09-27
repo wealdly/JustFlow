@@ -102,7 +102,6 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.border = B(L"capture", L"border", c.border);
 
     c.nr_enabled = B(L"nr", L"enabled", c.nr_enabled);
-    c.nr_model = B(L"nr", L"model", c.nr_model);
     const std::wstring work = S(L"nr", L"work", L"auto");
     if (swscanf_s(work.c_str(), L"%ux%u", &c.work_w, &c.work_h) != 2) { c.work_w = c.work_h = 0; }
     c.work_auto = !c.work_w || !c.work_h;
@@ -191,7 +190,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
 bool ConfigNeedsRebuild(const Config& a, const Config& b)
 {
     const NrTuning &x = a.tuning, &y = b.tuning;
-    return a.nr_model != b.nr_model || a.work_w != b.work_w || a.work_h != b.work_h || a.param_block != b.param_block ||
+    return a.work_w != b.work_w || a.work_h != b.work_h || a.param_block != b.param_block ||
            x.preset != y.preset || x.style != y.style || x.intensity != y.intensity || x.local_tone != y.local_tone ||
            x.local_structure != y.local_structure || x.skin_structure != y.skin_structure || x.auto_mask != y.auto_mask || x.ui_correction != y.ui_correction;
 }

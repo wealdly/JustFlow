@@ -66,8 +66,7 @@ const wchar_t* const kFlow = L"640x360|960x540|1280x720|1920x1080";
 
 const Setting kSettings[] = {
     // ---- 0 Neural layer: the switch, what runs under it, and how the model is tuned ------------
-    { 0, L"nr", L"enabled",           L"Neural layer (F9)",  Bool,  nullptr, L"0" },
-    { 0, L"nr", L"model",             L"DLSS model (4-12 ms)", Bool, nullptr, L"1" },
+    { 0, L"nr", L"enabled",           L"Neural layer (F9, 4-12 ms)", Bool, nullptr, L"0" },
     { 0, L"nr", L"work",              L"Model resolution",   Enum,  kWork,   L"auto" },
     { 0, L"nr", L"model_every",       L"Model every Nth frame", Enum, L"1|2|3|4|6|8", L"1" },
     { 0, L"nr", L"residual_strength", L"Neural strength",    Float, nullptr, L"1.0" },
@@ -164,7 +163,6 @@ const PresetKey kPreset[] = {
     // sharing the GPU; a native evaluate is one ~12 ms block at 4K. The old 1440p / 1800p tiers were
     // non-integer ratios of 4K and lost to 1080p on cost AND fidelity (see WorkAuto in main.cpp).
     { L"nr",  L"enabled", { L"1",         L"1",         L"1",         L"1" } },
-    { L"nr",  L"model",   { L"1",         L"1",         L"1",         L"1" } },
     { L"nr",  L"work",    { L"auto",      L"auto",      L"native",    L"native" } },
     { L"nr",  L"model_every", { L"3",     L"1",         L"6",         L"3" } },
     { L"filters", L"sharpen", { L"0.4",   L"0.3",       L"0.2",       L"0.0" } },
@@ -538,9 +536,9 @@ INT_PTR CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         L"; fill it in if two windows share a title. Both come from the window, never the process.\n\n"
         L"[capture]\nmode=auto\nwindow_class=" + win.cls + L"\nwindow_title=" + win.title + L"\ncursor=0\nborder=0\n"
         L"; class seen when this profile was made: " + win.cls + L"\n\n"
-        L"[nr]\n; enabled = the neural layer (F9), off by default. model = the DLSS model (4-12 ms).\n"
+        L"[nr]\n; enabled = the neural layer (F9): the DLSS neural-rendering model, 4-12 ms. Off by default.\n"
         L"; work=auto follows the capture (1080p on 4K); native runs the model at full size.\n"
-        L"enabled=0\nmodel=1\nwork=auto\nchroma=0.25\n"
+        L"enabled=0\nwork=auto\nchroma=0.25\n"
         L"; model_every=N runs the model on every Nth frame off the main path. Raise it (2-4) when the\n"
         L"; game presents faster than the model can follow - e.g. a game running its own frame generation.\n"
         L"model_every=1\n\n"
