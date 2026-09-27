@@ -459,7 +459,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
                 D3D12_RANGE none = { 0, 0 }; p->mvgrid_rb[i]->Unmap(0, &none);
                 std::nth_element(xs, xs + n / 2, xs + n); std::nth_element(ys, ys + n / 2, ys + n);
                 const float k = -(float)p->w / (float)p->ww;   // backward flow, work px -> where the content went, output px
-                MouseObserve(q.t0, q.t1, xs[n / 2] * k, ys[n / 2] * k);
+                p->lw_g[0] = xs[n / 2]; p->lw_g[1] = ys[n / 2];
+                if (q.t0 && q.t1) MouseObserve(q.t0, q.t1, xs[n / 2] * k, ys[n / 2] * k);
             }
             q.fence = 0;
         }
@@ -643,7 +644,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         GpuBarrier(cl, flow, NPSR, D3D12_RESOURCE_STATE_COMMON);
     }
     int grid_q = -1;   // latewarp: this frame's flow, averaged and queued for the mouse model
-    if (lw_fg && need_pair0 && !reset && p->cap_qpc && p->lw_prev_cap)
+    if (lw_fg && need_pair0 && !reset)   // timestamps only matter to the mouse model (checked on read-back)
     {
         if (!p->mvgrid)
         {
@@ -809,6 +810,16 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     GpuBarrier(cl, shown, UAV, CSRC);
     p->shown = shown;
     // the presenter thread presents (passthrough or generation); --no-present has no Fg
+    // engine=latewarp: Frame Warp holds still what does not move with the camera (a third-person
+    // character, anything moving on its own) - warping it by the camera's rotation smudged its edges.
+    if (fg_dst && lw_fg && need_pair0 && !reset)
+        if (ID3D12Resource* m = FgMaskTarget(p->fg))
+        {
+            const D3D12_RESOURCE_DESC md = m->GetDesc();
+            GpuBarrier(cl, m, NPSR, UAV);
+            CsNoWarpMask(g, p->sh, cl, p->mv, p->ww, p->wh, m, (UINT)md.Width, md.Height, p->lw_g[0], p->lw_g[1]);
+            GpuBarrier(cl, m, UAV, NPSR);
+        }
     // engine=warp: the generated frames are this one pushed ahead along its own flow, (i+1)/multiplier
     // of an interval each, written straight into the slot. Not while the governor has FG paused.
     if (fg_dst && warp_fg && !FgPaused(p->fg) && FgWarpTarget(p->fg, 0))

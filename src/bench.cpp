@@ -140,7 +140,15 @@ int RunBench(int argc, char** argv)
         Latewarp* l = LatewarpCreate(g, dir.c_str(), w, h, w / 2, h / 2);
         if (in && out && l && GpuUploadTex(g, in, images.back().data(), w, h, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) && GpuBegin(g))
         {
-            const bool ok = LatewarpEvaluate(l, g.list, in, out, true, lw_a[0] * k, lw_a[1] * k, lw_a[2] * k, lw_a[3] * k);
+            ID3D12Resource* mask = nullptr; char mt[4];   // TEST JF_LW_MASKTEST: the left half held still
+            if (GetEnvironmentVariableA("JF_LW_MASKTEST", mt, 4))
+            {
+                std::vector<uint8_t> m((size_t)(w / 4) * (h / 4));
+                for (UINT y = 0; y < h / 4; ++y) for (UINT x = 0; x < w / 4; ++x) m[(size_t)y * (w / 4) + x] = x < w / 8 ? 255 : 0;
+                mask = GpuMakeTex(g, w / 4, h / 4, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"lw_mask");
+                GpuEnd(g); GpuUploadTex(g, mask, m.data(), w / 4, h / 4, 1, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE); GpuBegin(g);
+            }
+            const bool ok = LatewarpEvaluate(l, g.list, in, out, true, lw_a[0] * k, lw_a[1] * k, lw_a[2] * k, lw_a[3] * k, mask);
             if (GpuEnd(g) && GpuWaitIdle(g) && ok)
             {
                 if (SaveTexPng(g, out, w, h, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"lw_out.png")) rc = 0;
@@ -239,8 +247,15 @@ int RunBench(int argc, char** argv)
 
     if (p->fg && FgMultiplier(p->fg) > 1)
     {
+        FgDebugHold(p->fg);
         SaveTexPng(g, FgDebugGen(p->fg, 0), w, h, D3D12_RESOURCE_STATE_COPY_SOURCE, L"fg_gen.png");
         SaveTexPng(g, FgDebugReal(p->fg), w, h, D3D12_RESOURCE_STATE_COPY_SOURCE, L"fg_real.png");
+        if (ID3D12Resource* m = FgDebugMask(p->fg))
+        {
+            const D3D12_RESOURCE_DESC md = m->GetDesc(); std::vector<uint8_t> px((size_t)md.Width * md.Height), rgba(px.size() * 4, 255);
+            if (GpuReadbackTex(g, m, px.data(), (UINT)md.Width, md.Height, 1, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
+            { for (size_t i = 0; i < px.size(); ++i) rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = px[i]; SavePngRgba(L"fg_mask.png", rgba.data(), (UINT)md.Width, md.Height); }
+        }
     }
 
     // The UI restore on generated frames: inside a mask rect a generated frame must be pixel-exact

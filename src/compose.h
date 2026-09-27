@@ -56,6 +56,8 @@ void CsWarp(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* s
 // mv (ww x wh, NPSR) averaged into a kMvGridW x kMvGridH R32G32_FLOAT grid (UAV), for the latewarp mouse
 // model. The shader (mvgrid.hlsl) has the same two numbers.
 constexpr UINT kMvGridW = 32, kMvGridH = 18, kMvGridPitch = kMvGridW * 8;   // readback row pitch: 256, already aligned
+// Frame Warp's no-warp mask from mv (NPSR) and its median (gx, gy): R8 mw x mh (UAV), 1 = not the camera's motion.
+void CsNoWarpMask(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* mask, UINT mw, UINT mh, float gx, float gy);
 void CsMvGrid(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* grid);
 // ---- on-screen text -------------------------------------------------------------------------
 // Draws `text` (ASCII 32..126, up to 64 chars, 8x8 font at `scale` px per font pixel) white with a

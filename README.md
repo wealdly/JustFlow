@@ -24,7 +24,7 @@ no injection, no input. The same mechanisms OBS and overlay apps use, nothing mo
   learns pixels-per-count and the game's input delay from our optical flow, separately with and without
   a button held (WoW turns only with a button held, so cursor movement never warps). It warps nothing
   until that fit is reliable. The warp is a camera rotation: exact for first-person mouse-look; for
-  third-person cameras the character, which orbits with the camera, still slides with the background.
+  third-person cameras, what our flow shows pinned to the camera (the character) is held still.
 - **Capture** by Windows.Graphics.Capture, uncapped on Windows 11 24H2+ (`MinUpdateInterval`), or DXGI
   Desktop Duplication where that is unavailable (`[capture] mode=auto|wgc|dda`).
 - **Per-game profiles**, global hotkeys, a tray menu, a live before/after wipe.

@@ -10,6 +10,7 @@
 #include "cs_compose_residual.h"
 #include "cs_warp.h"
 #include "cs_mvgrid.h"
+#include "cs_nowarp.h"
 #include "cs_text.h"
 #include "cs_sharpen.h"
 #include <algorithm>
@@ -18,7 +19,7 @@
 
 struct Shaders
 {
-    ComputePso swizzle, gray, downscale, expand, compose, residual, compose_residual, text, sharpen, warp, mvgrid;
+    ComputePso swizzle, gray, downscale, expand, compose, residual, compose_residual, text, sharpen, warp, mvgrid, nowarp;
     // UI rects for compose: 256x1 R32_SINT texture (64 rects x 4), refilled from a per-slot upload
     // buffer inside CsCompose (recorded into the caller's list; nothing blocks).
     ID3D12Resource* rect_tex = nullptr;
@@ -80,6 +81,7 @@ Shaders* ShadersCreate(Gpu& g)
     ok &= GpuMakeCompute(g, g_cs_compose_residual, sizeof g_cs_compose_residual, 4, 1, 14, s->compose_residual, L"cs_compose_residual");
     ok &= GpuMakeCompute(g, g_cs_warp, sizeof g_cs_warp, 3, 1, 6, s->warp, L"cs_warp");
     ok &= GpuMakeCompute(g, g_cs_mvgrid, sizeof g_cs_mvgrid, 1, 1, 2, s->mvgrid, L"cs_mvgrid");
+    ok &= GpuMakeCompute(g, g_cs_nowarp, sizeof g_cs_nowarp, 1, 1, 6, s->nowarp, L"cs_nowarp");
     ok &= GpuMakeCompute(g, g_cs_text,      sizeof g_cs_text,      1, 1, 24, s->text,      L"cs_text");
     ok &= GpuMakeCompute(g, g_cs_sharpen,   sizeof g_cs_sharpen,   2, 1, 5,  s->sharpen,   L"cs_sharpen");
     s->rect_tex = GpuMakeTex(g, kRectInts, 1, DXGI_FORMAT_R32_SINT, D3D12_RESOURCE_FLAG_NONE,
@@ -103,7 +105,7 @@ Shaders* ShadersCreate(Gpu& g)
 void ShadersDestroy(Shaders* s)
 {
     if (!s) return;
-    ComputePso* p[] = { &s->swizzle, &s->gray, &s->downscale, &s->expand, &s->compose, &s->residual, &s->compose_residual, &s->text, &s->sharpen, &s->warp, &s->mvgrid };
+    ComputePso* p[] = { &s->swizzle, &s->gray, &s->downscale, &s->expand, &s->compose, &s->residual, &s->compose_residual, &s->text, &s->sharpen, &s->warp, &s->mvgrid, &s->nowarp };
     for (ComputePso* x : p) { if (x->pso) x->pso->Release(); if (x->root) x->root->Release(); }
     if (s->rect_tex) s->rect_tex->Release();
     if (s->font_tex) s->font_tex->Release();
@@ -212,6 +214,13 @@ void CsWarp(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* s
     const GpuView srv[3] = { { src, DXGI_FORMAT_R8G8B8A8_UNORM }, { mv, DXGI_FORMAT_R16G16_FLOAT }, { s->rect_tex, DXGI_FORMAT_R32_SINT } };
     const GpuView uav = { out, DXGI_FORMAT_R8G8B8A8_UNORM };
     GpuDispatch(g, cl, s->warp, srv, &uav, &c, GpuGroups(w, 8), GpuGroups(h, 8));
+}
+
+void CsNoWarpMask(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* mask, UINT mw, UINT mh, float gx, float gy)
+{
+    struct { UINT ww, wh, mw, mh; float gx, gy; } c = { ww, wh, mw, mh, gx, gy };
+    const GpuView srv = { mv, DXGI_FORMAT_R16G16_FLOAT }, uav = { mask, DXGI_FORMAT_R8_UNORM };
+    GpuDispatch(g, cl, s->nowarp, &srv, &uav, &c, GpuGroups(mw, 8), GpuGroups(mh, 8));
 }
 
 void CsMvGrid(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* grid)

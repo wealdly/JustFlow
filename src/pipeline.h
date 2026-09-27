@@ -119,6 +119,7 @@ struct Pipeline
     ID3D12Resource* mvgrid = nullptr; ID3D12Resource* mvgrid_rb[4] = {};
     struct { UINT64 fence = 0; LONGLONG t0 = 0, t1 = 0; } mvgrid_q[4];
     LONGLONG lw_prev_cap = 0;
+    float    lw_g[2] = {};   // the flow's median (work px, backward) from the last grid read back: the camera's motion
     ID3D12Resource* mv_res = nullptr;                  // main: motion current frame -> residual's model frame (work res, NPSR)
     ID3D12Resource* residual[2] = {};                  // RGBA16F work res, NPSR at rest
     std::mutex pub_mu;                                 // guards pub_* and model_ms
