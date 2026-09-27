@@ -1,4 +1,5 @@
 // WIC PNG load/save and --bench: PNG frames through the same pipeline as live capture.
+#include "latewarp.h"
 #include "pipeline.h"
 #include <cmath>
 #include "log.h"
@@ -83,7 +84,7 @@ static std::vector<std::wstring> ListPngs(const std::wstring& path)
 
 int RunBench(int argc, char** argv)
 {
-    std::wstring input, ini; int frames = 120; UINT work_w = 0, work_h = 0; bool present = true; double pace = 0;
+    std::wstring input, ini; int frames = 120; UINT work_w = 0, work_h = 0; bool present = true; double pace = 0; bool lw = false; float lw_a[4] = { 0, 0, 0, 60 };
     UINT rework_w = 0, rework_h = 0;   // --rework WxH: change the work size LIVE a third of the way in
     for (int i = 1; i < argc; ++i)
     {
@@ -92,6 +93,7 @@ int RunBench(int argc, char** argv)
         else if (!strcmp(argv[i], "--work") && i + 1 < argc) sscanf_s(argv[++i], "%ux%u", &work_w, &work_h);
         else if (!strcmp(argv[i], "--no-present")) present = false;
         else if (!strcmp(argv[i], "--pace") && i + 1 < argc) pace = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--lwtest") && i + 1 < argc) { lw = true; sscanf_s(argv[++i], "%f,%f,%f,%f", &lw_a[0], &lw_a[1], &lw_a[2], &lw_a[3]); }
         else if (!strcmp(argv[i], "--rework") && i + 1 < argc) sscanf_s(argv[++i], "%ux%u", &rework_w, &rework_h);
         else if (!strcmp(argv[i], "--ini") && i + 1 < argc) { const char* s = argv[++i]; ini.assign(s, s + strlen(s)); }   // profile next to the exe, or a path
     }
@@ -120,6 +122,24 @@ int RunBench(int argc, char** argv)
 
     Gpu g;
     if (!GpuInit(g, -1)) return 1;
+    if (lw)   // --lwtest yaw,pitch,roll,vfov (degrees): Frame Warp the LAST input frame to a turned camera -> lw_out.png
+    {
+        const float k = 3.14159265f / 180.0f; int rc = 1;
+        ID3D12Resource* in = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"lw_in");
+        ID3D12Resource* out = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"lw_out");
+        Latewarp* l = LatewarpCreate(g, dir.c_str(), w, h, w / 2, h / 2);
+        if (in && out && l && GpuUploadTex(g, in, images.back().data(), w, h, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) && GpuBegin(g))
+        {
+            const bool ok = LatewarpEvaluate(l, g.list, in, nullptr, out, true, lw_a[0] * k, lw_a[1] * k, lw_a[2] * k, lw_a[3] * k);
+            if (GpuEnd(g) && GpuWaitIdle(g) && ok)
+            {
+                std::vector<uint8_t> px((size_t)w * h * 4);
+                if (GpuReadbackTex(g, out, px.data(), w, h, 4, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)) { SavePngRgba(L"lw_out.png", px.data(), w, h); rc = 0; }
+            }
+        }
+        Log("[bench] latewarp test yaw %.3f pitch %.3f roll %.3f vfov %.1f -> %s", lw_a[0], lw_a[1], lw_a[2], lw_a[3], rc ? "FAILED" : "lw_out.png");
+        LatewarpDestroy(l); if (in) in->Release(); if (out) out->Release(); GpuShutdown(g); return rc;
+    }
     if (cfg.selftest) { ComposeSelfTest(g); ArtCnnSelfTest(g); }
     ResolveWork(cfg, dir);
     Pipeline* p = PipelineCreate(g, cfg, w, h, present, nullptr);

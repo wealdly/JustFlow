@@ -63,7 +63,7 @@ add_custom_command(TARGET justflow_spike POST_BUILD
 if(EXISTS ${CMAKE_SOURCE_DIR}/src/main.cpp AND EXISTS ${CMAKE_SOURCE_DIR}/src/compose.cpp)
 add_executable(justflow
     src/main.cpp src/d3d.cpp src/capture.cpp src/present.cpp src/ngx_nr.cpp
-    src/nvofa.cpp src/compose.cpp src/bench.cpp src/config.cpp src/fg.cpp src/tray.cpp src/settings.cpp)
+    src/nvofa.cpp src/compose.cpp src/bench.cpp src/config.cpp src/fg.cpp src/tray.cpp src/settings.cpp src/latewarp.cpp)
 add_dependencies(justflow shaders nvngx_dll_justflow)
 target_include_directories(justflow PRIVATE src ${CMAKE_BINARY_DIR}/gen third_party/ngx/include third_party/nvofa "${CPPWINRT_INC}")
 target_link_directories(justflow PRIVATE third_party/ngx/lib)
@@ -79,4 +79,7 @@ add_custom_command(TARGET justflow POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/profiles $<TARGET_FILE_DIR:justflow>/profiles/defaults
     COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DDEST=$<TARGET_FILE_DIR:justflow> -P ${CMAKE_SOURCE_DIR}/cmake/seed_ini.cmake
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssg.dll $<TARGET_FILE_DIR:justflow>)
+if(EXISTS ${CMAKE_SOURCE_DIR}/runtime/nvngx_latewarp.dll)   # optional: Frame Warp (not redistributable, see NOTICE)
+    add_custom_command(TARGET justflow POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_latewarp.dll $<TARGET_FILE_DIR:justflow>)
+endif()
 endif()
