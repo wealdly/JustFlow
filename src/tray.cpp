@@ -3,6 +3,7 @@
 // through Tray::mu; the menu is rebuilt from the snapshot each time it pops, so there is no
 // check-mark state to keep in sync.
 #include "tray.h"
+#include <algorithm>
 #include "settings.h"
 #include <shellapi.h>
 #include <deque>
@@ -18,7 +19,7 @@ const UINT WM_TRAY_STATE = WM_APP + 2;
 const UINT WM_TRAY_SETTINGS = WM_APP + 3;   // double-click: open Settings once the menu loop has unwound   // TraySetState -> refresh tooltip on the tray thread
 const UINT ICON_ID = 1;
 
-enum { IDM_STATUS = 1, IDM_NR, IDM_FILTERS, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM_MULT3, IDM_MULT4, IDM_WIPE, IDM_RELOAD,
+enum { IDM_STATUS = 1, IDM_NR, IDM_FILTERS, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM_MULT3, IDM_MULT4, IDM_ENG0, IDM_ENG1, IDM_ENG2, IDM_WIPE, IDM_RELOAD,
        IDM_SETTINGS, IDM_NEWPROFILE, IDM_PROFILE_RESET, IDM_PROFILE_REMOVE, IDM_CONFIG, IDM_APPCONFIG, IDM_LOG, IDM_QUIT,
        IDM_PRESET0 = 60, IDM_PROFILE0 = 100 };
 }
@@ -37,7 +38,7 @@ struct Tray
 
     std::mutex mu;   // guards everything below
     bool nr_on = true, fg_on = false, filters_on = true;
-    int  mult = 2, wipe = 0, profile = -1;
+    int  mult = 2, engine = 0, wipe = 0, profile = -1;
     HWND game = nullptr;
     std::wstring status;
     std::vector<std::wstring> profiles;
@@ -158,9 +159,15 @@ static HMENU BuildMenu(Tray* t)
     HMENU fg = CreatePopupMenu();
     AppendMenuW(fg, MF_STRING | (t->fg_on ? MF_CHECKED : 0), IDM_FG, L"Enabled");
     AppendMenuW(fg, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(fg, MF_STRING, IDM_MULT2, L"2X");
-    AppendMenuW(fg, MF_STRING, IDM_MULT3, L"3X");
-    AppendMenuW(fg, MF_STRING, IDM_MULT4, L"4X");
+    AppendMenuW(fg, MF_STRING, IDM_ENG0, L"DLSS-G (interpolate)");
+    AppendMenuW(fg, MF_STRING, IDM_ENG1, L"Warp (extrapolate, no added latency)");
+    AppendMenuW(fg, MF_STRING, IDM_ENG2, L"Latewarp (Frame Warp to the mouse)");
+    CheckMenuRadioItem(fg, IDM_ENG0, IDM_ENG2, IDM_ENG0 + std::clamp(t->engine, 0, 2), MF_BYCOMMAND);
+    AppendMenuW(fg, MF_SEPARATOR, 0, nullptr);
+    const UINT per_frame = t->engine == 2 ? MF_GRAYED : 0;   // latewarp runs at the display's refresh, not a multiple
+    AppendMenuW(fg, MF_STRING | per_frame, IDM_MULT2, L"2X");
+    AppendMenuW(fg, MF_STRING | per_frame, IDM_MULT3, L"3X");
+    AppendMenuW(fg, MF_STRING | per_frame, IDM_MULT4, L"4X");
     const int mult = t->mult < 2 ? 2 : t->mult > 4 ? 4 : t->mult;
     CheckMenuRadioItem(fg, IDM_MULT2, IDM_MULT4, IDM_MULT2 + mult - 2, MF_BYCOMMAND);
     MENUITEMINFOW mi = { sizeof mi };
@@ -231,6 +238,7 @@ static void ShowMenu(Tray* t)
     case IDM_FILTERS: Push(t, TrayToggleFilters); break;
     case IDM_FG:      Push(t, TrayToggleFg); break;
     case IDM_MULT2: case IDM_MULT3: case IDM_MULT4: Push(t, TrayFgMultiplier, cmd - IDM_MULT2 + 2); break;
+    case IDM_ENG0: case IDM_ENG1: case IDM_ENG2: Push(t, TrayFgEngine, cmd - IDM_ENG0); break;
     case IDM_WIPE:    Push(t, TrayWipe); break;
     case IDM_RELOAD:  Push(t, TrayReload); break;
     case IDM_CONFIG:  Push(t, TrayOpenConfig); break;
@@ -380,7 +388,7 @@ void TraySetState(Tray* t, const TrayState& s)
 {
     {
         std::lock_guard<std::mutex> lk(t->mu);
-        t->nr_on = s.nr_on; t->fg_on = s.fg_on; t->filters_on = s.filters_on; t->mult = s.fg_multiplier;
+        t->nr_on = s.nr_on; t->fg_on = s.fg_on; t->filters_on = s.filters_on; t->mult = s.fg_multiplier; t->engine = s.fg_engine;
         t->wipe = s.wipe_mode; t->profile = s.profile_index; t->game = s.game;
         t->status = s.status ? s.status : L"";
     }

@@ -56,17 +56,19 @@ struct Setting
 const wchar_t* const kTabs[] = { L"Neural", L"Filters", L"Frame gen", L"Display", L"System", L"Hotkeys" };
 const int kTabCount = (int)(sizeof kTabs / sizeof *kTabs);
 
-// Model resolutions: the measured cost is ~1.5 ms/MPix + 1 ms on a 5080, so 4K is a 60 fps tier.
-const wchar_t* const kWork = L"auto|native|1920x1080|2560x1440|3200x1800|3840x2160";
-// Optical flow input: the largest GPU cost in the pipeline and it scales steeply.
+// Model resolutions. auto = the integer divisor of the capture nearest 1080 lines (1080p on 4K),
+// native = the capture itself. 3200x1800 and 3840x2160 are gone: the first is a non-integer ratio of
+// 4K and lost to 1080p on cost AND fidelity (main.cpp, WorkAuto), the second is `native` on 4K.
+const wchar_t* const kWork = L"auto|native|1920x1080|2560x1440";
+// Optical flow input: read by the DLSS model and the warp engines only - DLSS-G measures motion itself.
 // Measured on an idle 5080 from a 4K capture: 0.55 / 1.05 / 1.49 / 3.61 ms.
 const wchar_t* const kFlow = L"640x360|960x540|1280x720|1920x1080";
 
 const Setting kSettings[] = {
     // ---- 0 Neural layer: the switch, what runs under it, and how the model is tuned ------------
     { 0, L"nr", L"enabled",           L"Neural layer (F9)",  Bool,  nullptr, L"1" },
-    { 0, L"nr", L"artcnn",            L"ArtCNN (~2.3ms)",    Bool,  nullptr, L"0" },
-    { 0, L"nr", L"model",             L"DLSS model (~12ms)", Bool,  nullptr, L"1" },
+    { 0, L"nr", L"artcnn",            L"ArtCNN (~2.3 ms)",   Bool,  nullptr, L"0" },
+    { 0, L"nr", L"model",             L"DLSS model (4-12 ms)", Bool, nullptr, L"1" },
     { 0, L"nr", L"work",              L"Model resolution",   Enum,  kWork,   L"auto" },
     { 0, L"nr", L"model_every",       L"Model every Nth frame", Enum, L"1|2|3|4|6|8", L"1" },
     { 0, L"nr", L"residual_strength", L"Neural strength",    Float, nullptr, L"1.0" },
@@ -82,10 +84,12 @@ const Setting kSettings[] = {
 
     // ---- 2 Frame generation ---------------------------------------------------------------------
     { 2, L"fg", L"enabled",           L"Frame generation (F8)", Bool, nullptr, L"0" },
-    { 2, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4", L"2" },
+    // engine first: it decides what the rows under it mean. latewarp runs at the display's refresh,
+    // so the multiplier and the governor mean nothing to it: they grey out (SyncFgRows).
     { 2, L"fg", L"engine",            L"Engine",             Enum,  L"dlssg|warp|latewarp", L"dlssg" },
-    { 2, L"fg", L"min_gain",          L"Auto-pause below gain", Float, nullptr, L"1.5" },
-    { 2, L"fg", L"max_input_fps",     L"No FG above input fps", Float, nullptr, L"90" },
+    { 2, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4", L"2" },
+    { 2, L"fg", L"min_gain",          L"Pause below gain",   Float, nullptr, L"1.5" },
+    { 2, L"fg", L"max_input_fps",     L"Pause above input fps", Float, nullptr, L"90" },
 
     // ---- 3 Display --------------------------------------------------------------------------------
     { 3, L"ui", L"hud",               L"Status HUD (F7)",    Bool,  nullptr, L"0" },
@@ -97,7 +101,7 @@ const Setting kSettings[] = {
     // ---- 4 System: this machine, rarely touched ---------------------------------------------------
     { 4, L"gpu", L"adapter",          L"GPU (-1 = auto)",    Int,   nullptr, L"-1" },
     { 4, L"capture", L"mode",         L"Capture",            Enum,  L"auto|wgc|dda", L"auto" },
-    { 4, L"ofa", L"input",            L"Flow input",         Enum,  kFlow,   L"960x540" },
+    { 4, L"ofa", L"input",            L"Flow input (model, warp)", Enum, kFlow, L"960x540" },
     { 4, L"nr", L"max_fps",           L"FPS cap (0 = off)",  Int,   nullptr, L"0" },
 
     // ---- 5 Hotkeys ---------------------------------------------------------------------------------
@@ -248,21 +252,34 @@ std::vector<WORD> BuildTemplate()
     {
         const Setting& s = kSettings[i];
         const int y = 30 + row[s.tab]++ * 16;
-        item(SS_LEFT, 14, y + 2, 100, 9, (WORD)(ID_LBL0 + i), 0x0082, nullptr, s.label);
+        // label 116 DLU: the longest label measured 160 px against the old 150 (bench: label_fit)
+        item(SS_LEFT, 14, y + 2, 116, 9, (WORD)(ID_LBL0 + i), 0x0082, nullptr, s.label);
         if (s.type == Bool)
-            item(BS_AUTOCHECKBOX | WS_TABSTOP, 120, y, 120, 10, (WORD)(ID_CTL0 + i), 0x0080, nullptr, L"");
+            item(BS_AUTOCHECKBOX | WS_TABSTOP, 134, y, 120, 10, (WORD)(ID_CTL0 + i), 0x0080, nullptr, L"");
         else if (s.type == Enum)
-            item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 120, y, 110, 90, (WORD)(ID_CTL0 + i), 0x0085, nullptr, L"");
+            item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 134, y, 110, 90, (WORD)(ID_CTL0 + i), 0x0085, nullptr, L"");
         else
-            item(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 120, y, s.type == Hotkey ? 110 : 70, 12, (WORD)(ID_CTL0 + i), 0x0081, nullptr, L"");
+            item(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 134, y, s.type == Hotkey ? 110 : 70, 12, (WORD)(ID_CTL0 + i), 0x0081, nullptr, L"");
     }
     // Quality preset, outside the tabs because it reaches across them (neural, filters, flow input).
-    item(SS_LEFT, 7, btn_y + 3, 26, 9, ID_PRESET_LBL, 0x0082, nullptr, L"Quality");
-    item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 34, btn_y + 1, 88, 90, ID_PRESET, 0x0085, nullptr, L"");
+    item(SS_LEFT, 7, btn_y + 3, 32, 9, ID_PRESET_LBL, 0x0082, nullptr, L"Quality");
+    item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 40, btn_y + 1, 84, 90, ID_PRESET, 0x0085, nullptr, L"");
     item(BS_PUSHBUTTON | WS_TABSTOP, 128, btn_y, 52, 15, ID_APPLY, 0x0080, nullptr, L"Apply");
     item(BS_DEFPUSHBUTTON | WS_TABSTOP, 185, btn_y, 52, 15, IDOK, 0x0080, nullptr, L"OK");
     item(BS_PUSHBUTTON | WS_TABSTOP, 242, btn_y, 52, 15, IDCANCEL, 0x0080, nullptr, L"Cancel");
     return w;
+}
+
+// latewarp runs at the display's refresh: the multiplier and the governor mean nothing to it, so their
+// rows grey out while it is the engine - clearer than a label saying so, and the values are kept.
+void SyncFgRows(HWND h)
+{
+    auto row = [](const wchar_t* key) { for (int i = 0; i < kCount; ++i) if (!wcscmp(kSettings[i].sec, L"fg") && !wcscmp(kSettings[i].key, key)) return i; return -1; };
+    const int eng = row(L"engine"); if (eng < 0) return;
+    wchar_t v[32] = {}; GetDlgItemTextW(h, ID_CTL0 + eng, v, 32);
+    const BOOL on = wcscmp(v, L"latewarp") != 0;
+    for (const wchar_t* k : { L"multiplier", L"min_gain", L"max_input_fps" })
+        if (const int i = row(k); i >= 0) { EnableWindow(GetDlgItem(h, ID_CTL0 + i), on); EnableWindow(GetDlgItem(h, ID_LBL0 + i), on); }
 }
 
 void ShowTab(HWND h, int tab)
@@ -346,6 +363,7 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             SendMessageW(q, CB_SETCURSEL, (d->profile && *d->profile) ? PresetCurrent(d->profile) + 1 : 0, 0);
         }
         ShowTab(h, 0);
+        SyncFgRows(h);
         PlaceClearOf(h, d->avoid);
         SetTimer(h, 1, 400, nullptr);   // live refresh, see WM_TIMER
         return TRUE;
@@ -364,6 +382,7 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                 if (v == d->initial[i]) continue;
                 d->initial[i] = v; SetCtl(h, i, v.c_str());
             }
+        if (wp == 1) SyncFgRows(h);
         return TRUE;
     case WM_NOTIFY:
         if (((NMHDR*)lp)->idFrom == ID_TAB && ((NMHDR*)lp)->code == TCN_SELCHANGE)
@@ -371,6 +390,7 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return FALSE;
     case WM_COMMAND:
         if (LOWORD(wp) == IDCANCEL) { EndDialog(h, 0); return TRUE; }
+        if (HIWORD(wp) == CBN_SELCHANGE && LOWORD(wp) >= ID_CTL0) SyncFgRows(h);   // the engine may have changed
         if (LOWORD(wp) == ID_PRESET && HIWORD(wp) == CBN_SELCHANGE)
         {
             // A preset FILLS IN the rows it owns and writes nothing: what it changes is visible on the
@@ -523,16 +543,20 @@ INT_PTR CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         L"; class seen when this profile was made: " + win.cls + L"\n\n"
         L"[nr]\n; enabled = the effect as a whole (F9). model = the DLSS model (~12 ms).\n"
         L"; artcnn = ArtCNN (~2.3 ms), which needs no model.\n"
-        L"enabled=1\nmodel=1\nartcnn=0\nwork=1920x1080\nchroma=0.25\n"
+        L"; work=auto follows the capture (1080p on 4K); native runs the model at full size.\n"
+        L"enabled=1\nmodel=1\nartcnn=0\nwork=auto\nchroma=0.25\n"
         L"; model_every=N runs the model on every Nth frame off the main path. Raise it (2-4) when the\n"
         L"; game presents faster than the model can follow - e.g. a game running its own frame generation.\n"
         L"model_every=1\n\n"
         L"[filters]\n; its own layer, applied after the neural one: sharpen then vibrance.\n"
         L"; enabled=0 bypasses the layer without losing these values (F6).\n"
         L"enabled=1\nsharpen=0.4\nsaturation=1.10\n\n"
-        L"[ofa]\ninput=960x540\n\n"
+        L"[ofa]\n; optical flow, for the DLSS model and the warp engines (DLSS-G does its own)\ninput=960x540\n\n"
         L"[ui]\nfeather=12\n\n"
-        L"[fg]\n; off by default: leave it off when the game has its own frame generation\nenabled=0\nmultiplier=2\n\n"
+        L"[fg]\n; off by default: leave it off when the game has its own frame generation\n"
+        L"; engine = dlssg (interpolates, +half a frame of latency) | warp (extrapolates our flow, no added\n"
+        L"; latency) | latewarp (NVIDIA Frame Warp to the mouse at every refresh; needs nvngx_latewarp.dll)\n"
+        L"enabled=0\nengine=dlssg\nmultiplier=2\n\n"
         L"[log]\nfile=justflow." + stem + L".log\n";
     FILE* f = nullptr;
     if (_wfopen_s(&f, path.c_str(), L"wt,ccs=UTF-8") == 0 && f)

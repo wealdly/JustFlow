@@ -108,12 +108,12 @@ The pipeline is three independent layers, each with one on/off that reaches into
 |---|---|---|---|
 | Neural | `[nr] enabled` | F9 | ArtCNN and/or the DLSS model, at work resolution, composed back as a residual |
 | Filters | `[filters] enabled` | F6 | sharpen then vibrance, at native resolution, UI rects untouched |
-| Frame gen | `[fg] enabled` | F8 | interpolates the finished frame; the UI is copied back onto generated frames |
+| Frame gen | `[fg] enabled` | F8 | frames between the game's: DLSS-G, warp or latewarp (`[fg] engine`); the UI is copied back onto every one |
 
 They apply in that order, with the UI mask and the HUD between filters and frame generation. The
 order is not arbitrary: sharpening has to see what the model produced, vibrance grades after the
 sharpen rather than feeding it exaggerated contrast, text goes on after both so it stays crisp,
-and frame generation runs last because it interpolates the frame as the viewer sees it.
+and frame generation runs last because it works on the frame as the viewer sees it.
 
 All eight combinations are valid — a layer that is off passes its input straight through. Turning
 a layer off keeps its tuned values, so an A/B costs nothing. The HUD names the live layers.

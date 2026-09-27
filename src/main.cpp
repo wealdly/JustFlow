@@ -1039,7 +1039,7 @@ static int RealMain(int argc, char** argv)
     {
         if (!tray) return;
         TrayState s; s.profile_index = profile; s.status = status;
-        if (p) { s.nr_on = !p->bypass; s.filters_on = p->cfg.filters_enabled; s.fg_on = p->cfg.fg_enabled; s.fg_multiplier = p->cfg.fg_multiplier; s.wipe_mode = p->wipe; s.game = p->target; }
+        if (p) { s.nr_on = !p->bypass; s.filters_on = p->cfg.filters_enabled; s.fg_on = p->cfg.fg_enabled; s.fg_multiplier = p->cfg.fg_multiplier; s.fg_engine = p->cfg.fg_engine; s.wipe_mode = p->wipe; s.game = p->target; }
         TraySetState(tray, s);
     };
     auto apply_hotkeys = [&]   // cfg.hk_* -> overlay registration (a pipeline created later registers from cfg itself)
@@ -1090,7 +1090,9 @@ static int RealMain(int argc, char** argv)
     {
         if (!p) return; p->cfg.fg_enabled = !p->cfg.fg_enabled; Log("[main] fg %s", p->cfg.fg_enabled ? "on" : "off");
         cfg.fg_enabled = p->cfg.fg_enabled; persist(L"fg", L"enabled", p->cfg.fg_enabled);
-        if (p->cfg.fg_enabled) PipelineToast(p, "Frame generation ON %dX", p->cfg.fg_multiplier); else PipelineToast(p, "Frame generation OFF");
+        if (!p->cfg.fg_enabled) PipelineToast(p, "Frame generation OFF");
+        else if (p->cfg.fg_engine == 2) PipelineToast(p, "Frame generation ON: latewarp");
+        else PipelineToast(p, "Frame generation ON %dX%s", p->cfg.fg_multiplier, p->cfg.fg_engine == 1 ? " (warp)" : "");
         tray_state();
     };
     auto toggle_filters = [&]
@@ -1161,7 +1163,18 @@ static int RealMain(int argc, char** argv)
         case TrayFgMultiplier:
             if (p) { Config nc = p->cfg; nc.fg_multiplier = arg; PipelineReload(p, nc); }   // like a reload: FG is recreated next frame
             cfg.fg_multiplier = arg; Log("[main] fg multiplier %d", arg); tray_state();
+            WritePrivateProfileStringW(L"fg", L"multiplier", std::to_wstring(arg).c_str(), ini_path.c_str());   // saved, like every other toggle
             break;
+        case TrayFgEngine:
+        {
+            static const wchar_t* const kEngine[] = { L"dlssg", L"warp", L"latewarp" };
+            const int e = std::clamp(arg, 0, 2);
+            if (p) { Config nc = p->cfg; nc.fg_engine = e; PipelineReload(p, nc); }
+            cfg.fg_engine = e; Log("[main] fg engine %ls", kEngine[e]); tray_state();
+            WritePrivateProfileStringW(L"fg", L"engine", kEngine[e], ini_path.c_str());
+            if (p) PipelineToast(p, "Frame generation engine: %ls%s", kEngine[e], p->cfg.fg_enabled ? "" : " (FG is off - F8)");
+            break;
+        }
         case TraySelectProfile: if (arg >= 0 && arg < (int)profiles.size() && arg != profile) pending_profile = arg; break;
         case TrayRescanProfiles:
         {

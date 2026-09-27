@@ -10,6 +10,7 @@ enum TrayEvent
     TrayToggleFilters,
     TrayToggleFg,
     TrayFgMultiplier,   // arg = 2..4
+    TrayFgEngine,       // arg = 0 dlssg, 1 warp, 2 latewarp
     TrayWipe,           // cycle wipe mode
     TrayReload,
     TraySelectProfile,  // arg = index into TraySetProfiles
@@ -24,6 +25,7 @@ struct TrayState
 {
     bool nr_on = true, fg_on = false, filters_on = true;
     int  fg_multiplier = 2;
+    int  fg_engine = 0;         // 0 dlssg, 1 warp, 2 latewarp
     int  wipe_mode = 0;         // 0 = off
     int  profile_index = -1;    // -1 = none
     HWND game = nullptr;        // the captured window; the settings dialog opens on a different monitor
