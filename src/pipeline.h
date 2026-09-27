@@ -32,7 +32,7 @@ struct StageStats
 // per-stage stamp covers. They cannot be one span: GpuEnd advances the ring slot and GpuBegin
 // clears it, so a pair cannot cross a submission. Real frame cost is LIST1 + ofa + LIST2 - the old
 // frame_gpu_ms was a sum of stages with OFA excluded, which reported a fraction of the frame.
-enum PipeStage { PS_SWIZZLE, PS_GRAYDS, PS_OFA, PS_EXPAND, PS_EVAL, PS_COMPOSE, PS_OFA2, PS_ARTCNN, PS_FILTER, PS_LIST1, PS_LIST2, PS_COUNT };   // PS_OFA/PS_OFA2: bench only (CPU round trip); PS_ARTCNN: sync path only
+enum PipeStage { PS_SWIZZLE, PS_GRAYDS, PS_OFA, PS_EXPAND, PS_EVAL, PS_COMPOSE, PS_OFA2, PS_FILTER, PS_LIST1, PS_LIST2, PS_COUNT };   // PS_OFA/PS_OFA2: bench only (CPU round trip)
 extern const char* const kPipeStageName[PS_COUNT];
 
 struct Pipeline
@@ -52,7 +52,6 @@ struct Pipeline
     ID3D12Resource *sharp4k = nullptr;                                     // out4k sharpened ([nr] sharpen > 0), rest COPY_SOURCE
     ID3D12Resource *shown = nullptr;                                       // the texture handed onward last frame (out4k or sharp4k)
     ID3D12Resource *nr_in = nullptr, *nr_out = nullptr, *mv = nullptr;     // rest: NPSR, UAV, NPSR
-    ID3D12Resource *nr_in2 = nullptr, *nr_in2_m = nullptr;                 // [nr] artcnn: CsArtCnn(nr_in[_m]) -> the evaluate input (NPSR); compose/residual keep nr_in
     // NR feature lifecycle
     bool create_pending = false;
     int  rebuild_countdown = 0;
@@ -104,7 +103,7 @@ struct Pipeline
     // nor cmp_held (main's flow reference until it moves to a newer residual); the model thread only
     // reads them, and asks for the next frame once its flow has consumed them.
     struct ModelFrame { int held = 2; UINT64 fence = 0; UINT index = 0; bool reset = true; };
-    struct ModelParams { float zero_below = 0.5f; float exposure = 1.0f; int max_fps = 0, warmup = 8; bool artcnn = false; };
+    struct ModelParams { float zero_below = 0.5f; float exposure = 1.0f; int max_fps = 0, warmup = 8; };
     GpuCtx     model_ctx;
     std::thread model_thread;
     std::mutex model_mu; std::condition_variable model_cv;   // guards model_stop/model_frame_ready/model_frame/model_params

@@ -134,7 +134,6 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.warp = F(L"nr", L"warp", c.warp);
     c.warp_reject = F(L"nr", L"warp_reject", c.warp_reject);
     c.model_max_fps = I(L"nr", L"model_max_fps", c.model_max_fps);
-    c.artcnn = B(L"nr", L"artcnn", c.artcnn);
 
     const std::wstring in = S(L"ofa", L"input", L"960x540");
     if (swscanf_s(in.c_str(), L"%ux%u", &c.ofa_w, &c.ofa_h) != 2) { c.ofa_w = 960; c.ofa_h = 540; }

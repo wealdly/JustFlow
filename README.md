@@ -10,6 +10,8 @@ no injection, no input. The same mechanisms OBS and overlay apps use, nothing mo
   tone and materials come from the model.
 - **Frame generation** (DLSS frame generation, desktop path) on the composed frame, paced to the display's
   vblank. DLSS-G measures the motion itself, so it costs no optical flow of ours.
+  Generated frames get the UI copied back out of the real frame, so text and action bars do not
+  smear with the world.
   `[fg] engine=warp` swaps DLSS-G for extrapolation: the newest frame pushed ahead along its own
   optical flow. Nothing is held back, so it adds no latency (DLSS-G interpolates and shows every real
   frame half an interval late), and it costs about half the GPU time (0.8 vs 1.7 ms per real frame
@@ -23,23 +25,23 @@ no injection, no input. The same mechanisms OBS and overlay apps use, nothing mo
   a button held (WoW turns only with a button held, so cursor movement never warps). It warps nothing
   until that fit is reliable. The warp is a camera rotation: exact for first-person mouse-look; for
   third-person cameras the character, which orbits with the camera, still slides with the background.
- Generated frames get the UI copied
-  back out of the real frame, so text and action bars do not smear with the world.
 - **Capture** by Windows.Graphics.Capture, uncapped on Windows 11 24H2+ (`MinUpdateInterval`), or DXGI
   Desktop Duplication where that is unavailable (`[capture] mode=auto|wgc|dda`).
 - **Per-game profiles**, global hotkeys, a tray menu, a live before/after wipe.
 
-Out of the box it runs **the DLSS model on its own: neural layer on, ArtCNN off, frame generation
-off** (`[nr] enabled=1 model=1 artcnn=0`, `[fg] enabled=0`). The model costs about 3.8 ms at 1080p
-and 5.7 ms at 1440p on an idle card, more with a game already loading the GPU. F9 / F6 / F8 switch
-the three layers and every toggle is remembered; with all of them off JustFlow goes dormant -
+Out of the box it runs **frame generation on its own: neural layer off, filter layer off, frame
+generation on** (`[nr] enabled=0`, `[filters] enabled=0`, `[fg] enabled=1`) - the cheapest layer
+(about 1.7 ms a real frame at 4K). The profiles keep their neural and filter tuning, so F9 / F6 bring
+those layers back exactly as set; the model costs about 3.8 ms at 1080p and 5.7 ms at 1440p on an
+idle card, more with a game already loading the GPU. F9 / F6 / F8 switch the three layers and every
+toggle is remembered; with all of them off JustFlow goes dormant -
 overlay hidden, capture released - rather than sit on top of the game as a slower copy of it.
 
-Frame generation is off by default on purpose. It only pays when it is really multiplying the
-frame rate (a governor pauses it below 1.5x gain, and above 90 fps in - `[fg] max_input_fps` - where
-doubling is latency for smoothness nobody sees), and many games ship their own - with real depth and
-motion vectors, which an external tool cannot match. **If the game has its own frame generation,
-use that and leave ours off**: stacking the two interpolates between interpolated frames.
+Frame generation only pays when it is really multiplying the frame rate, so a governor pauses it
+below 1.5x gain and above 90 fps in (`[fg] max_input_fps`), where doubling is latency for smoothness
+nobody sees. Many games ship their own - with real depth and motion vectors, which an external tool
+cannot match. **If the game has its own frame generation, use that and turn ours off (F8)**:
+stacking the two interpolates between interpolated frames.
 
 That case has a second consequence. The overlay is opaque, so JustFlow's pipeline rate is the rate
 you see. A game presenting 135-270 fps with its own FG outruns a model that takes 6-10 ms a frame,
@@ -84,7 +86,7 @@ debounced rebuild, and the handful the capture and overlay only read when they a
 (capture mode, window match, cursor, border, overlay mode) by rebuilding the pipeline in place.
 
 **Quality** in the same menu sets the four cost dials at once - High performance,
-Performance, Balanced, Quality (model resolution, ArtCNN, sharpen, flow resolution). No preset
+Performance, Balanced, Quality (model resolution and cadence, sharpen, flow resolution). No preset
 touches the look dials, and none sets a frame-rate cap.
 
 The model tiers trade **time, not resolution**. The model's edit is smooth, so it survives being
@@ -106,7 +108,7 @@ The pipeline is three independent layers, each with one on/off that reaches into
 
 | Layer | Switch | Key | What it does |
 |---|---|---|---|
-| Neural | `[nr] enabled` | F9 | ArtCNN and/or the DLSS model, at work resolution, composed back as a residual |
+| Neural | `[nr] enabled` | F9 | the DLSS model, at work resolution, composed back as a residual |
 | Filters | `[filters] enabled` | F6 | sharpen then vibrance, at native resolution, UI rects untouched |
 | Frame gen | `[fg] enabled` | F8 | frames between the game's: DLSS-G, warp or latewarp (`[fg] engine`); the UI is copied back onto every one |
 
@@ -145,10 +147,7 @@ mode, FG and mask state. The look defaults keep the game's own art and spend the
 `local_structure=1.00` (it adds detail). Raise `local_tone`, or `style` to 1 (Natural) or 2
 (Cinematic), only when a shift in look is actually wanted - the Look tab in the settings window
 has all of them. `[nr] sharpen=0.3..0.5` in the profile adds a contrast-adaptive sharpen
-after the effect (UI rects excluded), live on F11. `[nr] artcnn=1` runs ArtCNN C4F16_DS (a 12k-weight
-luma denoise/sharpen CNN, `shaders/artcnn.hlsl` generated by `tools/artcnn_port.py`) on the model
-input at work resolution before the evaluate (~3.5 ms at 1440p, ~2.3 ms at 1080p on a 5080); the
-residual composed onto the native frame carries its delta too. Live on F11.
+after the effect (UI rects excluded), live on F11.
 
 The `[stats]` lines in the log report capture rate, model cost, generation cadence, dropped
 frames, and the age of the frame on screen relative to the game's own present.

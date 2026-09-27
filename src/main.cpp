@@ -19,7 +19,7 @@
 int  RunBench(int argc, char** argv);                                             // bench.cpp
 bool SavePngRgba(const wchar_t* path, const uint8_t* rgba, UINT w, UINT h);       // bench.cpp
 
-const char* const kPipeStageName[PS_COUNT] = { "swizzle", "gray+downscale", "ofa", "expand", "eval", "compose", "ofa2", "artcnn", "filter", "list1(all)", "list2(all)" };
+const char* const kPipeStageName[PS_COUNT] = { "swizzle", "gray+downscale", "ofa", "expand", "eval", "compose", "ofa2", "filter", "list1(all)", "list2(all)" };
 
 double StageStats::pct(double p) const
 {
@@ -184,10 +184,9 @@ static bool AllocWork(Pipeline* p)
     Gpu& g = *p->g;
     p->ww = p->cfg.work_w; p->wh = p->cfg.work_h;
     p->nr_in = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, NPSR, L"nr_in");
-    p->nr_in2 = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, NPSR, L"nr_in2");
     p->nr_out = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, UAV, L"nr_out");
     p->mv = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R16G16_FLOAT, FUAV, NPSR, L"mv");
-    return p->nr_in && p->nr_in2 && p->nr_out && p->mv;
+    return p->nr_in && p->nr_out && p->mv;
 }
 
 // ---- decoupled model track ([nr] mode=async) ---------------------------------------------------------
@@ -198,20 +197,19 @@ static bool AllocModel(Pipeline* p)
     if (!p->nr_in_m)
     {
         p->nr_in_m = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, NPSR, L"nr_in_m");
-        p->nr_in2_m = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, NPSR, L"nr_in2_m");
         p->nr_out_m = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, UAV, L"nr_out_m");
         p->mv_m = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R16G16_FLOAT, FUAV, NPSR, L"mv_m");
         p->mv_res = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R16G16_FLOAT, FUAV, NPSR, L"mv_res");
         for (auto& r : p->residual) r = GpuMakeTex(g, p->ww, p->wh, DXGI_FORMAT_R16G16B16A16_FLOAT, FUAV, NPSR, L"residual");
     }
-    return p->model_src && p->nr_in_m && p->nr_in2_m && p->nr_out_m && p->mv_m && p->mv_res && p->residual[0] && p->residual[1];
+    return p->model_src && p->nr_in_m && p->nr_out_m && p->mv_m && p->mv_res && p->residual[0] && p->residual[1];
 }
-static void ReleaseModelWork(Pipeline* p) { REL(p->nr_in_m); REL(p->nr_in2_m); REL(p->nr_out_m); REL(p->mv_m); REL(p->mv_res); REL(p->residual[0]); REL(p->residual[1]); }
+static void ReleaseModelWork(Pipeline* p) { REL(p->nr_in_m); REL(p->nr_out_m); REL(p->mv_m); REL(p->mv_res); REL(p->residual[0]); REL(p->residual[1]); }
 
 static void SetModelParams(Pipeline* p, const Config& c)
 {
     std::lock_guard<std::mutex> lk(p->model_mu);
-    p->model_params = { c.zero_below, c.exposure_scale, c.model_max_fps, c.warmup, c.artcnn };
+    p->model_params = { c.zero_below, c.exposure_scale, c.model_max_fps, c.warmup };
 }
 
 // One iteration per handed-over frame: list A (downscale) -> model flow (OFA pair 1, held gray vs the
@@ -248,7 +246,6 @@ static void ModelThread(Pipeline* p, bool create, NrConfig nc)
         GpuBarrier(c.list, p->nr_in_m, NPSR, UAV);
         CsDownscale(g, p->sh, c.list, p->model_src, p->w, p->h, p->nr_in_m, p->ww, p->wh);
         GpuBarrier(c.list, p->nr_in_m, UAV, NPSR);
-        if (mp.artcnn) { GpuBarrier(c.list, p->nr_in2_m, NPSR, UAV); CsArtCnn(g, p->sh, c.list, p->nr_in_m, p->nr_in2_m, p->ww, p->wh); GpuBarrier(c.list, p->nr_in2_m, UAV, NPSR); }
         GpuBarrier(c.list, p->model_src, NPSR, CDST);
         const UINT64 fa = GpuCtxEnd(c);
         if (!fa) return fail("ctx end A");
@@ -271,7 +268,7 @@ static void ModelThread(Pipeline* p, bool create, NrConfig nc)
         if (nr && NrReady(nr))
         {
             GpuCtxStamp(c, 0);
-            const unsigned r = NrEvaluate(nr, c.list, mp.artcnn ? p->nr_in2_m : p->nr_in_m, p->mv_m, p->nr_out_m, reset, mp.exposure);
+            const unsigned r = NrEvaluate(nr, c.list, p->nr_in_m, p->mv_m, p->nr_out_m, reset, mp.exposure);
             GpuCtxStamp(c, 1);
             if (r == 1) { evaluated = true; p->eval_fails = 0; }
             else
@@ -345,7 +342,7 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
     p->gw = w / bx; p->gh = h / by;
     if (p->gw != cfg.ofa_w || p->gh != cfg.ofa_h) Log("[main] ofa input %ux%u adjusted to %ux%u (block %ux%u)", cfg.ofa_w, cfg.ofa_h, p->gw, p->gh, bx, by);
     p->hud = cfg.hud;
-    p->bypass = !cfg.nr_enabled;   // F9 state: the effect as a whole, model or ArtCNN alike
+    p->bypass = !cfg.nr_enabled;   // F9 state: the neural layer as a whole
     if (with_overlay)
     {
         HotkeyDef keys[kHotkeys]; HotkeyDefs(cfg, keys);
@@ -377,7 +374,7 @@ void PipelineDestroy(Pipeline* p)
     StopModel(p);
     GpuWaitIdle(*p->g);
     if (p->fg) FgDestroy(p->fg);
-    REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->nr_in); REL(p->nr_in2); REL(p->nr_out); REL(p->mv);
+    REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->nr_in); REL(p->nr_out); REL(p->mv);
     REL(p->model_src); ReleaseModelWork(p);
     for (auto& r : p->strip_rb) REL(r);
     REL(p->mvgrid); for (auto& r : p->mvgrid_rb) REL(r);
@@ -439,7 +436,7 @@ void PipelineReadStamps(Pipeline* p)
         double ms[9];
         if (!GpuStampsMsSlot(g, s, ms, 9)) continue;
         p->last_stamp_fence_slot[s] = v;
-        p->st[PS_SWIZZLE].add(ms[0]); p->st[PS_GRAYDS].add(ms[1]); p->st[PS_EVAL].add(ms[2]); p->st[PS_COMPOSE].add(ms[3]); p->st[PS_EXPAND].add(ms[4]); p->st[PS_ARTCNN].add(ms[5]); p->st[PS_FILTER].add(ms[6]); p->st[PS_LIST1].add(ms[7]); p->st[PS_LIST2].add(ms[8]);
+        p->st[PS_SWIZZLE].add(ms[0]); p->st[PS_GRAYDS].add(ms[1]); p->st[PS_EVAL].add(ms[2]); p->st[PS_COMPOSE].add(ms[3]); p->st[PS_EXPAND].add(ms[4]); p->st[PS_FILTER].add(ms[6]); p->st[PS_LIST1].add(ms[7]); p->st[PS_LIST2].add(ms[8]);   // ms[5]: stamps 10/11, unused
     }
 }
 
@@ -467,7 +464,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (p->rebuild_countdown > 0 && --p->rebuild_countdown == 0)
     {
         StopModel(p); p->model_failed = false;   // async: the restart below creates the new feature on the model thread
-        if (p->ww != c.work_w || p->wh != c.work_h) { GpuWaitIdle(g); DropFg(p); REL(p->nr_in); REL(p->nr_in2); REL(p->nr_out); REL(p->mv); ReleaseModelWork(p); if (!AllocWork(p)) return false; }
+        if (p->ww != c.work_w || p->wh != c.work_h) { GpuWaitIdle(g); DropFg(p); REL(p->nr_in); REL(p->nr_out); REL(p->mv); ReleaseModelWork(p); if (!AllocWork(p)) return false; }
         p->create_pending = true; reset = true;
         PipelineToast(p, "Rebuilding model %ux%u...", p->ww, p->wh); p->model_toast_pending = true;
     }
@@ -555,21 +552,13 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     GpuBarrier(cl, p->nr_in, NPSR, UAV);
     stamp(2);
     if (need_mv) CsGray(g, p->sh, cl, p->color4k, p->w, p->h, p->gray, p->gw, p->gh);
-    // Only the model and ArtCNN read nr_in. With neither (FG-only, the default), the compose
-    // takes the native path and never samples it, so this whole area filter was dead work.
-    // ...and none of it while the layer is switched off (F9): the compose shows native then, so the
-    // downscale and ArtCNN's seven passes were being computed and thrown away - measured live as
-    // ~5 ms a frame at 1800p, holding a 240 fps capture at 146 with the layer OFF.
+    // Only the model reads nr_in. Without it (FG-only, the default), the compose takes the native
+    // path and never samples it, so this area filter would be dead work - and none of it while the
+    // layer is switched off (F9), when the compose shows native.
     const bool neural_live = !p->bypass;
-    if (!async && neural_live && (model_on || c.artcnn)) CsDownscale(g, p->sh, cl, p->color4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
+    if (!async && neural_live && model_on) CsDownscale(g, p->sh, cl, p->color4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
     stamp(3);
     GpuBarrier(cl, p->nr_in, UAV, NPSR);
-    if (!async && neural_live && c.artcnn)   // the evaluate reads nr_in2; compose keeps nr_in so the residual carries the ArtCNN delta too
-    {
-        GpuBarrier(cl, p->nr_in2, NPSR, UAV);
-        stamp(10); CsArtCnn(g, p->sh, cl, p->nr_in, p->nr_in2, p->ww, p->wh); stamp(11);
-        GpuBarrier(cl, p->nr_in2, UAV, NPSR);
-    }
     if (need_mv)
     {
         GpuBarrier(cl, p->gray, UAV, CSRC);
@@ -711,7 +700,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (!async && model_on && NrReady(p->nr) && !p->bypass)
     {
         stamp(4);
-        const unsigned r = NrEvaluate(p->nr, cl, c.artcnn ? p->nr_in2 : p->nr_in, p->mv, p->nr_out, reset, c.exposure_scale);
+        const unsigned r = NrEvaluate(p->nr, cl, p->nr_in, p->mv, p->nr_out, reset, c.exposure_scale);
         stamp(5);
         if (r == 1) { evaluated = true; ++p->evals_since_create; p->eval_fails = 0; }
         else
@@ -732,15 +721,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         cp.strip_w = (int)kStripW; cp.strip_h = (int)kStripH;
     }
     for (int i = 0; i < c.nrects && cp.nrects < 64; ++i) cp.rects[cp.nrects++] = c.rects[i];
-    // ArtCNN on its own, with no DLSS model: it has already produced a work-res before/after pair
-    // (nr_in -> nr_in2), which is exactly what the compose consumes, so the residual carries its
-    // delta and nothing else. ~2.3 ms at 1080p against the model's 12 ms, which is the difference
-    // between an enhancement that fits a frame budget and one that does not. Also covers the
-    // model's warm-up, where the screen would otherwise sit on flat native.
-    // Not when the user has switched the effect off with a model present - that means everything off.
-    const bool art_only = !async && c.artcnn && !evaluated && !p->bypass;
-    const bool native = art_only ? false
-                                 : (async ? (p->cmp_idx < 0 || p->bypass) : (!evaluated || p->evals_since_create <= (UINT)std::max(0, c.warmup)));
+    const bool native = async ? (p->cmp_idx < 0 || p->bypass) : (!evaluated || p->evals_since_create <= (UINT)std::max(0, c.warmup));
     if (native) cp.wipe_mode = 2;
     else if (p->wipe == 1) { cp.wipe_mode = 1; cp.wipe_x = 0.5f; }
     else if (p->wipe == 2) { cp.wipe_mode = 1; cp.wipe_x = (float)fmod((NowMs() - p->wipe_t0) / 2000.0, 1.0); }
@@ -766,7 +747,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     {
         GpuBarrier(cl, p->nr_out, UAV, NPSR);
         stamp(6);
-        CsCompose(g, p->sh, cl, p->color4k, p->nr_in, art_only ? p->nr_in2 : p->nr_out, p->ww, p->wh, compose_dst, p->w, p->h, cp);
+        CsCompose(g, p->sh, cl, p->color4k, p->nr_in, p->nr_out, p->ww, p->wh, compose_dst, p->w, p->h, cp);
         stamp(7);
         GpuBarrier(cl, p->nr_out, NPSR, UAV);
     }
@@ -774,7 +755,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // ---- the order of application, in one place ------------------------------------------------
     // Three layers, three independent switches, and none of them reaches into another:
     //
-    //   capture -> NEURAL ([nr] enabled, F9)      ArtCNN then the DLSS model, at work resolution,
+    //   capture -> NEURAL ([nr] enabled, F9)      the DLSS model, at work resolution,
     //                                             composed back as a residual at native resolution.
     //           -> FILTERS ([filters] enabled, F6) sharpen then vibrance, at native resolution.
     //           -> UI rects + text                the addon mask and the HUD/toasts.
@@ -1019,7 +1000,7 @@ static int RealMain(int argc, char** argv)
     // an output its OWN adapter owns, and the present has to reach the display, so the monitor must
     // be plugged into whichever card this names - the capture device follows the same LUID.
     if (!GpuInit(g, cfg.gpu_adapter)) return 1;
-    if (cfg.selftest) { ComposeSelfTest(g); ArtCnnSelfTest(g); }
+    if (cfg.selftest) ComposeSelfTest(g);
     ResolveWork(cfg, dir);
     LARGE_INTEGER qpf; QueryPerformanceFrequency(&qpf);
 
@@ -1065,8 +1046,7 @@ static int RealMain(int argc, char** argv)
         {
             p->force_reset = true;
             // Bring up the model only if this profile actually wants one. F9 is the effect
-            // switch, not the model switch - it used to create a model here, which made
-            // "ArtCNN only" impossible to hold: every F9 turned the expensive path back on.
+            // switch, not the model switch: a profile with model=0 keeps F9 cheap.
             if (!p->nr && p->cfg.nr_model)
             {
                 p->nr = NrInit(g, ExeDir().c_str(), (NrParamBlock)p->cfg.param_block);
@@ -1076,13 +1056,11 @@ static int RealMain(int argc, char** argv)
         cfg.nr_enabled = p->cfg.nr_enabled = !p->bypass;
         persist(L"nr", L"enabled", !p->bypass);
         Log("[main] bypass %s", p->bypass ? "on" : "off");
-        // Say what F9 actually switched. The layer can be EMPTY (model=0, artcnn=0 - the FG-only
-        // default), and "effect ON" over nothing read as a broken hotkey.
+        // Say what F9 actually switched. The layer can be EMPTY (model=0), and "effect ON" over
+        // nothing read as a broken hotkey.
         if (p->bypass) PipelineToast(p, "Neural layer OFF");
-        else if (p->cfg.nr_model && p->cfg.artcnn) PipelineToast(p, "Neural layer ON: ArtCNN + DLSS model");
         else if (p->cfg.nr_model) PipelineToast(p, "Neural layer ON: DLSS model");
-        else if (p->cfg.artcnn) PipelineToast(p, "Neural layer ON: ArtCNN");
-        else PipelineToast(p, "Neural layer ON but EMPTY - pick ArtCNN or DLSS model in Settings");
+        else PipelineToast(p, "Neural layer ON but EMPTY - turn the DLSS model on in Settings");
         tray_state();
     };
     auto cycle_wipe = [&] { if (!p) return; p->wipe = (p->wipe + 1) % 3; p->wipe_t0 = NowMs(); Log("[main] wipe %d", p->wipe); PipelineToast(p, "Wipe: %s", p->wipe == 1 ? "split" : p->wipe == 2 ? "sweep" : "off"); tray_state(); };
@@ -1309,7 +1287,7 @@ static int RealMain(int argc, char** argv)
             // hotkeys and the tray. Any toggle that enables a layer wakes it within 50 ms.
             {
                 const Config& lc = p->cfg;
-                const bool neural = !p->bypass && (lc.nr_model || lc.artcnn);
+                const bool neural = !p->bypass && lc.nr_model;
                 const bool filters = lc.filters_enabled && (lc.sharpen > 0 || lc.saturation != 1.0f);
                 const bool active = neural || filters || lc.fg_enabled || p->wipe != 0 || dump > dumped;
                 if (!active)
@@ -1397,7 +1375,7 @@ static int RealMain(int argc, char** argv)
                 // Which LAYERS are live, not which settings are set: the three switches are
                 // independent, so the HUD has to be able to say "neural off, filters on, FG on".
                 if (p->bypass) strcpy_s(nr, "neural off");
-                else if (!p->nr || !cfg.nr_model) strcpy_s(nr, cfg.artcnn ? "ArtCNN only" : "neural idle");   // the setting, not the object
+                else if (!p->nr || !cfg.nr_model) strcpy_s(nr, "neural idle");   // the setting, not the object
                 else if (cfg.nr_async)
                 {
                     double ms; { std::lock_guard<std::mutex> lk(p->pub_mu); ms = p->model_ms.med(); }

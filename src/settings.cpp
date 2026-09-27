@@ -48,8 +48,8 @@ struct Setting
     const wchar_t* def;     // shown when the key is absent from the file
 };
 
-// One tab per pipeline LAYER, in the order a frame passes through them: neural (ArtCNN and/or the
-// DLSS model, composed back as a residual), then ordinary filters, then frame generation, then
+// One tab per pipeline LAYER, in the order a frame passes through them: neural (the DLSS model,
+// composed back as a residual), then ordinary filters, then frame generation, then
 // presentation. Everything neural is on ONE tab - splitting the layer's switches from the model's
 // tuning across two tabs meant hunting for which tab a knob lived on, which was the original
 // complaint. A layer you are not running is a tab you never open.
@@ -66,8 +66,7 @@ const wchar_t* const kFlow = L"640x360|960x540|1280x720|1920x1080";
 
 const Setting kSettings[] = {
     // ---- 0 Neural layer: the switch, what runs under it, and how the model is tuned ------------
-    { 0, L"nr", L"enabled",           L"Neural layer (F9)",  Bool,  nullptr, L"1" },
-    { 0, L"nr", L"artcnn",            L"ArtCNN (~2.3 ms)",   Bool,  nullptr, L"0" },
+    { 0, L"nr", L"enabled",           L"Neural layer (F9)",  Bool,  nullptr, L"0" },
     { 0, L"nr", L"model",             L"DLSS model (4-12 ms)", Bool, nullptr, L"1" },
     { 0, L"nr", L"work",              L"Model resolution",   Enum,  kWork,   L"auto" },
     { 0, L"nr", L"model_every",       L"Model every Nth frame", Enum, L"1|2|3|4|6|8", L"1" },
@@ -78,12 +77,12 @@ const Setting kSettings[] = {
     { 0, L"nr", L"local_structure",   L"Local structure",    Float, nullptr, L"1.0" },
 
     // ---- 1 Filters: ordinary post passes, independent of the neural layer ----------------------
-    { 1, L"filters", L"enabled",      L"Filter layer (F6)",  Bool,  nullptr, L"1" },
+    { 1, L"filters", L"enabled",      L"Filter layer (F6)",  Bool,  nullptr, L"0" },
     { 1, L"filters", L"sharpen",      L"Sharpen",            Float, nullptr, L"0.0" },
     { 1, L"filters", L"saturation",   L"Vibrance",           Float, nullptr, L"1.10" },
 
     // ---- 2 Frame generation ---------------------------------------------------------------------
-    { 2, L"fg", L"enabled",           L"Frame generation (F8)", Bool, nullptr, L"0" },
+    { 2, L"fg", L"enabled",           L"Frame generation (F8)", Bool, nullptr, L"1" },
     // engine first: it decides what the rows under it mean. latewarp runs at the display's refresh,
     // so the multiplier and the governor mean nothing to it: they grey out (SyncFgRows).
     { 2, L"fg", L"engine",            L"Engine",             Enum,  L"dlssg|warp|latewarp", L"dlssg" },
@@ -155,21 +154,19 @@ struct PresetKey { const wchar_t *sec, *key, *val[kPresetCount]; };
 // Only the cost dials. The look ([nr] style/intensity/...) is the user's, and no preset sets a
 // frame-rate cap - a cap the user did not ask for reads as "the filter is slow".
 const PresetKey kPreset[] = {
-    // High performance runs NO DLSS model at all: ArtCNN alone carries the enhancement at ~2.3 ms
-    // against the model's 12 ms in a real scene, which is the difference between fitting a 90 fps
-    // budget alongside frame generation and not. The other three are model tiers, and they are
-    // tiers of TIME, not of work size: the model's edit is low-frequency and survives being motion-
+    // Four model tiers, and they are tiers of TIME, not of work size: the model's edit is low-frequency and survives being motion-
     // warped for several frames, while a smaller work size makes the model itself behave differently.
     // Measured on a moving 4K sequence (share of the every-frame native edit, average model cost):
-    //   auto (1080p) every frame 57% 3.8 ms | native every 6th 76% 2.0 ms | native every 3rd 80% 4.1 ms
+    //   auto (1080p) every 3rd 49% 1.3 ms | every frame 57% 3.8 ms | native every 6th 76% 2.0 ms | every 3rd 80% 4.1 ms
+    // (High performance was ArtCNN on its own until ArtCNN was removed: it cost ~2.3 ms and did almost
+    // nothing the model does not.)
     // Performance stays the small per-frame evaluate because it is the one that cannot hitch a game
     // sharing the GPU; a native evaluate is one ~12 ms block at 4K. The old 1440p / 1800p tiers were
     // non-integer ratios of 4K and lost to 1080p on cost AND fidelity (see WorkAuto in main.cpp).
     { L"nr",  L"enabled", { L"1",         L"1",         L"1",         L"1" } },
-    { L"nr",  L"model",   { L"0",         L"1",         L"1",         L"1" } },
+    { L"nr",  L"model",   { L"1",         L"1",         L"1",         L"1" } },
     { L"nr",  L"work",    { L"auto",      L"auto",      L"native",    L"native" } },
-    { L"nr",  L"model_every", { L"1",     L"1",         L"6",         L"3" } },
-    { L"nr",  L"artcnn",  { L"1",         L"0",         L"0",         L"0" } },
+    { L"nr",  L"model_every", { L"3",     L"1",         L"6",         L"3" } },
     { L"filters", L"sharpen", { L"0.4",   L"0.3",       L"0.2",       L"0.0" } },
     { L"ofa", L"input",   { L"640x360",   L"960x540",   L"960x540",   L"1280x720" } },
 };
@@ -541,22 +538,21 @@ INT_PTR CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         L"; fill it in if two windows share a title. Both come from the window, never the process.\n\n"
         L"[capture]\nmode=auto\nwindow_class=" + win.cls + L"\nwindow_title=" + win.title + L"\ncursor=0\nborder=0\n"
         L"; class seen when this profile was made: " + win.cls + L"\n\n"
-        L"[nr]\n; enabled = the effect as a whole (F9). model = the DLSS model (~12 ms).\n"
-        L"; artcnn = ArtCNN (~2.3 ms), which needs no model.\n"
+        L"[nr]\n; enabled = the neural layer (F9), off by default. model = the DLSS model (4-12 ms).\n"
         L"; work=auto follows the capture (1080p on 4K); native runs the model at full size.\n"
-        L"enabled=1\nmodel=1\nartcnn=0\nwork=auto\nchroma=0.25\n"
+        L"enabled=0\nmodel=1\nwork=auto\nchroma=0.25\n"
         L"; model_every=N runs the model on every Nth frame off the main path. Raise it (2-4) when the\n"
         L"; game presents faster than the model can follow - e.g. a game running its own frame generation.\n"
         L"model_every=1\n\n"
         L"[filters]\n; its own layer, applied after the neural one: sharpen then vibrance.\n"
         L"; enabled=0 bypasses the layer without losing these values (F6).\n"
-        L"enabled=1\nsharpen=0.4\nsaturation=1.10\n\n"
+        L"enabled=0\nsharpen=0.4\nsaturation=1.10\n\n"
         L"[ofa]\n; optical flow, for the DLSS model and the warp engines (DLSS-G does its own)\ninput=960x540\n\n"
         L"[ui]\nfeather=12\n\n"
-        L"[fg]\n; off by default: leave it off when the game has its own frame generation\n"
+        L"[fg]\n; on by default: turn it off (F8) when the game has its own frame generation\n"
         L"; engine = dlssg (interpolates, +half a frame of latency) | warp (extrapolates our flow, no added\n"
         L"; latency) | latewarp (NVIDIA Frame Warp to the mouse at every refresh; needs nvngx_latewarp.dll)\n"
-        L"enabled=0\nengine=dlssg\nmultiplier=2\n\n"
+        L"enabled=1\nengine=dlssg\nmultiplier=2\n\n"
         L"[log]\nfile=justflow." + stem + L".log\n";
     FILE* f = nullptr;
     if (_wfopen_s(&f, path.c_str(), L"wt,ccs=UTF-8") == 0 && f)

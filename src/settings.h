@@ -18,7 +18,7 @@ bool SettingsDialog(HWND parent, const wchar_t* app_ini, const wchar_t* profile_
 // keeps its clean import table. Returns true if a profile was written.
 bool NewProfileDialog(HWND parent, const wchar_t* profiles_dir, const wchar_t* app_ini, const wchar_t* app_name);
 
-// Quality presets: the cost dials (model resolution, ArtCNN, sharpen, flow resolution) written into
+// Quality presets: the cost dials (model resolution and cadence, sharpen, flow resolution) written into
 // the game profile. 0 high performance, 1 performance, 2 balanced, 3 quality.
 enum { kPresetCount = 4 };
 const wchar_t* PresetName(int i);

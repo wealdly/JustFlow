@@ -26,12 +26,10 @@ struct Config
     // measured as a self-sustaining 240 'frames' a second from a window that never changes.
     bool dda = false;
     // [nr]
-    // Two separate things, because one key could not say "effect on, model off, ArtCNN on":
-    //   enabled = the effect as a whole, which is what F9 toggles and what persists.
-    //   model   = use the DLSS neural-rendering model (expensive: ~12 ms in a real scene).
-    //   artcnn  = use ArtCNN (~2.3 ms), on its own or ahead of the model.
-    bool  nr_enabled = true;
-    bool  nr_model = true;                 // the default experience is the DLSS model on its own (no ArtCNN, no FG)
+    //   enabled = the neural layer, which is what F9 toggles and what persists.
+    //   model   = the DLSS neural-rendering model (4-12 ms) - the layer's only content since ArtCNN went.
+    bool  nr_enabled = false;              // out of the box: frame generation only (README)
+    bool  nr_model = true;
     UINT  work_w = 0, work_h = 0;          // 0 = auto until the capture size is known (WorkAuto in main.cpp)
     bool  work_auto = false;               // [nr] work=auto: re-derived from the native size, never from a fixed number
     bool  work_native = false;             // [nr] work=native: the model at the capture size, 1:1 (pair it with model_every)
@@ -54,9 +52,8 @@ struct Config
     // [filters] - its own layer, its own section. Three switches, one per layer, and none of them
     // reaches into another: [nr] enabled, [filters] enabled, [fg] enabled. `enabled` is a bypass
     // that KEEPS the tuned values, so a filter A/B does not cost you the numbers you arrived at.
-    bool  filters_enabled = true;
+    bool  filters_enabled = false;
     float sharpen = 0.0f;                  // CAS-style sharpen after the compose, 0 = off (0.3-0.5 typical); live (F11)
-    bool  artcnn = false;                  // ArtCNN C4F16_DS luma pass on the model input (CsArtCnn nr_in -> nr_in2); live (F11)
     // [ofa]
     UINT  ofa_w = 960, ofa_h = 540;
     int   ofa_grid = 0;
@@ -77,7 +74,7 @@ struct Config
     // Off by default. FG only pays above ~1.5x gain, many games already run their own (with real depth
     // and motion vectors, which ours cannot match), and stacking ours on theirs interpolates
     // interpolations. It stays one key away (F8).
-    bool  fg_enabled = false;
+    bool  fg_enabled = true;
     int   fg_multiplier = 2;               // presented frames per rendered frame, 2..4
     bool  fg_pacing_vblank = true;         // pacing=vblank | timer
     int   fg_engine = 0;                   // engine=dlssg (0, interpolation) | warp (1, extrapolation) | latewarp (2, Frame Warp to the mouse)
