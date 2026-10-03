@@ -5,7 +5,7 @@
 #include <windows.h>
 #include <string>
 
-enum XeTrayEvent { XeTrayNone = 0, XeTrayToggleAuto, XeTrayToggleLock120, XeTrayToggleExtrap, XeTrayBatteryFull, XeTrayBatteryEconomy, XeTrayBatteryOff,
+enum XeTrayEvent { XeTrayNone = 0, XeTrayToggleAuto, XeTrayToggleLock120, XeTrayToggleExtrap, XeTrayToggleSync, XeTrayBatteryFull, XeTrayBatteryEconomy, XeTrayBatteryOff,
                    XeTrayAlways, XeTrayNever, XeTrayForget, XeTrayOpenLog, XeTrayQuit };
 
 enum XeTrayIcon { XeIconGenerating = 0, XeIconWatching = 1, XeIconOff = 2 };   // src/justflow_xe.rc 1..3
@@ -13,7 +13,7 @@ enum XeTrayIcon { XeIconGenerating = 0, XeIconWatching = 1, XeIconOff = 2 };   /
 struct XeTrayState
 {
     int  icon = XeIconWatching;   // XeTrayIcon
-    bool auto_on = true, lock120 = true, extrap = false;
+    bool auto_on = true, lock120 = true, extrap = false, vsync = true;
     int  battery = 1;      // on battery: 0 full, 1 economy, 2 off
     std::wstring status;   // first menu line and the tooltip
     std::wstring app;      // exe of the window the per-app items apply to ("" = none)

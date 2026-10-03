@@ -49,6 +49,7 @@ struct Settings
     std::wstring path;
     bool auto_on = true, lock120 = true;
     bool extrap = false;                // low latency: extrapolate ahead of the newest frame instead of interpolating behind it
+    bool vsync = true;                  // sync mode: vsync (no tearing, late adaptive render) or immediate (tearing, lowest latency)
     int  min_fps = 25;
     int  battery = 1;                   // on battery: 0 full, 1 economy, 2 off
     // Upper bound of content worth generating for, from the display's current refresh.
@@ -69,6 +70,8 @@ struct Settings
         min_fps = std::clamp(I(L"min_fps", 25), 10, 100);
         wchar_t e[16] = {}; GetPrivateProfileStringW(L"auto", L"engine", L"interpolate", e, 16, path.c_str());
         extrap = !_wcsicmp(e, L"extrapolate");
+        wchar_t sy[16] = {}; GetPrivateProfileStringW(L"auto", L"sync", L"vsync", sy, 16, path.c_str());
+        vsync = _wcsicmp(sy, L"off") != 0;
         wchar_t b[16] = {}; GetPrivateProfileStringW(L"power", L"battery", L"economy", b, 16, path.c_str());
         battery = !_wcsicmp(b, L"full") ? 0 : !_wcsicmp(b, L"off") ? 2 : 1;
     }
@@ -77,6 +80,7 @@ struct Settings
         WritePrivateProfileStringW(L"auto", L"enabled", auto_on ? L"1" : L"0", path.c_str());
         WritePrivateProfileStringW(L"auto", L"lock120", lock120 ? L"1" : L"0", path.c_str());
         WritePrivateProfileStringW(L"auto", L"engine", extrap ? L"extrapolate" : L"interpolate", path.c_str());
+        WritePrivateProfileStringW(L"auto", L"sync", vsync ? L"vsync" : L"off", path.c_str());
         wchar_t v[16];
         swprintf_s(v, L"%d", min_fps); WritePrivateProfileStringW(L"auto", L"min_fps", v, path.c_str());
         WritePrivateProfileStringW(L"auto", L"max_fps", nullptr, path.c_str());   // replaced by the refresh-relative bound
@@ -313,6 +317,7 @@ static bool Engage(Session& s, Gpu& g, const Settings& st, PowerMode mode)
     s.ov = XeFgOverlay(s.fg);
     XeFgSetTiming(s.fg, 0.0, st.Upper(s.hz));
     XeFgSetExtrapolate(s.fg, st.extrap);
+    XeFgSetVsync(s.fg, st.vsync);
     s.engaged_mode = mode;
     s.engaged_t = s.stats_t = NowMs(); s.reset = true; s.bad_since = -1;
     return true;
@@ -358,6 +363,10 @@ int RunTrayApp(const std::wstring& dir)
             {
             case XeTrayToggleAuto: st.auto_on = !st.auto_on; st.Save(); Log("[auto] automatic %s", st.auto_on ? "on" : "off"); if (!st.auto_on) Disengage(s, "automatic turned off"); break;
             case XeTrayToggleLock120: st.lock120 = !st.lock120; st.Save(); if (s.fg) XeFgSetTiming(s.fg, 0.0, st.Upper(s.hz)); Log("[auto] lock to display %s (content up to %d fps at %.0f Hz)", st.lock120 ? "on" : "off", st.Upper(s.hz), s.hz); break;
+            case XeTrayToggleSync:
+                st.vsync = !st.vsync; st.Save(); if (s.fg) XeFgSetVsync(s.fg, st.vsync);
+                Log("[auto] sync mode: %s", st.vsync ? "vsync (no tearing)" : "off (immediate, tearing allowed)");
+                break;
             case XeTrayToggleExtrap:
                 st.extrap = !st.extrap; st.Save(); if (s.fg) XeFgSetExtrapolate(s.fg, st.extrap);
                 Log("[auto] %s", st.extrap ? "low latency: extrapolating ahead of the newest frame" : "interpolating between the last two frames");
@@ -547,7 +556,7 @@ int RunTrayApp(const std::wstring& dir)
         if (NowMs() - status_t > 250)
         {
             status_t = NowMs();
-            XeTrayState ts; ts.auto_on = st.auto_on; ts.lock120 = st.lock120; ts.extrap = st.extrap; ts.status = status; ts.battery = st.battery;
+            XeTrayState ts; ts.auto_on = st.auto_on; ts.lock120 = st.lock120; ts.extrap = st.extrap; ts.vsync = st.vsync; ts.status = status; ts.battery = st.battery;
             ts.icon = s.fg ? XeIconGenerating : (!st.auto_on || (!pw.ac && (pw.saver || st.battery == 2))) ? XeIconOff : XeIconWatching;
             if (!pw.ac) ts.status += pw.saver ? L" [battery saver]" : L" [battery]";
             ts.app = !s.exe.empty() ? s.exe : never_exe; ts.app_rule = !s.exe.empty() ? s.rule : ts.app.empty() ? 0 : 2;
