@@ -57,24 +57,40 @@ float StaticWeight(float2 x)
 // Both paths branch on the static map first: a pixel that clearly stands still skips the flow work, one
 // that clearly moves skips the zero-motion samples, and only the boundary between them pays for both
 // (without this the static test added two full-resolution samples to every pixel: 0.22 -> 0.32 ms).
+// Full-resolution check on top of the L0 map. The map is half resolution, so a 1-2 px text stroke is
+// averaged with the panel behind it - and behind a semi-transparent panel a moving shadow line made the
+// letters it crossed take the world's motion for a few frames ("UI clean, but sporadically smears").
+// So per pixel: stand still where the colour is IDENTICAL in both real frames AND the flow's candidate
+// disagrees with itself. Equality alone is ambiguous - a thin pole moving faster than its width is absent
+// from x in both frames yet passes through it in between, and equality alone erased it (measured -6 dB
+// extrapolating) - but there the flow's two samples agree (both see the pole), while for static text
+// over a moving world they do not (they see the world under the text).
+float Diff(float3 a, float3 b) { const float3 d = abs(a - b); return max(d.x, max(d.y, d.z)) * 255.0; }
+float StaticHere(float3 a, float3 b, float3 fa, float3 fb)   // a/b: both frames at x; fa/fb: the flow's samples
+{
+    const float same = saturate(1.0 - (Diff(a, b) - 1.0) / 2.0);        // <= 1/255: 1, >= 3/255: 0
+    const float flow_wrong = saturate((Diff(fa, fb) - 4.0) / 8.0);      // <= 4/255: 0, >= 12/255: 1
+    return same * flow_wrong;
+}
+
+// Extrapolation keeps the L0 map only: with no frame at the target time the flow cannot be checked
+// where it is going, and the full-resolution test fired on moving content (-1.1 dB on the whole frame
+// for +0.2 inside the HUD).
 float4 Extrapolate(float2 x)
 {
     const float ws = StaticWeight(x);
-    float3 c;
-    [branch] if (ws >= 0.999) c = Color(cur, x).rgb;
-    else
-    {
-        c = Color(cur, x + t * Flow(bwd, x)).rgb;
-        [branch] if (ws > 0.001) c = lerp(c, Color(cur, x).rgb, ws);
-    }
+    const float3 here = Color(cur, x).rgb;
+    float3 c = here;
+    [branch] if (ws < 0.999) c = lerp(Color(cur, x + t * Flow(bwd, x)).rgb, here, ws);
     return float4(c, 1);
 }
 
 float4 Blend(float2 x)
 {
     const float ws = StaticWeight(x);   // the zero-motion hypothesis vs the flow's (see StaticWeight)
-    float3 still = 0, c = 0;
-    [branch] if (ws > 0.001) still = (1 - t) * Color(prev, x).rgb + t * Color(cur, x).rgb;
+    const float3 a = Color(prev, x).rgb, b = Color(cur, x).rgb;
+    const float3 still = (1 - t) * a + t * b;
+    float3 c = 0;
     [branch] if (ws >= 0.999) c = debug ? float3(0, 0, 1) : still;
     else
     {
@@ -82,11 +98,13 @@ float4 Blend(float2 x)
         const float2 p0 = x + (-(1 - t) * t * f01 + t * t * f10);
         const float2 p1 = x + ((1 - t) * (1 - t) * f01 - t * (1 - t) * f10);
         const float v0 = Visible(fwd, bwd, p0), v1 = Visible(bwd, fwd, p1);
+        const float3 c0 = Color(prev, p0).rgb, c1 = Color(cur, p1).rgb;
         // The floor keeps a both-sides-rejected pixel on the time blend; scaling it by the time weights
         // keeps t = 0 and t = 1 exactly the real frames (the presenter shows real frames as t = 1).
         const float w0 = (1 - t) * (v0 + 1e-3), w1 = t * (v1 + 1e-3);
-        c = lerp((w0 * Color(prev, p0).rgb + w1 * Color(cur, p1).rgb) / (w0 + w1), still, ws);
-        if (debug) c = float3(1 - v0, 1 - v1, ws);   // red: prev side rejected, green: cur side, blue: stands still
+        const float w = max(ws, StaticHere(a, b, c0, c1));
+        c = lerp((w0 * c0 + w1 * c1) / (w0 + w1), still, w);
+        if (debug) c = float3(1 - v0, 1 - v1, w);   // red: prev side rejected, green: cur side, blue: stands still
     }
     return float4(c, 1);
 }

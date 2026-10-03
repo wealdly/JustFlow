@@ -140,7 +140,7 @@ static void MakeUi(UINT w, UINT h)
         if (!b && !gch && !r) continue;
         const bool is_panel = r == GetRValue(panel) && gch == GetGValue(panel) && b == GetBValue(panel);
         uint8_t* o = &g_ui.rgba[i * 4];
-        o[0] = r; o[1] = gch; o[2] = b; o[3] = is_panel ? 180 : 255;
+        o[0] = r; o[1] = gch; o[2] = b; o[3] = is_panel ? 140 : 255;   // 55% like the scene's chat panel (rgba .55): the world shows through
     }
     SelectObject(dc, oldf); DeleteObject(font); SelectObject(dc, old); DeleteObject(bm); DeleteDC(dc);
 }
@@ -663,6 +663,15 @@ static int RunInterpBench(int argc, char** argv)
     }
     if (ui) Log("[interp] inside the HUD (%.1f%% of the frame): ours %.2f dB | repeat nearest %.2f dB   (a perfect static UI is identical in every frame)",
                 100.0 * std::count(ui_mask.begin(), ui_mask.end(), 1) / ui_mask.size(), mean(ui_ours), mean(ui_rep));
+    if (ui && !ui_ours.empty())
+    {
+        // Sporadic glitches hide in a mean: the worst generated frames inside the HUD, and which pair.
+        std::vector<std::pair<double, size_t>> v; for (size_t i = 0; i < ui_ours.size(); ++i) v.push_back({ ui_ours[i], i });
+        std::sort(v.begin(), v.end());
+        size_t under = 0; for (double x : ui_ours) under += x < 45.0;
+        Log("[interp] HUD per frame: worst %.2f dB (frame %zu), 2nd %.2f (frame %zu), 3rd %.2f (frame %zu); %zu of %zu under 45 dB",
+            v[0].first, v[0].second, v.size() > 1 ? v[1].first : 0.0, v.size() > 1 ? v[1].second : 0, v.size() > 2 ? v[2].first : 0.0, v.size() > 2 ? v[2].second : 0, under, v.size());
+    }
     std::sort(cost.begin(), cost.end());
     Log("[interp] all generated frames: ours %.2f dB (%+.2f vs repeat, %+.2f vs crossfade); interpolation pass %.3f ms median per generated frame (%ls)",
         all[0] / nall, (all[0] - all[1]) / nall, (all[0] - all[2]) / nall, cost.empty() ? -1.0 : cost[cost.size() / 2], L"flow not included");
