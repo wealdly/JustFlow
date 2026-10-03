@@ -480,6 +480,7 @@ static int RunBench(int argc, char** argv)
 static int RunInterpBench(int argc, char** argv)
 {
     std::wstring input; UINT size_w = 0, size_h = 0, factor = 2; int n = 3, pairs = 1 << 30, adapter = -1, refine = 1, fine = 1; UINT vendor = 0;
+    bool extrap = false;   // --extrap: predict the frames AFTER the pair (cur pushed ahead), truth = the real ones
     bool dump = false; XeInterp xi;
     for (int i = 1; i < argc; ++i)
     {
@@ -493,6 +494,7 @@ static int RunInterpBench(int argc, char** argv)
         else if (!strcmp(argv[i], "--pairs") && more) pairs = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tol") && more) xi.tol = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--tolrel") && more) xi.tol_rel = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--extrap")) extrap = true;
         else if (!strcmp(argv[i], "--adapter") && more) adapter = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--vendor") && more) vendor = (UINT)strtoul(argv[++i], nullptr, 16);
         else if (!strcmp(argv[i], "--dump")) dump = true;
@@ -538,14 +540,19 @@ static int RunInterpBench(int argc, char** argv)
                 XeFlowEstimate(xf, g.list, 0, 1, 0); XeFlowEstimate(xf, g.list, 1, 0, 1);
             }
             GpuStamp(g, g.list, 0);
-            XeInterpRecord(g, g.list, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), XeFlowGridW(xf), XeFlowGridH(xf), XeFlowFactor(xf), out, w, h, t);
+            XeInterpRecord(g, g.list, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), XeFlowGridW(xf), XeFlowGridH(xf), XeFlowFactor(xf), out, w, h, t,
+                           false, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, extrap);
             GpuStamp(g, g.list, 1);
             if (!GpuEnd(g) || !GpuWaitIdle(g) || !GpuReadbackTex(g, out, px.data(), w, h, 4, NPSR)) return 1;
             double ms; if (GpuStampsMsSlot(g, slot, &ms, 1) && ms >= 0) cost.push_back(ms);
             for (size_t i = 0; i < blend.size(); ++i) blend[i] = (uint8_t)((1 - t) * fr[0].px[i] + t * fr[n].px[i] + 0.5f);
-            const Image& truth = fr[j];
+            // Extrapolation is shown in place of the frame t intervals AFTER cur: that is its truth, and
+            // repeating cur (what is on screen without frame generation) its baseline.
+            Image future;
+            if (extrap && !(k * n + n + j < names.size() && Load(input + L"\\" + names[k * n + n + j], future, size_w, size_h) && future.w == w)) continue;
+            const Image& truth = extrap ? future : fr[j];
             ours[j].push_back(Psnr(truth, px, 16));
-            rep[j].push_back(Psnr(truth, t <= 0.5f ? fr[0].px : fr[n].px, 16));
+            rep[j].push_back(Psnr(truth, extrap ? fr[n].px : t <= 0.5f ? fr[0].px : fr[n].px, 16));
             mix[j].push_back(Psnr(truth, blend, 16));
             if (dump)
             {
@@ -622,6 +629,7 @@ static int RunLive(int argc, char** argv)
     std::wstring title, cls; UINT factor = 2; bool fg_on = true, cursor = false; int adapter = -1; UINT vendor = 0;
     double margin = 0.0, max_in = 100.0;   // margin: ms added to the adaptive hold (negative trims it)
     double snap_s = -1;   // --snap S: save the first generated frame after S seconds (xe_snap.png)
+    bool extrap = false;  // --extrap: push the newest frame ahead instead of interpolating behind it
     for (int i = 1; i < argc; ++i)
     {
         const bool more = i + 1 < argc;
@@ -631,6 +639,7 @@ static int RunLive(int argc, char** argv)
         else if (!strcmp(argv[i], "--margin") && more) margin = atof(argv[++i]);
         else if (!strcmp(argv[i], "--max-in") && more) max_in = atof(argv[++i]);
         else if (!strcmp(argv[i], "--snap") && more) snap_s = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--extrap")) extrap = true;
         else if (!strcmp(argv[i], "--adapter") && more) adapter = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--vendor") && more) vendor = (UINT)strtoul(argv[++i], nullptr, 16);
         else if (!strcmp(argv[i], "--off")) fg_on = false;
@@ -667,7 +676,7 @@ static int RunLive(int argc, char** argv)
         XeFg* fg = XeFgCreate(g, target, w, h, factor, keys, 2);
         if (!fg) { CaptureClose(cap); rc = 1; break; }
         Overlay* ov = XeFgOverlay(fg);
-        XeFgSetEnabled(fg, fg_on); XeFgSetTiming(fg, margin, max_in);
+        XeFgSetEnabled(fg, fg_on); XeFgSetTiming(fg, margin, max_in); XeFgSetExtrapolate(fg, extrap);
         Log("[live] attached to %p, %ux%u, display %.1f Hz", (void*)target, w, h, 1000.0 / OverlayVBlankMs(ov));
 
         bool reset = true; LONGLONG last_sysrel = 0; double stats_t = NowMs(); const double attach_t = stats_t; bool snapped = snap_s < 0;
@@ -708,8 +717,8 @@ static int RunLive(int argc, char** argv)
                 auto q = [&](double p) { return sp.empty() ? -1.0 : sp[std::min(sp.size() - 1, (size_t)(sp.size() * p))]; };
                 const double vbm = OverlayVBlankMs(ov); size_t late = 0;
                 for (double x : sp) late += x > vbm * 1.5;
-                Log("[stats] in %.1f fps  out %.1f fps (gen %u, held %u, early %u)%s | flow %.2f ms  interp %.2f ms | hold %.1f ms (learned %.1f)  interval %.1f ms | spacing p5 %.2f  med %.2f  p95 %.2f ms, %.1f%% > 1.5 vblank",
-                    s.in / dt, s.presented / dt, s.generated, s.held, s.early, s.passthrough ? " PASSTHROUGH" : "",
+                Log("[stats] in %.1f fps  out %.1f fps (gen %u, ext %u, held %u, early %u)%s | flow %.2f ms  interp %.2f ms | hold %.1f ms (learned %.1f)  interval %.1f ms | spacing p5 %.2f  med %.2f  p95 %.2f ms, %.1f%% > 1.5 vblank",
+                    s.in / dt, s.presented / dt, s.generated, s.extrapolated, s.held, s.early, s.passthrough ? " PASSTHROUGH" : "",
                     s.flow_ms, s.interp_ms, s.hold_ms, s.extra_ms, s.interval_ms, q(0.05), q(0.5), q(0.95), sp.empty() ? 0.0 : 100.0 * late / sp.size());
             }
         }
@@ -732,7 +741,7 @@ static int CliMain(int argc, char** argv)
                     "  --bench <dir|png> [--size WxH] [--factor N] [--lambda X] [--refine N] [--frames N] [--pairs N] [--dump]\n"
                     "          [--shift DX,DY] [--zoom Z] [--adapter I] [--vendor HEX]\n"
                     "  --interp N --seq <dir> [--size WxH] [--pairs K] [--tol PX] [--tolrel X] [--refine N] [--dump]\n"
-                    "  --live --window <title substring> [--class C] [--off] [--factor N] [--margin MS] [--max-in FPS] [--cursor] [--snap S]\n");
+                    "  --live --window <title substring> [--class C] [--off] [--factor N] [--margin MS] [--max-in FPS] [--cursor] [--snap S] [--extrap]\n");
     return 2;
 }
 

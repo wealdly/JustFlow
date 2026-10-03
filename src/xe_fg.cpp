@@ -45,8 +45,9 @@ struct XeFg
     std::thread th;
     std::atomic<bool> stop{ false }, failed{ false }, enabled{ true };
     std::atomic<double> margin{ 0.0 }, max_in{ 100.0 };
+    std::atomic<bool>   extrap{ false };   // XeFgSetExtrapolate: show the newest frame pushed ahead instead of interpolating behind it
     // presenter-owned, published under mu for stats
-    UINT in = 0, presented = 0, generated = 0, held = 0, early = 0;
+    UINT in = 0, presented = 0, generated = 0, extrapolated = 0, held = 0, early = 0;
     std::vector<double> spacing, interp_ms;
     double hold_ms = 0, interval_ms = 0, extra_ms = 0; bool passthrough = false;
     // snapshot (XeFgRequestSnapshot / XeFgTakeSnapshot): the next GENERATED frame, copied on the ctx queue
@@ -101,7 +102,7 @@ static void Presenter(XeFg* f)
     // on a 120 Hz display lands 16.7 / 25 ms apart, and a fixed margin sized for the 22 ms mean paused
     // the motion ~7 times a second (measured: margin 3 -> 7.8 held/s, 6 -> 6.4, 9 -> 0).
     static const int kNeed = 64;
-    double need[kNeed] = {}; int need_n = 0; double hold = 0;
+    double need[kNeed] = {}; int need_n = 0; double hold = 0; bool have_hold = false;
     double interval = 0; bool have_interval = false;   // EMA of tb - ta: the game's frame time
     // Learned margin on top of that: the half-refresh trim was measured on an idle machine, and under
     // load (a browser playing video beside the game) pairs land late more often - 20-30 held vblanks a
@@ -109,6 +110,12 @@ static void Presenter(XeFg* f)
     // screen stalls for far longer and must not ratchet the latency up) adds its length; it decays
     // ~0.1 ms a second, so a machine that calms down gets the latency back.
     double extra = 0, held_since = -1, extra_t = 0;
+    // Extrapolation runs the same clock with a different hold: a pair is NEEDED when its own frame is
+    // due (s - tb, a few ms) instead of when its predecessor runs out (s - ta, a frame interval more),
+    // and when the content time passes the newest frame it is pushed ahead along its own flow instead
+    // of held - up to kMaxAhead intervals, beyond which the game really is late (held).
+    static const double kMaxAhead = 1.0;
+    bool extrap_prev = false; bool last_x = false;
     double c_prev = -1e300, last_present = 0, last_t = -1;
     UINT64 last_seq = 0, seen_seq = 0;
     int stamp_slot = -1;
@@ -134,14 +141,19 @@ static void Presenter(XeFg* f)
             if (held_since >= 0)
             {
                 const double late = now - held_since;
-                if (have_interval && late < 2.0 * interval) { extra = std::min(extra + late + 0.5, 15.0); hold += late + 0.5; }
+                // Not while extrapolating: lateness up to a whole interval is already absorbed by pushing
+                // further ahead, so a pause there is a real stall - learning from it only bought back the
+                // latency the mode exists to remove (one hiccup: hold 3.4 -> 11.7 ms, minutes to decay).
+                if (!f->extrap && have_interval && late < 2.0 * interval) { extra = std::min(extra + late + 0.5, 15.0); hold += late + 0.5; }
                 held_since = -1;
             }
             if (newest->flow)
             {
-                const double iv = newest->tb - newest->ta, n = newest->submit_ms - newest->ta;
+                const double iv = newest->tb - newest->ta, n = newest->submit_ms - (f->extrap ? newest->tb : newest->ta);
                 if (iv > 1 && iv < 100) { interval = have_interval ? interval + 0.1 * (iv - interval) : iv; have_interval = true; }
-                if (n > 0 && n < 250)
+                // Extrapolating, the need (s - tb) is a few ms and can be NEGATIVE: Windows.Graphics.Capture
+                // may stamp a frame slightly after we receive it. So the sign is no test - only range.
+                if (n > -20 && n < 250)
                 {
                     need[need_n++ % kNeed] = n;
                     double mx = 0; for (int k = 0; k < std::min(need_n, kNeed); ++k) mx = std::max(mx, need[k]);
@@ -149,15 +161,22 @@ static void Presenter(XeFg* f)
                     // than that between two of them never shows as a pause (measured at 45 on 120 Hz: the
                     // hold could drop ~5 ms below the max with no held frame, and 8 ms was too far).
                     const double target = mx - 0.5 * clock.vb + f->margin.load(std::memory_order_relaxed) + extra;
-                    hold = (hold <= 0 || target > hold) ? target : hold + 0.02 * (target - hold);
+                    hold = std::max(0.0, (!have_hold || target > hold) ? target : hold + 0.02 * (target - hold));   // content time never ahead of now
+                    have_hold = true;
                 }
             }
+        }
+        if (f->extrap != extrap_prev)
+        {
+            // The hold means something else in each mode: start it over (one frame interval, roughly).
+            extrap_prev = f->extrap; need_n = 0; hold = 0; have_hold = false; extra = 0; held_since = -1; c_prev = -1e300;
+            Log("[xefg] %s", extrap_prev ? "extrapolating: the newest frame pushed ahead along its flow, no hold" : "interpolating between the last two frames");
         }
         if (extra > 0) extra = std::max(0.0, extra - 0.0001 * (now - extra_t));   // 0.1 ms per second
         extra_t = now;
         const double max_in = f->max_in.load(std::memory_order_relaxed);
         const bool fast = have_interval && max_in > 0 && interval < 1000.0 / max_in;
-        const bool pass = !f->enabled || fast || !have_interval || hold <= 0;
+        const bool pass = !f->enabled || fast || !have_interval || !have_hold;
         if (pass != pass_prev)
         {
             if (!pass) Log("[xefg] generating: game at %.0f fps -> %.0f Hz", 1000.0 / interval, 1000.0 / clock.vb);
@@ -167,7 +186,7 @@ static void Presenter(XeFg* f)
             else Log("[xefg] warming up");
             pass_prev = pass; c_prev = -1e300;
         }
-        XePair* use = nullptr; float t = 1.0f;
+        XePair* use = nullptr; float t = 1.0f; bool x = false;
         if (pass)
         {
             // Each real frame once, on the vblank after it lands.
@@ -185,14 +204,21 @@ static void Presenter(XeFg* f)
                 if (!oldest || p.seq < oldest->seq) oldest = &p;
                 if (p.ta <= c && c <= p.tb && (!use || p.seq > use->seq)) use = &p;
             }
-            if (!use)
+            if (!use && f->extrap && newest->flow && c > newest->tb)
+            {
+                // Past the newest frame: push it ahead. Beyond kMaxAhead the game is late - stop there.
+                const double iv = std::max(1e-3, newest->tb - newest->ta), ahead = (c - newest->tb) / iv;
+                use = newest; x = true; t = (float)std::min(ahead, kMaxAhead);
+                if (ahead > kMaxAhead) { c = newest->tb + kMaxAhead * iv; ++f->held; if (held_since < 0) held_since = now; }
+            }
+            else if (!use)
             {
                 if (c > newest->tb || !oldest) { use = newest; t = 1.0f; c = newest->tb; ++f->held; if (held_since < 0) held_since = now; }   // the game is late: hold, never extrapolate
                 else { use = oldest; t = 0.0f; c = oldest->ta; ++f->early; }                                     // behind every pair: show its start
             }
             else t = (float)std::clamp((c - use->ta) / std::max(1e-3, use->tb - use->ta), 0.0, 1.0);
             c_prev = c;
-            if (use->seq == last_seq && fabsf(t - (float)last_t) < 1e-4f) continue;   // nothing new to show
+            if (use->seq == last_seq && x == last_x && fabsf(t - (float)last_t) < 1e-4f) continue;   // nothing new to show
         }
 
         // Record under the lock: `use`'s frames and grids cannot be recycled until read is set.
@@ -205,9 +231,9 @@ static void Presenter(XeFg* f)
         const XeFrame& A = f->fr[use->a]; const XeFrame& B = f->fr[use->b];
         GpuCtxStamp(f->ctx, 0);
         XeInterpRecordRT(g, cl, f->interp, A.tex, B.tex, use->fwd, use->bwd, XeFlowGridW(f->flow), XeFlowGridH(f->flow), XeFlowFactor(f->flow),
-                         dst, PRESENT, f->w, f->h, use->flow ? t : 1.0f);
+                         dst, PRESENT, f->w, f->h, use->flow || x ? t : 1.0f, x);
         GpuCtxStamp(f->ctx, 1);
-        const bool snap = f->snap_req && !f->snap_pending && use->flow && t > 0.0f && t < 1.0f;
+        const bool snap = f->snap_req && !f->snap_pending && use->flow && t > 0.0f && (x || t < 1.0f);
         if (snap)
         {
             D3D12_TEXTURE_COPY_LOCATION from = {}, to = {};
@@ -222,15 +248,15 @@ static void Presenter(XeFg* f)
         if (!v) { Fail(f, "presenter queue submit"); break; }
         f->fr[use->a].read = f->fr[use->b].read = use->read = v;
         if (snap) { f->snap_req = false; f->snap_pending = true; f->snap_fence = v; f->snap_t = t; }
-        const bool gen = use->flow && t > 0.0f && t < 1.0f;
-        last_seq = use->seq; last_t = t;
+        const bool gen = use->flow && !x && t > 0.0f && t < 1.0f, ext = x && t > 0.0f;
+        last_seq = use->seq; last_t = t; last_x = x;
         lk.unlock();
 
         if (!OverlayPresentRecorded(f->ov)) { Fail(f, "present failed"); break; }
         stamp_slot = slot;
         const double pt = NowMs();
         std::lock_guard<std::mutex> lk2(f->mu);
-        ++f->presented; if (gen) ++f->generated;
+        ++f->presented; if (gen) ++f->generated; if (ext) ++f->extrapolated;
         f->passthrough = pass;
         if (last_present > 0 && f->spacing.size() < 4096) f->spacing.push_back(pt - last_present);
         last_present = pt;
@@ -355,6 +381,7 @@ void XeFgSetTiming(XeFg* f, double margin_ms, double max_in_fps)
     f->margin.store(std::clamp(margin_ms, -20.0, 50.0)); f->max_in.store(std::clamp(max_in_fps, 0.0, 1000.0));
 }
 bool XeFgFailed(const XeFg* f) { return f->failed; }
+void XeFgSetExtrapolate(XeFg* f, bool on) { f->extrap = on; }
 Overlay* XeFgOverlay(XeFg* f) { return f->ov; }
 ID3D12Resource* XeFgLastFrame(XeFg* f) { return f->last >= 0 ? f->fr[f->last].tex : nullptr; }
 
@@ -363,8 +390,8 @@ void XeFgStats(XeFg* f, XeFgStatsOut& out)
     auto med = [](std::vector<double>& v) { if (v.empty()) return -1.0; std::sort(v.begin(), v.end()); const double m = v[v.size() / 2]; v.clear(); return m; };
     out.flow_ms = med(f->flow_ms);   // main thread (the caller) owns it
     std::lock_guard<std::mutex> lk(f->mu);
-    out.in = f->in; out.presented = f->presented; out.generated = f->generated; out.held = f->held; out.early = f->early;
-    f->in = f->presented = f->generated = f->held = f->early = 0;
+    out.in = f->in; out.presented = f->presented; out.generated = f->generated; out.extrapolated = f->extrapolated; out.held = f->held; out.early = f->early;
+    f->in = f->presented = f->generated = f->extrapolated = f->held = f->early = 0;
     out.interp_ms = med(f->interp_ms);
     out.hold_ms = f->hold_ms; out.interval_ms = f->interval_ms; out.extra_ms = f->extra_ms; out.passthrough = f->passthrough;
     out.spacing_ms.swap(f->spacing); f->spacing.clear();

@@ -21,10 +21,11 @@ void XeInterpRelease(XeInterp& x);
 // debug: the visibility masks instead of colour (red = prev side rejected, green = cur side).
 // XeInterpRecordRT draws the same frame into `rt` (R8G8B8A8_UNORM, RENDER_TARGET-capable, resting in
 // `rt_rest` - PRESENT for a swapchain backbuffer); XeInterpRecord dispatches into a UAV texture.
+// extrap: instead, cur pushed t frame intervals AHEAD along bwd (t >= 0; prev and fwd unused).
 void XeInterpRecord(Gpu& g, ID3D12GraphicsCommandList* cl, const XeInterp& x,
                     ID3D12Resource* prev, ID3D12Resource* cur, ID3D12Resource* fwd, ID3D12Resource* bwd,
                     UINT gw, UINT gh, UINT factor, ID3D12Resource* dst, UINT w, UINT h, float t, bool debug = false,
-                    D3D12_RESOURCE_STATES dst_rest = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    D3D12_RESOURCE_STATES dst_rest = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, bool extrap = false);
 void XeInterpRecordRT(Gpu& g, ID3D12GraphicsCommandList* cl, const XeInterp& x,
                       ID3D12Resource* prev, ID3D12Resource* cur, ID3D12Resource* fwd, ID3D12Resource* bwd,
-                      UINT gw, UINT gh, UINT factor, ID3D12Resource* rt, D3D12_RESOURCE_STATES rt_rest, UINT w, UINT h, float t);
+                      UINT gw, UINT gh, UINT factor, ID3D12Resource* rt, D3D12_RESOURCE_STATES rt_rest, UINT w, UINT h, float t, bool extrap = false);

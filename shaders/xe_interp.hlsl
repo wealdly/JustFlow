@@ -17,7 +17,7 @@ Texture2D<float2>   fwd  : register(t2);
 Texture2D<float2>   bwd  : register(t3);
 RWTexture2D<float4> dst  : register(u0);
 SamplerState        lin  : register(s0);
-cbuffer C : register(b0) { uint w, h, gw, gh; float f, t, tol, tol_rel; uint debug; };
+cbuffer C : register(b0) { uint w, h, gw, gh; float f, t, tol, tol_rel; uint debug, extrap; };
 
 float2 Flow(Texture2D<float2> g, float2 p) { return g.SampleLevel(lin, p / (f * 8.0 * float2(gw, gh)), 0) * f; }
 float4 Color(Texture2D<float4> c, float2 p) { return c.SampleLevel(lin, p / float2(w, h), 0); }
@@ -29,8 +29,17 @@ float Visible(Texture2D<float2> there, Texture2D<float2> back, float2 p)
     return exp(-(e * e) / (k * k));
 }
 
-// The frame at time t at pixel centre x (also the body of xe_interp_gfx's pixel shader).
-float4 Interpolate(float2 x)
+// Extrapolation (extrap = 1): cur pushed t frame intervals AHEAD along its own motion. bwd is previous
+// minus current, so the pixel shown at x a time t later was at x + t * bwd(x) in cur - sampled there,
+// clamped at the edge. Nothing to blend, so no visibility test: a disocclusion is filled by stretching
+// what was beside it (justflow's engine=warp, which measured 1.21 grey levels against the true future
+// frame vs 5.87 for repeating it and 1.09 for interpolation - which shows the frame a whole interval later).
+float4 Extrapolate(float2 x)
+{
+    return float4(Color(cur, x + t * Flow(bwd, x)).rgb, 1);
+}
+
+float4 Blend(float2 x)
 {
     const float2 f01 = Flow(fwd, x), f10 = Flow(bwd, x);
     const float2 p0 = x + (-(1 - t) * t * f01 + t * t * f10);
@@ -42,6 +51,14 @@ float4 Interpolate(float2 x)
     float4 c = (w0 * Color(prev, p0) + w1 * Color(cur, p1)) / (w0 + w1);
     if (debug) c = float4(1 - v0, 1 - v1, 0, 1);   // red: prev side rejected, green: cur side
     return float4(c.rgb, 1);
+}
+
+// The frame at time t at pixel centre x (also the body of xe_interp_gfx's pixel shader).
+float4 Interpolate(float2 x)
+{
+    float4 r;   // [branch]: ?: would evaluate both sides for every pixel
+    [branch] if (extrap) r = Extrapolate(x); else r = Blend(x);
+    return r;
 }
 
 #ifndef XE_INTERP_NO_CS

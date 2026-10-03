@@ -5,12 +5,12 @@
 #include <windows.h>
 #include <string>
 
-enum XeTrayEvent { XeTrayNone = 0, XeTrayToggleAuto, XeTrayToggleLock120, XeTrayBatteryFull, XeTrayBatteryEconomy, XeTrayBatteryOff,
+enum XeTrayEvent { XeTrayNone = 0, XeTrayToggleAuto, XeTrayToggleLock120, XeTrayToggleExtrap, XeTrayBatteryFull, XeTrayBatteryEconomy, XeTrayBatteryOff,
                    XeTrayAlways, XeTrayNever, XeTrayForget, XeTrayOpenLog, XeTrayQuit };
 
 struct XeTrayState
 {
-    bool auto_on = true, lock120 = true;
+    bool auto_on = true, lock120 = true, extrap = false;
     int  battery = 1;      // on battery: 0 full, 1 economy, 2 off
     std::wstring status;   // first menu line and the tooltip
     std::wstring app;      // exe of the window the per-app items apply to ("" = none)

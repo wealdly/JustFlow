@@ -48,6 +48,7 @@ struct Settings
 {
     std::wstring path;
     bool auto_on = true, lock120 = true;
+    bool extrap = false;                // low latency: extrapolate ahead of the newest frame instead of interpolating behind it
     int  min_fps = 25;
     int  battery = 1;                   // on battery: 0 full, 1 economy, 2 off
     // Upper bound of content worth generating for, from the display's current refresh.
@@ -66,6 +67,8 @@ struct Settings
         auto I = [&](const wchar_t* k, int d) { return (int)GetPrivateProfileIntW(L"auto", k, d, path.c_str()); };
         auto_on = I(L"enabled", 1) != 0; lock120 = I(L"lock120", 1) != 0;
         min_fps = std::clamp(I(L"min_fps", 25), 10, 100);
+        wchar_t e[16] = {}; GetPrivateProfileStringW(L"auto", L"engine", L"interpolate", e, 16, path.c_str());
+        extrap = !_wcsicmp(e, L"extrapolate");
         wchar_t b[16] = {}; GetPrivateProfileStringW(L"power", L"battery", L"economy", b, 16, path.c_str());
         battery = !_wcsicmp(b, L"full") ? 0 : !_wcsicmp(b, L"off") ? 2 : 1;
     }
@@ -73,6 +76,7 @@ struct Settings
     {
         WritePrivateProfileStringW(L"auto", L"enabled", auto_on ? L"1" : L"0", path.c_str());
         WritePrivateProfileStringW(L"auto", L"lock120", lock120 ? L"1" : L"0", path.c_str());
+        WritePrivateProfileStringW(L"auto", L"engine", extrap ? L"extrapolate" : L"interpolate", path.c_str());
         wchar_t v[16];
         swprintf_s(v, L"%d", min_fps); WritePrivateProfileStringW(L"auto", L"min_fps", v, path.c_str());
         WritePrivateProfileStringW(L"auto", L"max_fps", nullptr, path.c_str());   // replaced by the refresh-relative bound
@@ -308,6 +312,7 @@ static bool Engage(Session& s, Gpu& g, const Settings& st, PowerMode mode)
     if (!s.fg) return false;
     s.ov = XeFgOverlay(s.fg);
     XeFgSetTiming(s.fg, 0.0, st.Upper(s.hz));
+    XeFgSetExtrapolate(s.fg, st.extrap);
     s.engaged_mode = mode;
     s.engaged_t = s.stats_t = NowMs(); s.reset = true; s.bad_since = -1;
     return true;
@@ -353,6 +358,10 @@ int RunTrayApp(const std::wstring& dir)
             {
             case XeTrayToggleAuto: st.auto_on = !st.auto_on; st.Save(); Log("[auto] automatic %s", st.auto_on ? "on" : "off"); if (!st.auto_on) Disengage(s, "automatic turned off"); break;
             case XeTrayToggleLock120: st.lock120 = !st.lock120; st.Save(); if (s.fg) XeFgSetTiming(s.fg, 0.0, st.Upper(s.hz)); Log("[auto] lock to display %s (content up to %d fps at %.0f Hz)", st.lock120 ? "on" : "off", st.Upper(s.hz), s.hz); break;
+            case XeTrayToggleExtrap:
+                st.extrap = !st.extrap; st.Save(); if (s.fg) XeFgSetExtrapolate(s.fg, st.extrap);
+                Log("[auto] %s", st.extrap ? "low latency: extrapolating ahead of the newest frame" : "interpolating between the last two frames");
+                break;
             case XeTrayBatteryFull: case XeTrayBatteryEconomy: case XeTrayBatteryOff:
                 st.battery = ev == XeTrayBatteryFull ? 0 : ev == XeTrayBatteryOff ? 2 : 1; st.Save();
                 Log("[power] on battery: %s", st.battery == 0 ? "full" : st.battery == 2 ? "off" : "economy");
@@ -517,7 +526,7 @@ int RunTrayApp(const std::wstring& dir)
                 s.bad_since = bad ? (s.bad_since < 0 ? now : s.bad_since) : -1;
                 if (rule != 1 && s.bad_since >= 0 && now - s.bad_since >= kReleaseMs)
                     Disengage(s, r.gap > 250 ? "content static" : r.fps > hi ? "content faster than the range" : "content slower than the range");
-                else swprintf_s(line, L"generating %ls - %.0f -> %.0f fps%ls", s.exe.c_str(), r.fps, s.hz, s.engaged_mode == PowerEconomy ? L" (economy)" : L"");
+                else swprintf_s(line, L"generating %ls - %.0f -> %.0f fps%ls%ls", s.exe.c_str(), r.fps, s.hz, st.extrap ? L" (low latency)" : L"", s.engaged_mode == PowerEconomy ? L" (economy)" : L"");
                 if (!s.fg) swprintf_s(line, L"watching %ls", s.exe.c_str());
             }
             status = line;
@@ -528,8 +537,8 @@ int RunTrayApp(const std::wstring& dir)
                 const double dt = (now - s.stats_t) / 1000.0; s.stats_t = now;
                 std::sort(o.spacing_ms.begin(), o.spacing_ms.end());
                 auto q = [&](double p) { return o.spacing_ms.empty() ? -1.0 : o.spacing_ms[std::min(o.spacing_ms.size() - 1, (size_t)(o.spacing_ms.size() * p))]; };
-                Log("[stats] %ls: content %.1f fps  in %.1f  out %.1f fps (gen %u, held %u)%s | flow %.2f ms  interp %.2f ms | hold %.1f ms | spacing p5 %.2f  med %.2f  p95 %.2f ms",
-                    s.exe.c_str(), r.fps, o.in / dt, o.presented / dt, o.generated, o.held, o.passthrough ? " PASSTHROUGH" : "",
+                Log("[stats] %ls: content %.1f fps  in %.1f  out %.1f fps (gen %u, ext %u, held %u)%s | flow %.2f ms  interp %.2f ms | hold %.1f ms | spacing p5 %.2f  med %.2f  p95 %.2f ms",
+                    s.exe.c_str(), r.fps, o.in / dt, o.presented / dt, o.generated, o.extrapolated, o.held, o.passthrough ? " PASSTHROUGH" : "",
                     o.flow_ms, o.interp_ms, o.hold_ms, q(0.05), q(0.5), q(0.95));
             }
         }
@@ -538,7 +547,7 @@ int RunTrayApp(const std::wstring& dir)
         if (NowMs() - status_t > 250)
         {
             status_t = NowMs();
-            XeTrayState ts; ts.auto_on = st.auto_on; ts.lock120 = st.lock120; ts.status = status; ts.battery = st.battery;
+            XeTrayState ts; ts.auto_on = st.auto_on; ts.lock120 = st.lock120; ts.extrap = st.extrap; ts.status = status; ts.battery = st.battery;
             if (!pw.ac) ts.status += pw.saver ? L" [battery saver]" : L" [battery]";
             ts.app = !s.exe.empty() ? s.exe : never_exe; ts.app_rule = !s.exe.empty() ? s.rule : ts.app.empty() ? 0 : 2;
             XeTraySet(tray, ts);

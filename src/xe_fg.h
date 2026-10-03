@@ -42,13 +42,18 @@ bool  XeFgSubmit(XeFg* f, ID3D12Resource* src, ID3D12Fence* wait_fence, UINT64 w
 void  XeFgSetEnabled(XeFg* f, bool on);
 bool  XeFgEnabled(const XeFg* f);
 void  XeFgSetTiming(XeFg* f, double margin_ms, double max_in_fps);
+// Extrapolation: the content clock runs just behind the newest frame's arrival instead of one frame
+// interval behind it, and past the newest frame shows it pushed ahead along its own flow (up to one
+// interval). Removes the interpolation's hold (~a frame interval of latency); disocclusions stretch.
+void  XeFgSetExtrapolate(XeFg* f, bool on);
 bool  XeFgFailed(const XeFg* f);
 
 struct XeFgStatsOut
 {
     UINT in = 0;             // real frames submitted
     UINT presented = 0;      // frames put on screen (real + generated)
-    UINT generated = 0;      // presented with 0 < t < 1
+    UINT generated = 0;      // presented with 0 < t < 1 (interpolated)
+    UINT extrapolated = 0;   // presented pushed ahead of the newest frame (extrapolation mode)
     UINT held = 0;           // vblanks that had to hold the newest frame (the game was late)
     UINT early = 0;          // vblanks whose content time was older than every pair (hold too long)
     double flow_ms = -1;     // median GPU ms of pyramid + both flows per real frame
