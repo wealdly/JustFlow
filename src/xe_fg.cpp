@@ -45,10 +45,15 @@ struct XeFg
     std::thread th;
     std::atomic<bool> stop{ false }, failed{ false }, enabled{ true };
     std::atomic<double> margin{ 0.0 }, max_in{ 100.0 };
-    std::atomic<bool>   extrap{ false };   // XeFgSetExtrapolate: show the newest frame pushed ahead instead of interpolating behind it
+    std::atomic<bool>   extrap{ false };
+    std::atomic<bool>   vsync{ false };    // XeFgSetVsync: flip on vblank (no tearing) instead of immediately
+    std::atomic<double> lead{ 1.5 };       // vsync: the least lead before the vblank the frame flips on (it adapts up on misses)   // XeFgSetExtrapolate: show the newest frame pushed ahead instead of interpolating behind it
     // presenter-owned, published under mu for stats
-    UINT in = 0, presented = 0, generated = 0, extrapolated = 0, held = 0, early = 0;
-    std::vector<double> spacing, interp_ms;
+    UINT in = 0, presented = 0, generated = 0, extrapolated = 0, held = 0, early = 0, missed = 0;
+    UINT stall_hold = 0, stall_late = 0, stall_other = 0, jumps = 0;   // the smoothness check
+    UINT repeats = 0, wait_timeouts = 0;   // refreshes with nothing new presented; vsync waits that timed out
+    double lead_ms = 0;   // vsync: the current adaptive lead
+    std::vector<double> spacing, interp_ms, after_vblank;   // after_vblank: refresh wake -> Present call, ms
     double hold_ms = 0, interval_ms = 0, extra_ms = 0; bool passthrough = false;
     // snapshot (XeFgRequestSnapshot / XeFgTakeSnapshot): the next GENERATED frame, copied on the ctx queue
     std::atomic<bool> snap_req{ false };
@@ -89,6 +94,16 @@ struct DisplayClock
         else Sleep((DWORD)std::max(1.0, next - t0));
         next += vb;
     }
+    // Sleep until `t` on the NowMs clock (high-resolution waitable timer; returns at once if past).
+    void SleepUntil(double t)
+    {
+        const double now = NowMs();
+        if (t <= now) return;
+        if (!timer) timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        LARGE_INTEGER due; due.QuadPart = -(LONGLONG)((t - now) * 10000.0);
+        if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, 100);
+        else Sleep((DWORD)std::max(1.0, t - now));
+    }
 };
 
 static void Presenter(XeFg* f)
@@ -103,6 +118,10 @@ static void Presenter(XeFg* f)
     // the motion ~7 times a second (measured: margin 3 -> 7.8 held/s, 6 -> 6.4, 9 -> 0).
     static const int kNeed = 64;
     double need[kNeed] = {}; int need_n = 0; double hold = 0; bool have_hold = false;
+    // hold_target is what the pairs ask for; hold moves toward it per presented frame - up by at most
+    // 0.5 ms a refresh, so a rise slows the content ~6% for a while instead of freezing it for the whole
+    // step at once (an 8.6 ms rise was a full stalled refresh: the stutter that showed in the test scene).
+    double hold_target = 0;
     double interval = 0; bool have_interval = false;   // EMA of tb - ta: the game's frame time
     // Learned margin on top of that: the half-refresh trim was measured on an idle machine, and under
     // load (a browser playing video beside the game) pairs land late more often - 20-30 held vblanks a
@@ -110,6 +129,11 @@ static void Presenter(XeFg* f)
     // screen stalls for far longer and must not ratchet the latency up) adds its length; it decays
     // ~0.1 ms a second, so a machine that calms down gets the latency back.
     double extra = 0, held_since = -1, extra_t = 0;
+    bool vsync_applied = false;
+    double lead_now = 0, last_signal = 0;   // vsync: the adaptive lead, and when the swapchain last signalled
+    // Smoothness check: the content clock should advance one refresh per presented frame. A step under
+    // half a refresh is a stall (motion stops), over 1.5 a jump; each is blamed on its cause.
+    double c_shown = -1, hold_shown = 0; bool held_now = false, early_now = false;
     // Extrapolation runs the same clock with a different hold: a pair is NEEDED when its own frame is
     // due (s - tb, a few ms) instead of when its predecessor runs out (s - ta, a frame interval more),
     // and when the content time passes the newest frame it is pushed ahead along its own flow instead
@@ -122,7 +146,28 @@ static void Presenter(XeFg* f)
     bool pass_prev = false;
     while (!f->stop && !f->failed)
     {
-        clock.Wait(f->ov);
+        // Vsync paces on the swapchain itself (max frame latency 1: it signals when the last frame reached
+        // the screen, i.e. at a vblank), then renders LATE: the flip waits for the next vblank anyway, so
+        // sleep until `lead` before it - the frame is `lead` old when it lands instead of a whole refresh
+        // (rendering right after the vblank, as immediate mode does, made vsync cost 8.1 ms at 120 Hz).
+        // Immediate mode paces on the vblank and flips at once.
+        // The lead adapts: the swapchain signals a whole refresh late when the last frame missed its vblank,
+        // and each miss renders 0.25 ms earlier from then on (up to 4 ms); on time, it creeps back toward
+        // the minimum (--lead), ~0.1 ms a second. The least latency this machine can hold without stutter.
+        double woke;
+        if (f->vsync && OverlayWaitFrameLatency(f->ov, 100))
+        {
+            woke = NowMs();
+            const double min_lead = f->lead.load(std::memory_order_relaxed);
+            if (lead_now < min_lead) lead_now = min_lead;
+            if (last_signal > 0 && woke - last_signal > 1.5 * clock.vb) { lead_now = std::min(lead_now + 0.25, 4.0); ++f->missed; }
+            else lead_now = std::max(min_lead, lead_now - 0.0008);
+            last_signal = woke;
+            clock.SleepUntil(woke + clock.vb - lead_now);
+        }
+        else { if (f->vsync) ++f->wait_timeouts; clock.Wait(f->ov); last_signal = 0; }
+        woke = NowMs();
+        f->lead_ms = f->vsync ? lead_now : 0.0;
         if (f->stop) break;
         const double now = NowMs();
         // interp GPU ms of the previous present (its ctx slot has retired by now or it is skipped)
@@ -144,7 +189,11 @@ static void Presenter(XeFg* f)
                 // Not while extrapolating: lateness up to a whole interval is already absorbed by pushing
                 // further ahead, so a pause there is a real stall - learning from it only bought back the
                 // latency the mode exists to remove (one hiccup: hold 3.4 -> 11.7 ms, minutes to decay).
-                if (!f->extrap && have_interval && late < 2.0 * interval) { extra = std::min(extra + late + 0.5, 15.0); hold += late + 0.5; }
+                // Only a pair late DESPITE the full hold teaches anything: while the hold is still ramping
+                // up to its target, late pairs are expected (learning from them pinned the margin at its
+                // 15 ms cap at every start - hold 36-39 ms instead of ~24).
+                if (!f->extrap && have_interval && late < 2.0 * interval && hold >= hold_target - 0.5)
+                { extra = std::min(extra + late + 0.5, 15.0); hold_target += late + 0.5; }
                 held_since = -1;
             }
             if (newest->flow)
@@ -161,7 +210,8 @@ static void Presenter(XeFg* f)
                     // than that between two of them never shows as a pause (measured at 45 on 120 Hz: the
                     // hold could drop ~5 ms below the max with no held frame, and 8 ms was too far).
                     const double target = mx - 0.5 * clock.vb + f->margin.load(std::memory_order_relaxed) + extra;
-                    hold = std::max(0.0, (!have_hold || target > hold) ? target : hold + 0.02 * (target - hold));   // content time never ahead of now
+                    hold_target = std::max(0.0, target);   // content time never ahead of now
+                    if (!have_hold) hold = hold_target;
                     have_hold = true;
                 }
             }
@@ -184,7 +234,7 @@ static void Presenter(XeFg* f)
             else if (fast) Log("[xefg] the game already runs at %.0f fps (above --max-in %.0f): nothing to generate, its own frames are shown. "
                                "Cap the game's frame rate (e.g. 45) in its settings or Intel Graphics Software to use frame generation.", 1000.0 / interval, max_in);
             else Log("[xefg] warming up");
-            pass_prev = pass; c_prev = -1e300;
+            pass_prev = pass; c_prev = -1e300; c_shown = -1;
         }
         XePair* use = nullptr; float t = 1.0f; bool x = false;
         if (pass)
@@ -195,7 +245,10 @@ static void Presenter(XeFg* f)
         }
         else
         {
+            // up fast but never as a freeze; down slowly (~0.25%/refresh) so the content never visibly speeds up
+            hold = hold_target > hold ? std::min(hold_target, hold + 0.5) : hold + 0.0025 * (hold_target - hold);
             double c = std::max(now - hold, c_prev);
+            held_now = early_now = false;
             f->hold_ms = hold; f->interval_ms = interval; f->extra_ms = extra;
             XePair* oldest = nullptr;
             for (auto& p : f->pr)
@@ -209,16 +262,28 @@ static void Presenter(XeFg* f)
                 // Past the newest frame: push it ahead. Beyond kMaxAhead the game is late - stop there.
                 const double iv = std::max(1e-3, newest->tb - newest->ta), ahead = (c - newest->tb) / iv;
                 use = newest; x = true; t = (float)std::min(ahead, kMaxAhead);
-                if (ahead > kMaxAhead) { c = newest->tb + kMaxAhead * iv; ++f->held; if (held_since < 0) held_since = now; }
+                if (ahead > kMaxAhead) { c = newest->tb + kMaxAhead * iv; ++f->held; held_now = true; if (held_since < 0) held_since = now; }
             }
             else if (!use)
             {
-                if (c > newest->tb || !oldest) { use = newest; t = 1.0f; c = newest->tb; ++f->held; if (held_since < 0) held_since = now; }   // the game is late: hold, never extrapolate
-                else { use = oldest; t = 0.0f; c = oldest->ta; ++f->early; }                                     // behind every pair: show its start
+                if (c > newest->tb || !oldest) { use = newest; t = 1.0f; c = newest->tb; ++f->held; held_now = true; if (held_since < 0) held_since = now; }   // the game is late: hold, never extrapolate
+                else { use = oldest; t = 0.0f; c = oldest->ta; ++f->early; early_now = true; }                                     // behind every pair: show its start
             }
             else t = (float)std::clamp((c - use->ta) / std::max(1e-3, use->tb - use->ta), 0.0, 1.0);
             c_prev = c;
-            if (use->seq == last_seq && x == last_x && fabsf(t - (float)last_t) < 1e-4f) continue;   // nothing new to show
+            if (c_shown >= 0)
+            {
+                const double step = c - c_shown;
+                if (step < 0.5 * clock.vb)
+                {
+                    if (held_now) ++f->stall_late;
+                    else if (hold > hold_shown + 0.25) ++f->stall_hold;
+                    else ++f->stall_other;
+                }
+                else if (step > 1.5 * clock.vb) ++f->jumps;
+            }
+            c_shown = c; hold_shown = hold;
+            if (use->seq == last_seq && x == last_x && fabsf(t - (float)last_t) < 1e-4f) { ++f->repeats; continue; }   // nothing new to show
         }
 
         // Record under the lock: `use`'s frames and grids cannot be recycled until read is set.
@@ -252,6 +317,8 @@ static void Presenter(XeFg* f)
         last_seq = use->seq; last_t = t; last_x = x;
         lk.unlock();
 
+        if (f->vsync != vsync_applied) { vsync_applied = f->vsync; OverlaySetVsync(f->ov, vsync_applied); Log("[xefg] sync mode: %s", vsync_applied ? "vsync (no tearing)" : "immediate (tearing allowed)"); }
+        const double present_at = NowMs();
         if (!OverlayPresentRecorded(f->ov)) { Fail(f, "present failed"); break; }
         stamp_slot = slot;
         const double pt = NowMs();
@@ -259,6 +326,7 @@ static void Presenter(XeFg* f)
         ++f->presented; if (gen) ++f->generated; if (ext) ++f->extrapolated;
         f->passthrough = pass;
         if (last_present > 0 && f->spacing.size() < 4096) f->spacing.push_back(pt - last_present);
+        if (f->after_vblank.size() < 4096) f->after_vblank.push_back(present_at - woke);
         last_present = pt;
     }
 }
@@ -384,6 +452,8 @@ void XeFgSetTiming(XeFg* f, double margin_ms, double max_in_fps)
 }
 bool XeFgFailed(const XeFg* f) { return f->failed; }
 void XeFgSetExtrapolate(XeFg* f, bool on) { f->extrap = on; }
+void XeFgSetVsync(XeFg* f, bool on) { f->vsync = on; }
+void XeFgSetVsyncLead(XeFg* f, double ms) { f->lead = std::clamp(ms, 0.5, 4.0); }
 Overlay* XeFgOverlay(XeFg* f) { return f->ov; }
 ID3D12Resource* XeFgLastFrame(XeFg* f) { return f->last >= 0 ? f->fr[f->last].tex : nullptr; }
 
@@ -393,10 +463,15 @@ void XeFgStats(XeFg* f, XeFgStatsOut& out)
     out.flow_ms = med(f->flow_ms);   // main thread (the caller) owns it
     std::lock_guard<std::mutex> lk(f->mu);
     out.in = f->in; out.presented = f->presented; out.generated = f->generated; out.extrapolated = f->extrapolated; out.held = f->held; out.early = f->early;
-    f->in = f->presented = f->generated = f->extrapolated = f->held = f->early = 0;
+    out.missed = f->missed; out.lead_ms = f->lead_ms;
+    out.stall_hold = f->stall_hold; out.stall_late = f->stall_late; out.stall_other = f->stall_other; out.jumps = f->jumps;
+    out.repeats = f->repeats; out.wait_timeouts = f->wait_timeouts; f->repeats = f->wait_timeouts = 0;
+    f->in = f->presented = f->generated = f->extrapolated = f->held = f->early = f->missed = 0;
+    f->stall_hold = f->stall_late = f->stall_other = f->jumps = 0;
     out.interp_ms = med(f->interp_ms);
     out.hold_ms = f->hold_ms; out.interval_ms = f->interval_ms; out.extra_ms = f->extra_ms; out.passthrough = f->passthrough;
     out.spacing_ms.swap(f->spacing); f->spacing.clear();
+    out.after_vblank_ms.swap(f->after_vblank); f->after_vblank.clear();
 }
 
 void XeFgRequestSnapshot(XeFg* f) { f->snap_req = true; }

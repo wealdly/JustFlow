@@ -720,6 +720,8 @@ static int RunLive(int argc, char** argv)
     double margin = 0.0, max_in = 100.0;   // margin: ms added to the adaptive hold (negative trims it)
     double snap_s = -1;   // --snap S: save the first generated frame after S seconds (xe_snap.png)
     bool extrap = false;  // --extrap: push the newest frame ahead instead of interpolating behind it
+    bool vsync = false;   // --sync vsync: flip on vblank (no tearing); --sync off: immediate (default)
+    double lead = 1.5;    // --lead MS: vsync's least lead before the vblank (adapts up on misses)
     for (int i = 1; i < argc; ++i)
     {
         const bool more = i + 1 < argc;
@@ -730,6 +732,8 @@ static int RunLive(int argc, char** argv)
         else if (!strcmp(argv[i], "--max-in") && more) max_in = atof(argv[++i]);
         else if (!strcmp(argv[i], "--snap") && more) snap_s = atof(argv[++i]);
         else if (!strcmp(argv[i], "--extrap")) extrap = true;
+        else if (!strcmp(argv[i], "--sync") && more) vsync = !strcmp(argv[++i], "vsync");
+        else if (!strcmp(argv[i], "--lead") && more) lead = atof(argv[++i]);
         else if (!strcmp(argv[i], "--adapter") && more) adapter = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--vendor") && more) vendor = (UINT)strtoul(argv[++i], nullptr, 16);
         else if (!strcmp(argv[i], "--off")) fg_on = false;
@@ -766,7 +770,7 @@ static int RunLive(int argc, char** argv)
         XeFg* fg = XeFgCreate(g, target, w, h, factor, keys, 2);
         if (!fg) { CaptureClose(cap); rc = 1; break; }
         Overlay* ov = XeFgOverlay(fg);
-        XeFgSetEnabled(fg, fg_on); XeFgSetTiming(fg, margin, max_in); XeFgSetExtrapolate(fg, extrap);
+        XeFgSetEnabled(fg, fg_on); XeFgSetTiming(fg, margin, max_in); XeFgSetExtrapolate(fg, extrap); XeFgSetVsync(fg, vsync); XeFgSetVsyncLead(fg, lead);
         Log("[live] attached to %p, %ux%u, display %.1f Hz", (void*)target, w, h, 1000.0 / OverlayVBlankMs(ov));
 
         bool reset = true; LONGLONG last_sysrel = 0; double stats_t = NowMs(); const double attach_t = stats_t; bool snapped = snap_s < 0;
@@ -807,6 +811,10 @@ static int RunLive(int argc, char** argv)
                 auto q = [&](double p) { return sp.empty() ? -1.0 : sp[std::min(sp.size() - 1, (size_t)(sp.size() * p))]; };
                 const double vbm = OverlayVBlankMs(ov); size_t late = 0;
                 for (double x : sp) late += x > vbm * 1.5;
+                std::vector<double>& av = s.after_vblank_ms; std::sort(av.begin(), av.end());
+                const double av_med = av.empty() ? -1.0 : av[av.size() / 2], av_p95 = av.empty() ? -1.0 : av[std::min(av.size() - 1, av.size() * 95 / 100)];
+                Log("[stats] present %.2f ms after the refresh wake (p95 %.2f, %s), lead %.2f ms, missed %u", av_med, av_p95, vsync ? "vsync" : "immediate", s.lead_ms, s.missed);
+                Log("[stats] smoothness: stalls %u (hold rose %u, game late %u, other %u), jumps %u, missed vblanks %u, repeats %u, wait timeouts %u", s.stall_hold + s.stall_late + s.stall_other, s.stall_hold, s.stall_late, s.stall_other, s.jumps, s.missed, s.repeats, s.wait_timeouts);
                 Log("[stats] in %.1f fps  out %.1f fps (gen %u, ext %u, held %u, early %u)%s | flow %.2f ms  interp %.2f ms | hold %.1f ms (learned %.1f)  interval %.1f ms | spacing p5 %.2f  med %.2f  p95 %.2f ms, %.1f%% > 1.5 vblank",
                     s.in / dt, s.presented / dt, s.generated, s.extrapolated, s.held, s.early, s.passthrough ? " PASSTHROUGH" : "",
                     s.flow_ms, s.interp_ms, s.hold_ms, s.extra_ms, s.interval_ms, q(0.05), q(0.5), q(0.95), sp.empty() ? 0.0 : 100.0 * late / sp.size());
@@ -831,7 +839,7 @@ static int CliMain(int argc, char** argv)
                     "  --bench <dir|png> [--size WxH] [--factor N] [--lambda X] [--refine N] [--frames N] [--pairs N] [--dump]\n"
                     "          [--shift DX,DY] [--zoom Z] [--adapter I] [--vendor HEX]\n"
                     "  --interp N --seq <dir> [--size WxH] [--pairs K] [--tol PX] [--tolrel X] [--refine N] [--extrap] [--ui] [--dump]\n"
-                    "  --live --window <title substring> [--class C] [--off] [--factor N] [--margin MS] [--max-in FPS] [--cursor] [--snap S] [--extrap]\n");
+                    "  --live --window <title substring> [--class C] [--off] [--factor N] [--margin MS] [--max-in FPS] [--cursor] [--snap S] [--extrap] [--sync off|vsync]\n");
     return 2;
 }
 

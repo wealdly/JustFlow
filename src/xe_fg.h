@@ -46,6 +46,12 @@ void  XeFgSetTiming(XeFg* f, double margin_ms, double max_in_fps);
 // interval behind it, and past the newest frame shows it pushed ahead along its own flow (up to one
 // interval). Removes the interpolation's hold (~a frame interval of latency); disocclusions stretch.
 void  XeFgSetExtrapolate(XeFg* f, bool on);
+// Sync mode. Vsync: the frame is rendered `lead` before a vblank and flips on it - no tearing; measured
+// 1.3 ms present -> screen at 120 Hz (rendering right after the vblank instead made it 8.1 ms). Off:
+// each frame flips as soon as it is rendered - ~1.0-1.5 ms, but the tear sits ~13% down the screen
+// (measured 9-17%), where a game's top HUD and sky are.
+void  XeFgSetVsync(XeFg* f, bool on);
+void  XeFgSetVsyncLead(XeFg* f, double ms);   // vsync: the least lead before the vblank (default 1.5 ms; adapts up on misses)
 bool  XeFgFailed(const XeFg* f);
 
 struct XeFgStatsOut
@@ -56,12 +62,22 @@ struct XeFgStatsOut
     UINT extrapolated = 0;   // presented pushed ahead of the newest frame (extrapolation mode)
     UINT held = 0;           // vblanks that had to hold the newest frame (the game was late)
     UINT early = 0;          // vblanks whose content time was older than every pair (hold too long)
+    UINT missed = 0;         // vsync: frames that missed their vblank (shown a refresh late)
+    // Smoothness: presented frames whose content advanced < 0.5 refresh (stall) or > 1.5 (jump), by cause:
+    UINT stall_hold = 0;     //   the hold rose (content clock waits for real time to catch up)
+    UINT stall_late = 0;     //   the newest pair ran out (the game's frame was late)
+    UINT stall_other = 0;    //   anything else
+    UINT jumps = 0;
+    UINT repeats = 0;        // refreshes the presenter skipped: nothing new to show (the last frame stays)
+    UINT wait_timeouts = 0;  // vsync: swapchain waits that timed out
+    double lead_ms = 0;      // vsync: the current adaptive lead before the vblank
     double flow_ms = -1;     // median GPU ms of pyramid + both flows per real frame
     double interp_ms = -1;   // median GPU ms per presented frame
     double hold_ms = 0, interval_ms = 0;   // the presenter's current hold and frame-interval EMA
     double extra_ms = 0;                   // the learned part of the hold (late pairs under load), decaying
     bool passthrough = false;              // generation off (disabled, or the game is fast enough)
     std::vector<double> spacing_ms;        // present-to-present
+    std::vector<double> after_vblank_ms;   // refresh wake -> Present call (where in the scan an immediate flip lands)
 };
 void XeFgStats(XeFg* f, XeFgStatsOut& out);   // everything since the last call
 

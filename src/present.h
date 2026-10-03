@@ -29,6 +29,11 @@ void     OverlayDestroy(Overlay* o);
 Overlay* OverlayCreateOnQueue(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, ID3D12CommandQueue* queue);
 ID3D12Resource* OverlayBackbuffer(Overlay* o);   // the buffer the next OverlayPresentRecorded shows
 bool     OverlayPresentRecorded(Overlay* o);
+// OverlayPresentRecorded flips on the next vblank (no tearing) instead of immediately (tearing allowed).
+void     OverlaySetVsync(Overlay* o, bool on);
+// Caller's-queue overlays: blocks until the swapchain can take another frame (max frame latency 1, so
+// right after the last one reached the screen). False = timeout or no waitable (use OverlayWaitVBlank).
+bool     OverlayWaitFrameLatency(Overlay* o, DWORD ms);
 
 // Copies `src` (COPY_SOURCE, overlay size, RGBA8) into the current backbuffer on the present queue
 // and Presents (0, ALLOW_TEARING). `after`/`after_value`: fence the present queue waits on first

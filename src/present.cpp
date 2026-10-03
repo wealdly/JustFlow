@@ -22,6 +22,8 @@ static const int kBuffers = 2;
 struct Overlay
 {
     bool external = false;          // swapchain on the caller's queue (OverlayCreateOnQueue)
+    bool vsync = false;             // OverlayPresentRecorded: sync interval 1, no tearing (OverlaySetVsync)
+    HANDLE latency_wait = nullptr;  // caller's-queue swapchains: frame latency waitable, max latency 1
     Gpu*   g = nullptr;
     HWND   target = nullptr;
     HWND   hwnd = nullptr;
@@ -249,6 +251,10 @@ static Overlay* Create(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
         f5->Release();
     }
     o->flags = tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    // On the caller's queue: a frame-latency waitable with max latency 1. Vsync presents queue behind each
+    // other, and without a bound one missed vblank put every later frame a refresh behind for good
+    // (measured: 18.7 ms present -> screen); with it, a miss costs one refresh once.
+    if (queue) o->flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     o->present_flags = tearing ? DXGI_PRESENT_ALLOW_TEARING : 0;
 
     D3D12_COMMAND_QUEUE_DESC qd = {}; qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -274,6 +280,11 @@ static Overlay* Create(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
     g.factory->MakeWindowAssociation(o->hwnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
     hr = sc1->QueryInterface(__uuidof(IDXGISwapChain3), (void**)&o->swap);
     sc1->Release();
+    if (SUCCEEDED(hr) && queue && (o->flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT))
+    {
+        o->swap->SetMaximumFrameLatency(1);
+        o->latency_wait = o->swap->GetFrameLatencyWaitableObject();
+    }
     if (FAILED(hr) || !o->swap) { Log("[present] IDXGISwapChain3 unavailable 0x%08X", hr); OverlayDestroy(o); return nullptr; }
     if (!GetBuffers(o)) { OverlayDestroy(o); return nullptr; }
 
@@ -298,6 +309,7 @@ void OverlayDestroy(Overlay* o)
     if (!o) return;
     Drain(o);
     ReleaseBuffers(o);
+    if (o->latency_wait) { CloseHandle(o->latency_wait); o->latency_wait = nullptr; }
     if (o->swap) { o->swap->Release(); o->swap = nullptr; }
     if (o->output) { o->output->Release(); o->output = nullptr; }
     if (o->list) { o->list->Release(); o->list = nullptr; }
@@ -328,10 +340,15 @@ static double UsSince(LARGE_INTEGER a)
 
 ID3D12Resource* OverlayBackbuffer(Overlay* o) { return o->bb[o->swap->GetCurrentBackBufferIndex()]; }
 
+void OverlaySetVsync(Overlay* o, bool on) { o->vsync = on; }
+bool OverlayWaitFrameLatency(Overlay* o, DWORD ms) { return o->latency_wait && WaitForSingleObjectEx(o->latency_wait, ms, TRUE) == WAIT_OBJECT_0; }
+
 bool OverlayPresentRecorded(Overlay* o)
 {
     LARGE_INTEGER q; QueryPerformanceCounter(&q);
-    const HRESULT hr = o->swap->Present(0, o->present_flags);
+    // Immediate (tearing allowed): the flip happens as soon as the frame is ready - the lowest latency,
+    // with the tear line wherever in the scan that lands. Vsync: the flip waits for the next vblank.
+    const HRESULT hr = o->vsync ? o->swap->Present(1, 0) : o->swap->Present(0, o->present_flags);
     o->pres_call_us += (UINT64)UsSince(q);
     if (FAILED(hr)) { Log("[present] Present failed 0x%08X", (unsigned)hr); return false; }
     o->present_qpc = q.QuadPart;
