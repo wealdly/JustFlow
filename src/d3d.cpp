@@ -1,5 +1,6 @@
 #include "d3d.h"
 #include "log.h"
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -74,6 +75,7 @@ bool GpuInit(Gpu& g, int want, UINT vendor)
     hr = D3D12CreateDevice(pick, D3D_FEATURE_LEVEL_12_0, __uuidof(ID3D12Device), (void**)&g.dev);
     pick->Release();
     if (FAILED(hr)) { Log("[gpu] D3D12CreateDevice failed 0x%08X", hr); return false; }
+    g.dev->QueryInterface(__uuidof(ID3D12Device1), (void**)&g.dev1);   // optional: residency priority
 
     ID3D12DeviceRemovedExtendedDataSettings1* dred = nullptr;
     if (SUCCEEDED(g.dev->QueryInterface(__uuidof(ID3D12DeviceRemovedExtendedDataSettings1), (void**)&dred)))
@@ -118,7 +120,8 @@ void GpuShutdown(Gpu& g)
 #define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
     REL(g.ts_readback); REL(g.ts_heap); REL(g.desc_heap); REL(g.list);
     for (int i = 0; i < Gpu::kFrames; ++i) REL(g.alloc[i]);
-    REL(g.fence); REL(g.queue); REL(g.dev); REL(g.adapter); REL(g.factory);
+    if (g.adapter) g.adapter->SetVideoMemoryReservation(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, 0);
+    REL(g.fence); REL(g.queue); REL(g.dev1); REL(g.dev); REL(g.adapter); REL(g.factory);
 #undef REL
     if (g.fence_event) { CloseHandle(g.fence_event); g.fence_event = nullptr; }
 }
@@ -168,6 +171,25 @@ bool GpuWait(Gpu& g, ID3D12Fence* f, UINT64 v, DWORD ms) { return WaitFence(f, v
 
 // Driver-reported local (device) video memory for THIS process. CurrentUsage counts every D3D12
 // resource we hold, so a leak shows up here as a number that climbs and never comes back down.
+// Everything we create is marked HIGH residency priority: when the game fills video memory (on an iGPU,
+// the shared system memory it shares with us), the OS evicts lower-priority resources first instead of
+// paging the frame generator's textures out mid-frame. Reservation (below) tells it how much we need.
+static void HighResidency(Gpu& g, ID3D12Resource* r)
+{
+    if (!g.dev1 || !r) return;
+    ID3D12Pageable* pg = r; const D3D12_RESIDENCY_PRIORITY pr = D3D12_RESIDENCY_PRIORITY_HIGH;
+    g.dev1->SetResidencyPriority(1, &pg, &pr);
+}
+
+double GpuReserveCurrentUsage(Gpu& g)
+{
+    DXGI_QUERY_VIDEO_MEMORY_INFO vm = {};
+    if (!g.adapter || FAILED(g.adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vm))) return -1;
+    const UINT64 want = std::min<UINT64>(vm.CurrentUsage, vm.AvailableForReservation);
+    if (FAILED(g.adapter->SetVideoMemoryReservation(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, want))) return -1;
+    return (double)want / (1024.0 * 1024.0);
+}
+
 bool GpuVram(Gpu& g, double& used_mb, double& budget_mb)
 {
     DXGI_QUERY_VIDEO_MEMORY_INFO vm = {};
@@ -296,6 +318,7 @@ ID3D12Resource* GpuMakeTex(Gpu& g, UINT w, UINT h, DXGI_FORMAT fmt, D3D12_RESOUR
     const HRESULT hr = g.dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, initial, nullptr, __uuidof(ID3D12Resource), (void**)&r);
     if (FAILED(hr)) { Log("[gpu] texture %ls %ux%u fmt %d failed 0x%08X", name, w, h, (int)fmt, hr); return nullptr; }
     if (name) r->SetName(name);
+    HighResidency(g, r);
     return r;
 }
 
@@ -310,6 +333,7 @@ ID3D12Resource* GpuMakeBuffer(Gpu& g, UINT64 bytes, D3D12_HEAP_TYPE heap, D3D12_
     const HRESULT hr = g.dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, initial, nullptr, __uuidof(ID3D12Resource), (void**)&r);
     if (FAILED(hr)) { Log("[gpu] buffer %ls %llu bytes failed 0x%08X", name, (unsigned long long)bytes, hr); return nullptr; }
     if (name) r->SetName(name);
+    HighResidency(g, r);
     return r;
 }
 

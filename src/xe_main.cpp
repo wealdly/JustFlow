@@ -779,6 +779,7 @@ static int RunLive(int argc, char** argv)
         XeFg* fg = XeFgCreate(g, target, w, h, factor, keys, 2);
         if (!fg) { CaptureClose(cap); rc = 1; break; }
         Overlay* ov = XeFgOverlay(fg);
+        Log("[live] reserved %.0f MB of video memory (residency priority high)", GpuReserveCurrentUsage(g));
         XeFgSetEnabled(fg, fg_on); XeFgSetTiming(fg, margin, max_in); XeFgSetExtrapolate(fg, extrap); XeFgSetVsync(fg, vsync); XeFgSetVsyncLead(fg, lead);
         Log("[live] attached to %p, %ux%u, display %.1f Hz", (void*)target, w, h, 1000.0 / OverlayVBlankMs(ov));
 

@@ -1223,6 +1223,7 @@ static int RealMain(int argc, char** argv)
         if (cap && CaptureIsDda(cap)) cfg.exclude_from_capture = true;
         if (!cap) { Sleep(1000); continue; }
         p = PipelineCreate(g, cfg, CaptureWidth(cap), CaptureHeight(cap), true, target);
+        if (p) Log("[gpu] reserved %.0f MB of video memory (residency priority high)", GpuReserveCurrentUsage(g));
         if (!p) { CaptureClose(cap); rc = 1; break; }
         _snwprintf_s(status, _TRUNCATE, L"%ls", profile_name().c_str()); tray_state();
         if (switched) { switched = false; PipelineToast(p, "Profile: %ls", profile_name().c_str()); }

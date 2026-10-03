@@ -278,6 +278,7 @@ struct Session
     int rule = 0;                                // per-app rule, cached (0 automatic, 1 always, 2 never)
     double hz = 60, hz_t = 0;                    // the window's monitor refresh, re-read every second
     PowerMode engaged_mode = PowerFull;          // the power mode frame generation was created for
+    Gpu* gpu = nullptr;                          // for the memory reservation
     LONGLONG last_sysrel = 0; bool reset = true;
 };
 
@@ -286,6 +287,7 @@ static void Disengage(Session& s, const char* why)
     if (!s.fg) return;
     Log("[auto] release %ls: %s (after %.0f s)", s.exe.c_str(), why, (NowMs() - s.engaged_t) / 1000.0);
     XeFgDestroy(s.fg); s.fg = nullptr; s.ov = nullptr;   // the overlay belongs to the XeFg
+    if (s.gpu) GpuReserveCurrentUsage(*s.gpu);   // give the reservation back
 }
 
 static void Close(Session& s)
@@ -314,6 +316,8 @@ static bool Engage(Session& s, Gpu& g, const Settings& st, PowerMode mode)
 {
     s.fg = XeFgCreate(g, s.hwnd, s.w, s.h, mode == PowerEconomy ? 3 : 2);   // economy: flow at 1/3 resolution
     if (!s.fg) return false;
+    s.gpu = &g;
+    Log("[auto] reserved %.0f MB of video memory (residency priority high)", GpuReserveCurrentUsage(g));
     s.ov = XeFgOverlay(s.fg);
     XeFgSetTiming(s.fg, 0.0, st.Upper(s.hz));
     XeFgSetExtrapolate(s.fg, st.extrap);

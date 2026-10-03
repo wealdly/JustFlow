@@ -21,6 +21,7 @@ struct Gpu
     LUID                       luid = {};
     int                        adapter_index = -1;
     ID3D12Device*              dev = nullptr;
+    ID3D12Device1*             dev1 = nullptr;          // SetResidencyPriority (null if the runtime lacks it)
     ID3D12CommandQueue*        queue = nullptr;
     ID3D12GraphicsCommandList* list = nullptr;
     ID3D12CommandAllocator*    alloc[kFrames] = {};
@@ -79,6 +80,10 @@ bool   GpuWait(Gpu& g, ID3D12Fence* f, UINT64 v, DWORD ms);
 inline bool GpuWaitIdle(Gpu& g, DWORD ms = 5000) { return GpuWait(g, g.fence, g.fence_value, ms); }
 // This process's local video memory, MB. False = the adapter would not answer.
 bool GpuVram(Gpu& g, double& used_mb, double& budget_mb);
+// Tell the OS how much video memory this process needs right now (IDXGIAdapter3::SetVideoMemoryReservation,
+// local segment group = shared system memory on an iGPU): its current usage, clamped to what is available
+// for reservation. Call after building and after releasing a pipeline. Returns the MB reserved, -1 on failure.
+double GpuReserveCurrentUsage(Gpu& g);
 void   GpuLogDeviceRemoved(Gpu& g, const char* where);
 
 // ---- secondary context ------------------------------------------------------------------------
