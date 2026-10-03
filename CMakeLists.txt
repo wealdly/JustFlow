@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(justflow LANGUAGES CXX)
+project(justflow LANGUAGES CXX RC)   # RC: the icons in src/*.rc (art/)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -64,9 +64,10 @@ add_custom_command(TARGET justflow_spike POST_BUILD
 if(EXISTS ${CMAKE_SOURCE_DIR}/src/main.cpp AND EXISTS ${CMAKE_SOURCE_DIR}/src/compose.cpp)
 add_executable(justflow
     src/main.cpp src/d3d.cpp src/capture.cpp src/present.cpp src/ngx_nr.cpp
-    src/nvofa.cpp src/compose.cpp src/bench.cpp src/png.cpp src/config.cpp src/fg.cpp src/tray.cpp src/settings.cpp src/latewarp.cpp src/mouse.cpp)
+    src/nvofa.cpp src/compose.cpp src/bench.cpp src/png.cpp src/config.cpp src/fg.cpp src/tray.cpp src/settings.cpp src/latewarp.cpp src/mouse.cpp
+    src/justflow.rc)
 add_dependencies(justflow shaders nvngx_dll_justflow)
-target_include_directories(justflow PRIVATE src ${CMAKE_BINARY_DIR}/gen third_party/ngx/include third_party/nvofa "${CPPWINRT_INC}")
+target_include_directories(justflow PRIVATE src art ${CMAKE_BINARY_DIR}/gen third_party/ngx/include third_party/nvofa "${CPPWINRT_INC}")
 target_link_directories(justflow PRIVATE third_party/ngx/lib)
 target_link_libraries(justflow PRIVATE d3d11 d3d12 dxgi dwmapi winmm user32 gdi32 shell32 comctl32 windowscodecs WindowsApp nvsdk_ngx_d)
 target_compile_options(justflow PRIVATE /await:strict)   # C++/WinRT coroutine keywords are not used, but the headers want it on 14.44
@@ -89,12 +90,12 @@ endif()
 # No NGX, no NVOFA, no NVIDIA runtimes: motion comes from xe_flow's compute shaders.
 # justflow_xe.exe is the tray app (windowed subsystem); justflow_xe_cli.exe is the same program as a
 # console exe for --bench / --interp / --live, which shells wait for and whose output can be piped.
-set(XE_SOURCES src/xe_main.cpp src/xe_app.cpp src/xe_tray.cpp src/xe_flow.cpp src/xe_interp.cpp src/xe_fg.cpp
+set(XE_SOURCES src/justflow_xe.rc src/xe_main.cpp src/xe_app.cpp src/xe_tray.cpp src/xe_flow.cpp src/xe_interp.cpp src/xe_fg.cpp
     src/d3d.cpp src/png.cpp src/capture.cpp src/present.cpp)
 foreach(t justflow_xe justflow_xe_cli)
     add_executable(${t} ${XE_SOURCES})
     add_dependencies(${t} shaders)
-    target_include_directories(${t} PRIVATE src ${CMAKE_BINARY_DIR}/gen "${CPPWINRT_INC}")
+    target_include_directories(${t} PRIVATE src art ${CMAKE_BINARY_DIR}/gen "${CPPWINRT_INC}")   # art: the .rc's icons
     target_link_libraries(${t} PRIVATE d3d11 d3d12 dxgi dwmapi winmm user32 shell32 powrprof windowscodecs ole32 WindowsApp)
     target_compile_options(${t} PRIVATE /await:strict)
 endforeach()

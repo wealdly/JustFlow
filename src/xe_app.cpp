@@ -548,6 +548,7 @@ int RunTrayApp(const std::wstring& dir)
         {
             status_t = NowMs();
             XeTrayState ts; ts.auto_on = st.auto_on; ts.lock120 = st.lock120; ts.extrap = st.extrap; ts.status = status; ts.battery = st.battery;
+            ts.icon = s.fg ? XeIconGenerating : (!st.auto_on || (!pw.ac && (pw.saver || st.battery == 2))) ? XeIconOff : XeIconWatching;
             if (!pw.ac) ts.status += pw.saver ? L" [battery saver]" : L" [battery]";
             ts.app = !s.exe.empty() ? s.exe : never_exe; ts.app_rule = !s.exe.empty() ? s.rule : ts.app.empty() ? 0 : 2;
             XeTraySet(tray, ts);

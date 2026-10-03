@@ -1,4 +1,5 @@
 #include "xe_tray.h"
+#include "log.h"
 #include <shellapi.h>
 #include <deque>
 #include <mutex>
@@ -17,15 +18,24 @@ struct XeTray
     XeTrayState state;
     std::deque<XeTrayEvent> events;
     HANDLE ready = nullptr;
+    HICON icons[3] = {};   // XeTrayIcon: generating, watching, off (resources 1..3)
 };
+
+static HICON LoadTrayIcon(int id)
+{
+    const UINT dpi = GetDpiForSystem();
+    return (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(id), IMAGE_ICON,
+                             GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CYSMICON, dpi), LR_DEFAULTCOLOR);
+}
 
 static void AddIcon(XeTray* t, DWORD msg)
 {
     NOTIFYICONDATAW n = { sizeof n };
     n.hWnd = t->hwnd; n.uID = 1; n.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP; n.uCallbackMessage = WM_TRAY;
-    n.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    std::wstring tip;
-    { std::lock_guard<std::mutex> lk(t->mu); tip = L"JustFlow XE - " + t->state.status; }
+    std::wstring tip; int icon;
+    { std::lock_guard<std::mutex> lk(t->mu); tip = L"JustFlow XE - " + t->state.status; icon = t->state.icon; }
+    n.hIcon = t->icons[icon >= 0 && icon < 3 ? icon : 1];
+    if (!n.hIcon) n.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     wcsncpy_s(n.szTip, tip.c_str(), _TRUNCATE);
     Shell_NotifyIconW(msg, &n);
 }
@@ -110,6 +120,7 @@ XeTray* XeTrayCreate()
 {
     XeTray* t = new XeTray;
     t->state.status = L"starting";
+    for (int i = 0; i < 3; ++i) if (!(t->icons[i] = LoadTrayIcon(i + 1))) Log("[tray] icon resource %d did not load (err %lu) - stock icon instead", i + 1, GetLastError());
     t->ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     t->th = std::thread(Thread, t);
     WaitForSingleObject(t->ready, 5000);
@@ -123,6 +134,7 @@ void XeTrayDestroy(XeTray* t)
     if (t->hwnd) PostMessageW(t->hwnd, WM_CLOSE, 0, 0);
     if (t->th.joinable()) t->th.join();
     if (t->ready) CloseHandle(t->ready);
+    for (HICON i : t->icons) if (i) DestroyIcon(i);
     delete t;
 }
 
@@ -131,7 +143,7 @@ void XeTraySet(XeTray* t, const XeTrayState& s)
     bool changed;
     {
         std::lock_guard<std::mutex> lk(t->mu);
-        changed = s.status != t->state.status || s.auto_on != t->state.auto_on || s.lock120 != t->state.lock120 || s.extrap != t->state.extrap || s.app != t->state.app || s.app_rule != t->state.app_rule || s.battery != t->state.battery;
+        changed = s.status != t->state.status || s.auto_on != t->state.auto_on || s.lock120 != t->state.lock120 || s.extrap != t->state.extrap || s.app != t->state.app || s.app_rule != t->state.app_rule || s.battery != t->state.battery || s.icon != t->state.icon;
         t->state = s;
     }
     if (changed && t->hwnd) PostMessageW(t->hwnd, WM_APP + 2, 0, 0);

@@ -1,0 +1,5 @@
+// Icons from art/ (tools/make_icons.py renders them). The first icon is the exe's icon in Explorer;
+// all three are the tray's states (xe_tray.h: XeTrayIcon).
+1 ICON "justflow_xe.ico"
+2 ICON "xe_watching.ico"
+3 ICON "xe_off.ico"

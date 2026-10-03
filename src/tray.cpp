@@ -54,7 +54,16 @@ static void Push(Tray* t, TrayEvent ev, int arg = 0)
 
 // ---- icon --------------------------------------------------------------------------------------
 
-// ponytail: a filled disc with a lighter ring, 32x32 BGRA + empty AND mask; Windows scales it to 16.
+// The exe's icon (src/justflow.rc, art/justflow.ico) at the small-icon size for the system DPI; the .ico
+// carries 16-256 px, so Windows picks a real size instead of scaling.
+static HICON LoadAppIcon()
+{
+    const UINT dpi = GetDpiForSystem();
+    return (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1), IMAGE_ICON,
+                             GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CYSMICON, dpi), LR_DEFAULTCOLOR);
+}
+
+// Fallback without the resource: a filled disc with a lighter ring, 32x32 BGRA + empty AND mask.
 static HICON MakeIcon()
 {
     const int N = 32;
@@ -333,7 +342,8 @@ static void TrayThread(Tray* t)
     wc.lpfnWndProc = TrayWndProc; wc.hInstance = inst; wc.lpszClassName = L"JustFlowTray";
     RegisterClassW(&wc);   // second registration in-process just fails; CreateWindow still works
     t->taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
-    t->icon = MakeIcon();
+    t->icon = LoadAppIcon();
+    if (!t->icon) t->icon = MakeIcon();
     t->hwnd = CreateWindowExW(0, wc.lpszClassName, t->app.c_str(), WS_OVERLAPPED, 0, 0, 0, 0, nullptr, nullptr, inst, t);
     // A popup menu is drawn above its OWNER. The taskbar is topmost, so a menu owned by an ordinary
     // hidden window comes up behind it and the bottom entries (Quit) cannot be clicked. Topmost owner,
