@@ -14,24 +14,10 @@ set(FXC "${WINSDK_ROOT}/bin/${WINSDK_VER}/x64/fxc.exe")
 set(CPPWINRT_INC "${WINSDK_ROOT}/Include/${WINSDK_VER}/cppwinrt")
 
 # ---- shaders: fxc -> gen/<name>.h with g_cs_<name> byte array ----------------------------------
-set(SHADERS swizzle gray downscale expand compose residual compose_residual text sharpen artcnn
+set(SHADERS swizzle gray downscale expand compose residual compose_residual text sharpen warp mvgrid
     xe_down xe_flow xe_flow_r2 xe_median xe_refine xe_warp xe_interp)
 set(SHADER_DEPS_xe_flow_r2 ${CMAKE_SOURCE_DIR}/shaders/xe_flow.hlsl)   # it #includes xe_flow.hlsl
 set(SHADER_HEADERS)
-# ponytail: artcnn is a ~250 KB generated blob. Embedding it made the unsigned exe look like a
-# packer to Smart App Control (it blocked the binary outright), so it ships as a .cso data file.
-set(SHADER_BLOBS artcnn)
-list(REMOVE_ITEM SHADERS ${SHADER_BLOBS})
-foreach(s ${SHADER_BLOBS})
-    set(src ${CMAKE_SOURCE_DIR}/shaders/${s}.hlsl)
-    set(out ${CMAKE_BINARY_DIR}/${s}.cso)
-    add_custom_command(
-        OUTPUT ${out}
-        COMMAND "${FXC}" /nologo /T cs_5_0 /E CSMain /O3 /Fo ${out} ${src}
-        DEPENDS ${src}
-        COMMENT "fxc ${s}.hlsl -> ${s}.cso")
-    list(APPEND SHADER_HEADERS ${out})
-endforeach()
 foreach(s ${SHADERS})
     set(src ${CMAKE_SOURCE_DIR}/shaders/${s}.hlsl)
     set(out ${CMAKE_BINARY_DIR}/gen/cs_${s}.h)
@@ -78,7 +64,7 @@ add_custom_command(TARGET justflow_spike POST_BUILD
 if(EXISTS ${CMAKE_SOURCE_DIR}/src/main.cpp AND EXISTS ${CMAKE_SOURCE_DIR}/src/compose.cpp)
 add_executable(justflow
     src/main.cpp src/d3d.cpp src/capture.cpp src/present.cpp src/ngx_nr.cpp
-    src/nvofa.cpp src/compose.cpp src/bench.cpp src/png.cpp src/config.cpp src/fg.cpp src/tray.cpp src/settings.cpp)
+    src/nvofa.cpp src/compose.cpp src/bench.cpp src/png.cpp src/config.cpp src/fg.cpp src/tray.cpp src/settings.cpp src/latewarp.cpp src/mouse.cpp)
 add_dependencies(justflow shaders nvngx_dll_justflow)
 target_include_directories(justflow PRIVATE src ${CMAKE_BINARY_DIR}/gen third_party/ngx/include third_party/nvofa "${CPPWINRT_INC}")
 target_link_directories(justflow PRIVATE third_party/ngx/lib)
@@ -94,6 +80,9 @@ add_custom_command(TARGET justflow POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/profiles $<TARGET_FILE_DIR:justflow>/profiles/defaults
     COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DDEST=$<TARGET_FILE_DIR:justflow> -P ${CMAKE_SOURCE_DIR}/cmake/seed_ini.cmake
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssg.dll $<TARGET_FILE_DIR:justflow>)
+if(EXISTS ${CMAKE_SOURCE_DIR}/runtime/nvngx_latewarp.dll)   # optional: Frame Warp (not redistributable, see NOTICE)
+    add_custom_command(TARGET justflow POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_latewarp.dll $<TARGET_FILE_DIR:justflow>)
+endif()
 endif()
 
 # ---- justflow_xe: frame generation only, any D3D12 GPU (written for Intel Arc iGPUs) --------------

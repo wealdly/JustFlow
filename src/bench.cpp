@@ -1,4 +1,6 @@
 // --bench: PNG frames through the same pipeline as live capture.
+#include "latewarp.h"
+#include "mouse.h"
 #include "pipeline.h"
 #include "png.h"
 #include <cmath>
@@ -9,6 +11,13 @@
 #include <cstring>
 
 #define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
+
+// A texture (8-bit RGBA or BGRA, w x h, resting in `state`) read back and written as a PNG.
+bool SaveTexPng(Gpu& g, ID3D12Resource* tex, UINT w, UINT h, D3D12_RESOURCE_STATES state, const wchar_t* path)
+{
+    std::vector<uint8_t> px((size_t)w * h * 4);
+    return tex && GpuReadbackTex(g, tex, px.data(), w, h, 4, state) && SavePngRgba(path, px.data(), w, h);
+}
 
 // ---- bench ----------------------------------------------------------------------------------------
 static std::vector<std::wstring> ListPngs(const std::wstring& path)
@@ -28,7 +37,7 @@ static std::vector<std::wstring> ListPngs(const std::wstring& path)
 
 int RunBench(int argc, char** argv)
 {
-    std::wstring input, ini; int frames = 120; UINT work_w = 0, work_h = 0; bool present = true;
+    std::wstring input, ini; int frames = 120; UINT work_w = 0, work_h = 0; bool present = true; double pace = 0; bool lw = false; float lw_a[4] = { 0, 0, 0, 60 };
     UINT rework_w = 0, rework_h = 0;   // --rework WxH: change the work size LIVE a third of the way in
     for (int i = 1; i < argc; ++i)
     {
@@ -36,6 +45,8 @@ int RunBench(int argc, char** argv)
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--work") && i + 1 < argc) sscanf_s(argv[++i], "%ux%u", &work_w, &work_h);
         else if (!strcmp(argv[i], "--no-present")) present = false;
+        else if (!strcmp(argv[i], "--pace") && i + 1 < argc) pace = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--lwtest") && i + 1 < argc) { lw = true; sscanf_s(argv[++i], "%f,%f,%f,%f", &lw_a[0], &lw_a[1], &lw_a[2], &lw_a[3]); }
         else if (!strcmp(argv[i], "--rework") && i + 1 < argc) sscanf_s(argv[++i], "%ux%u", &rework_w, &rework_h);
         else if (!strcmp(argv[i], "--ini") && i + 1 < argc) { const char* s = argv[++i]; ini.assign(s, s + strlen(s)); }   // profile next to the exe, or a path
     }
@@ -64,7 +75,24 @@ int RunBench(int argc, char** argv)
 
     Gpu g;
     if (!GpuInit(g, -1)) return 1;
-    if (cfg.selftest) { ComposeSelfTest(g); ArtCnnSelfTest(g); }
+    if (lw)   // --lwtest yaw,pitch,roll,vfov (degrees): Frame Warp the LAST input frame to a turned camera -> lw_out.png
+    {
+        const float k = 3.14159265f / 180.0f; int rc = 1;
+        ID3D12Resource* in = GpuMakeTex(g, w, h, DXGI_FORMAT_B8G8R8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"lw_in");
+        ID3D12Resource* out = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"lw_out");
+        Latewarp* l = LatewarpCreate(g, dir.c_str(), w, h, w / 2, h / 2);
+        if (in && out && l && GpuUploadTex(g, in, images.back().data(), w, h, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) && GpuBegin(g))
+        {
+            const bool ok = LatewarpEvaluate(l, g.list, in, out, true, lw_a[0] * k, lw_a[1] * k, lw_a[2] * k, lw_a[3] * k);
+            if (GpuEnd(g) && GpuWaitIdle(g) && ok)
+            {
+                if (SaveTexPng(g, out, w, h, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"lw_out.png")) rc = 0;
+            }
+        }
+        Log("[bench] latewarp test yaw %.3f pitch %.3f roll %.3f vfov %.1f -> %s", lw_a[0], lw_a[1], lw_a[2], lw_a[3], rc ? "FAILED" : "lw_out.png");
+        LatewarpDestroy(l); if (in) in->Release(); if (out) out->Release(); GpuShutdown(g); return rc;
+    }
+    if (cfg.selftest) { ComposeSelfTest(g); MouseSelfTest(); }
     ResolveWork(cfg, dir);
     Pipeline* p = PipelineCreate(g, cfg, w, h, present, nullptr);
     if (!p) { GpuShutdown(g); return 1; }
@@ -105,6 +133,7 @@ int RunBench(int argc, char** argv)
             PipelineReload(p, nc);
         }
         if (toast_test && i == 6) p->toast_until_ms = 0;
+        if (pace > 0) { const double due = t0 + i * 1000.0 / pace; while (NowMs() < due) Sleep(1); }
         if (!PipelineFrame(p, tex[last_in], nullptr, 0, i == 0)) { Log("[bench] frame %d failed", i); GpuLogDeviceRemoved(g, "bench"); rc = 2; break; }
         // ponytail: idle after each frame so both lists of the frame retire and get sampled (the
         // stamp reader only sees the most recently retired slot). Per-stage GPU times are unaffected;
@@ -145,6 +174,12 @@ int RunBench(int argc, char** argv)
         Log("[fg] bench: %u frames presented (%.1f fps), %u dropped, spacing %.2f/%.2f/%.2f ms (med/p95/MAX, %zu samples), %u paused, eval %.2f/%.2f ms (med/p95)", fs.presented, fs.presented * 1000.0 / wall, fs.drops, sp.med(), sp.p95(), sp_max, sp.v.size(), fs.paused, ev, ev95);
     }
 
+    if (p->fg && FgMultiplier(p->fg) > 1)
+    {
+        SaveTexPng(g, FgDebugGen(p->fg, 0), w, h, D3D12_RESOURCE_STATE_COPY_SOURCE, L"fg_gen.png");
+        SaveTexPng(g, FgDebugReal(p->fg), w, h, D3D12_RESOURCE_STATE_COPY_SOURCE, L"fg_real.png");
+    }
+
     // The UI restore on generated frames: inside a mask rect a generated frame must be pixel-exact
     // against the composed frame it came from, and outside it must not be (DLSS-G interpolated it).
     // Both halves matter - "identical everywhere" would mean the generated frame is just a copy.
@@ -173,7 +208,7 @@ int RunBench(int argc, char** argv)
         }
     }
 
-    // The motion vectors, checked against KNOWN motion. These feed BOTH the NR model and DLSS-G, so
+    // The motion vectors, checked against KNOWN motion. These feed the NR model and the warp engines, so
     // a wrong sign, scale or reference frame shows up as warping and temporal instability rather
     // than as an error - which is why it can hide for a long time behind "FG is unstable".
     // Feed --bench a panning sequence and the expected magnitude is arithmetic: a shift of N native
@@ -247,12 +282,9 @@ int RunBench(int argc, char** argv)
     // survives being composed up from a small work size).
     if (p->shown && p->color4k)
     {
-        std::vector<uint8_t> px((size_t)w * h * 4);
-        wchar_t f[64];
-        if (GpuReadbackTex(g, p->shown, px.data(), w, h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE))
-        { _snwprintf_s(f, _TRUNCATE, L"final_%ux%u.png", p->ww, p->wh); SavePngRgba(f, px.data(), w, h); }
-        if (GpuReadbackTex(g, p->color4k, px.data(), w, h, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
-            SavePngRgba(L"final_native.png", px.data(), w, h);
+        wchar_t f[64]; _snwprintf_s(f, _TRUNCATE, L"final_%ux%u.png", p->ww, p->wh);
+        SaveTexPng(g, p->shown, w, h, D3D12_RESOURCE_STATE_COPY_SOURCE, f);
+        SaveTexPng(g, p->color4k, w, h, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"final_native.png");
     }
 
     // What the spike never checked: that the model wrote the whole work texture. A subrect here is

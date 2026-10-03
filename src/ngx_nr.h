@@ -9,6 +9,10 @@
 // Serialises NGX entry points (NR on the main thread, DLSS-G on the FG presenter thread): the
 // runtime's thread-safety across features is undocumented and each call only records commands.
 inline std::mutex& NgxMutex() { static std::mutex m; return m; }
+// NGX core init for a feature beside NR (DLSS-G, Frame Warp), and a parameter block of its own. Init is
+// harmless when NR already ran it. nullptr on failure; both results are logged under `tag`.
+struct NVSDK_NGX_Parameter;
+NVSDK_NGX_Parameter* NgxCoreParams(Gpu& g, const wchar_t* dir, const char* tag);
 
 enum NrParamBlock  { NrBlockAllocate = 1, NrBlockCapability = 2, NrBlockOwn = 3 };
 
@@ -54,7 +58,5 @@ unsigned NrEvaluate(Nr* n, ID3D12GraphicsCommandList* cl, ID3D12Resource* color,
                     ID3D12Resource* output, bool reset, float exposure_scale);
 // Tick the retire ring (call once per evaluate).
 void NrRetireTick(Nr* n);
-// The tuning the live feature was created with (for rebuild decisions).
-const NrConfig& NrLiveConfig(const Nr* n);
 // Human-readable failure text for the last create/evaluate.
 const char* NrLastError(const Nr* n);

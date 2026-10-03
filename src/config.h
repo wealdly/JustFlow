@@ -10,6 +10,13 @@
 
 struct HotkeySpec { UINT mods = 0; UINT vk = 0; };
 
+// Frame-generation engines, in the order the tray and the settings list them.
+//   FG_DLSSG     NVIDIA DLSS-G interpolates between real frames (+ half a frame of latency).
+//   FG_WARP      extrapolates the newest frame along our optical flow (no added latency).
+//   FG_LATEWARP  NVIDIA Frame Warp to the mouse at every refresh (fg.cpp Reproject).
+enum FgEngine { FG_DLSSG, FG_WARP, FG_LATEWARP, FG_ENGINE_COUNT };
+inline const wchar_t* FgEngineName(int e) { static const wchar_t* const k[FG_ENGINE_COUNT] = { L"dlssg", L"warp", L"latewarp" }; return k[e >= 0 && e < FG_ENGINE_COUNT ? e : 0]; }
+
 struct Config
 {
     // [app] (justflow.ini)
@@ -26,12 +33,9 @@ struct Config
     // measured as a self-sustaining 240 'frames' a second from a window that never changes.
     bool dda = false;
     // [nr]
-    // Two separate things, because one key could not say "effect on, model off, ArtCNN on":
-    //   enabled = the effect as a whole, which is what F9 toggles and what persists.
-    //   model   = use the DLSS neural-rendering model (expensive: ~12 ms in a real scene).
-    //   artcnn  = use ArtCNN (~2.3 ms), on its own or ahead of the model.
-    bool  nr_enabled = true;
-    bool  nr_model = true;                 // the default experience is the DLSS model on its own (no ArtCNN, no FG)
+    //   enabled = the neural layer - the DLSS neural-rendering model (4-12 ms) - which is what F9 toggles
+    //   and what persists.
+    bool  nr_enabled = false;              // out of the box: frame generation only (README)
     UINT  work_w = 0, work_h = 0;          // 0 = auto until the capture size is known (WorkAuto in main.cpp)
     bool  work_auto = false;               // [nr] work=auto: re-derived from the native size, never from a fixed number
     bool  work_native = false;             // [nr] work=native: the model at the capture size, 1:1 (pair it with model_every)
@@ -54,9 +58,8 @@ struct Config
     // [filters] - its own layer, its own section. Three switches, one per layer, and none of them
     // reaches into another: [nr] enabled, [filters] enabled, [fg] enabled. `enabled` is a bypass
     // that KEEPS the tuned values, so a filter A/B does not cost you the numbers you arrived at.
-    bool  filters_enabled = true;
+    bool  filters_enabled = false;
     float sharpen = 0.0f;                  // CAS-style sharpen after the compose, 0 = off (0.3-0.5 typical); live (F11)
-    bool  artcnn = false;                  // ArtCNN C4F16_DS luma pass on the model input (CsArtCnn nr_in -> nr_in2); live (F11)
     // [ofa]
     UINT  ofa_w = 960, ofa_h = 540;
     int   ofa_grid = 0;
@@ -74,13 +77,14 @@ struct Config
     int   hud_corner = 0;                  // 0 tl, 1 tr, 2 bl, 3 br
     int   hud_scale = 3;
     // [fg]
-    // Off by default. FG only pays above ~1.5x gain, many games already run their own (with real depth
-    // and motion vectors, which ours cannot match), and stacking ours on theirs interpolates
-    // interpolations. It stays one key away (F8).
-    bool  fg_enabled = false;
+    // On by default: the cheapest layer. It only pays above ~1.5x gain (the governor pauses it below),
+    // and a game running its own frame generation should keep that and switch ours off (F8): stacking
+    // ours on theirs interpolates interpolations.
+    bool  fg_enabled = true;
     int   fg_multiplier = 2;               // presented frames per rendered frame, 2..4
     bool  fg_pacing_vblank = true;         // pacing=vblank | timer
-    bool  fg_mv_dilated = true;            // DLSS-G motionVectorsDilated (see fg.cpp Evaluate)
+    int   fg_engine = 0;                   // FgEngine, [fg] engine=dlssg | warp | latewarp
+    float fg_lw_vfov = 60.0f;              // [fg] lw_fov: vertical field of view (deg) the latewarp engine assumes (edge geometry only)
     float fg_min_gain = 1.5f;              // governor: pause generation while presented/submitted stays below this (0 = never)
     float fg_max_in_fps = 90.0f;           // governor: no generation while the game already delivers more than this (0 = never)
     float fg_phase_ms = 0.0f;              // shifts every scheduled present target (negative = earlier); live (F11)
@@ -109,6 +113,8 @@ std::wstring ConfigStrayKeys(const wchar_t* profile);
 // writes through this so the layer split has one authority (kAppKeys in config.cpp).
 bool ConfigIsAppKey(const wchar_t* sec, const wchar_t* key);
 // True if a key that is latched at CreateFeature differs (work size, style, block, tuning).
+// The filter layer is live: switched on AND with something in it.
+inline bool FiltersLive(const Config& c) { return c.filters_enabled && (c.sharpen > 0 || c.saturation != 1.0f); }
 bool ConfigNeedsRebuild(const Config& a, const Config& b);
 // True if a key that is only read when the capture and the overlay are created differs, so a
 // reload has to tear the pipeline down and build it again. Deliberately NOT exclude_from_capture:
@@ -119,4 +125,3 @@ bool ConfigNeedsRestart(const Config& a, const Config& b);
 NrConfig ConfigToNr(const Config& c);
 // "[Ctrl+][Alt+][Shift+]Key" (Key = F1..F24 or a letter/digit) <-> HotkeySpec. Unparsable key -> def_vk.
 HotkeySpec   ParseHotkey(std::wstring s, UINT def_vk);
-std::wstring FormatHotkey(const HotkeySpec& h);

@@ -97,6 +97,21 @@ static void ProbeFloatSlot(Nr* n)
     Log("[ngx] float setter: NOT FOUND (floats may not stick)");
 }
 
+NVSDK_NGX_Parameter* NgxCoreParams(Gpu& g, const wchar_t* dir, const char* tag)
+{
+    // NGX is handed pointers into these: they live for the process, like the core itself.
+    static std::wstring path; static const wchar_t* list[1]; static NVSDK_NGX_FeatureCommonInfo common = {};
+    if (path.empty()) path = dir;
+    list[0] = path.c_str(); common.PathListInfo.Path = list; common.PathListInfo.Length = 1;
+    common.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;
+    NVSDK_NGX_Result r = NVSDK_NGX_D3D12_Init(0x1000000ULL, dir, g.dev, &common, NVSDK_NGX_Version_API);
+    Log("%s NVSDK_NGX_D3D12_Init -> 0x%08X (%s)", tag, r, NgxResultName(r));
+    NVSDK_NGX_Parameter* p = nullptr;
+    r = NVSDK_NGX_D3D12_AllocateParameters(&p);
+    if (NVSDK_NGX_FAILED(r) || !p) { Log("%s AllocateParameters -> 0x%08X (%s)", tag, r, NgxResultName(r)); return nullptr; }
+    return p;
+}
+
 Nr* NrInit(Gpu& g, const wchar_t* dir, NrParamBlock block)
 {
     Nr* n = new Nr; n->g = &g; n->dir = dir; n->block = block;
@@ -149,7 +164,6 @@ void NrShutdown(Nr* n)
 int NrFloatSlot(const Nr* n) { return n->float_slot; }
 bool NrReady(const Nr* n) { return n->feature && n->submitted; }
 void NrMarkSubmitted(Nr* n) { n->submitted = true; }
-const NrConfig& NrLiveConfig(const Nr* n) { return n->live; }
 const char* NrLastError(const Nr* n) { return n->last_error.c_str(); }
 
 static void SetTuning(Nr* n, const NrTuning& t)

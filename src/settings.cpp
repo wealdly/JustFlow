@@ -3,7 +3,7 @@
 // adding a setting means adding a row here and reading it in config.cpp.
 //
 // Diagnostics stay out of the table on purpose. Ini-only: param_block, warmup,
-// rebuild_debounce_frames, selftest, fg.pacing, fg.mv_dilated, fg.phase_ms, nr.exposure_scale,
+// rebuild_debounce_frames, selftest, fg.pacing, fg.phase_ms, fg.lw_fov, nr.exposure_scale,
 // nr.mode, nr.model_max_fps, nr.warp, nr.warp_reject, ofa.grid/zero_below, capture.cursor/border, ui.rectN, ui.mask_every,
 // ui.feather, ui.toast_scale, overlay.mode. They are for debugging, not for tuning, and a panel
 // that lists everything is a panel nobody can read.
@@ -48,43 +48,46 @@ struct Setting
     const wchar_t* def;     // shown when the key is absent from the file
 };
 
-// One tab per pipeline LAYER, in the order a frame passes through them: neural (ArtCNN and/or the
-// DLSS model, composed back as a residual), then ordinary filters, then frame generation, then
+// One tab per pipeline LAYER, in the order a frame passes through them: neural (the DLSS model,
+// composed back as a residual), then ordinary filters, then frame generation, then
 // presentation. Everything neural is on ONE tab - splitting the layer's switches from the model's
 // tuning across two tabs meant hunting for which tab a knob lived on, which was the original
 // complaint. A layer you are not running is a tab you never open.
 const wchar_t* const kTabs[] = { L"Neural", L"Filters", L"Frame gen", L"Display", L"System", L"Hotkeys" };
 const int kTabCount = (int)(sizeof kTabs / sizeof *kTabs);
 
-// Model resolutions: the measured cost is ~1.5 ms/MPix + 1 ms on a 5080, so 4K is a 60 fps tier.
-const wchar_t* const kWork = L"auto|native|1920x1080|2560x1440|3200x1800|3840x2160";
-// Optical flow input: the largest GPU cost in the pipeline and it scales steeply.
+// Model resolutions. auto = the integer divisor of the capture nearest 1080 lines (1080p on 4K),
+// native = the capture itself. 3200x1800 and 3840x2160 are gone: the first is a non-integer ratio of
+// 4K and lost to 1080p on cost AND fidelity (main.cpp, WorkAuto), the second is `native` on 4K.
+const wchar_t* const kWork = L"auto|native|1920x1080|2560x1440";
+// Optical flow input: read by the DLSS model and the warp engines only - DLSS-G measures motion itself.
 // Measured on an idle 5080 from a 4K capture: 0.55 / 1.05 / 1.49 / 3.61 ms.
 const wchar_t* const kFlow = L"640x360|960x540|1280x720|1920x1080";
 
 const Setting kSettings[] = {
     // ---- 0 Neural layer: the switch, what runs under it, and how the model is tuned ------------
-    { 0, L"nr", L"enabled",           L"Neural layer (F9)",  Bool,  nullptr, L"1" },
-    { 0, L"nr", L"artcnn",            L"ArtCNN (~2.3ms)",    Bool,  nullptr, L"0" },
-    { 0, L"nr", L"model",             L"DLSS model (~12ms)", Bool,  nullptr, L"1" },
+    { 0, L"nr", L"enabled",           L"Neural layer (F9, 4-12 ms)", Bool, nullptr, L"0" },
     { 0, L"nr", L"work",              L"Model resolution",   Enum,  kWork,   L"auto" },
     { 0, L"nr", L"model_every",       L"Model every Nth frame", Enum, L"1|2|3|4|6|8", L"1" },
     { 0, L"nr", L"residual_strength", L"Neural strength",    Float, nullptr, L"1.0" },
-    { 0, L"nr", L"chroma",            L"Keep model colour",  Float, nullptr, L"0.25" },
+    { 0, L"nr", L"chroma",            L"Keep model colour",  Float, nullptr, L"1.0" },
     { 0, L"nr", L"style",             L"Style 0=std 1=nat 2=cine", Int, nullptr, L"0" },
     { 0, L"nr", L"local_tone",        L"Local tone/colour",  Float, nullptr, L"0.2" },
     { 0, L"nr", L"local_structure",   L"Local structure",    Float, nullptr, L"1.0" },
 
     // ---- 1 Filters: ordinary post passes, independent of the neural layer ----------------------
-    { 1, L"filters", L"enabled",      L"Filter layer (F6)",  Bool,  nullptr, L"1" },
+    { 1, L"filters", L"enabled",      L"Filter layer (F6)",  Bool,  nullptr, L"0" },
     { 1, L"filters", L"sharpen",      L"Sharpen",            Float, nullptr, L"0.0" },
-    { 1, L"filters", L"saturation",   L"Vibrance",           Float, nullptr, L"1.10" },
+    { 1, L"filters", L"saturation",   L"Vibrance",           Float, nullptr, L"1.0" },
 
     // ---- 2 Frame generation ---------------------------------------------------------------------
-    { 2, L"fg", L"enabled",           L"Frame generation (F8)", Bool, nullptr, L"0" },
+    { 2, L"fg", L"enabled",           L"Frame generation (F8)", Bool, nullptr, L"1" },
+    // engine first: it decides what the rows under it mean. latewarp runs at the display's refresh,
+    // so the multiplier and the governor mean nothing to it: they grey out (SyncFgRows).
+    { 2, L"fg", L"engine",            L"Engine",             Enum,  L"dlssg|warp|latewarp", L"dlssg" },
     { 2, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4", L"2" },
-    { 2, L"fg", L"min_gain",          L"Auto-pause below gain", Float, nullptr, L"1.5" },
-    { 2, L"fg", L"max_input_fps",     L"No FG above input fps", Float, nullptr, L"90" },
+    { 2, L"fg", L"min_gain",          L"Pause below gain",   Float, nullptr, L"1.5" },
+    { 2, L"fg", L"max_input_fps",     L"Pause above input fps", Float, nullptr, L"90" },
 
     // ---- 3 Display --------------------------------------------------------------------------------
     { 3, L"ui", L"hud",               L"Status HUD (F7)",    Bool,  nullptr, L"0" },
@@ -96,7 +99,7 @@ const Setting kSettings[] = {
     // ---- 4 System: this machine, rarely touched ---------------------------------------------------
     { 4, L"gpu", L"adapter",          L"GPU (-1 = auto)",    Int,   nullptr, L"-1" },
     { 4, L"capture", L"mode",         L"Capture",            Enum,  L"auto|wgc|dda", L"auto" },
-    { 4, L"ofa", L"input",            L"Flow input",         Enum,  kFlow,   L"960x540" },
+    { 4, L"ofa", L"input",            L"Flow input (model, warp)", Enum, kFlow, L"960x540" },
     { 4, L"nr", L"max_fps",           L"FPS cap (0 = off)",  Int,   nullptr, L"0" },
 
     // ---- 5 Hotkeys ---------------------------------------------------------------------------------
@@ -150,21 +153,16 @@ struct PresetKey { const wchar_t *sec, *key, *val[kPresetCount]; };
 // Only the cost dials. The look ([nr] style/intensity/...) is the user's, and no preset sets a
 // frame-rate cap - a cap the user did not ask for reads as "the filter is slow".
 const PresetKey kPreset[] = {
-    // High performance runs NO DLSS model at all: ArtCNN alone carries the enhancement at ~2.3 ms
-    // against the model's 12 ms in a real scene, which is the difference between fitting a 90 fps
-    // budget alongside frame generation and not. The other three are model tiers, and they are
-    // tiers of TIME, not of work size: the model's edit is low-frequency and survives being motion-
+    // Four model tiers, and they are tiers of TIME, not of work size: the model's edit is low-frequency and survives being motion-
     // warped for several frames, while a smaller work size makes the model itself behave differently.
     // Measured on a moving 4K sequence (share of the every-frame native edit, average model cost):
-    //   auto (1080p) every frame 57% 3.8 ms | native every 6th 76% 2.0 ms | native every 3rd 80% 4.1 ms
+    //   auto (1080p) every 3rd 49% 1.3 ms | every frame 57% 3.8 ms | native every 6th 76% 2.0 ms | every 3rd 80% 4.1 ms
     // Performance stays the small per-frame evaluate because it is the one that cannot hitch a game
     // sharing the GPU; a native evaluate is one ~12 ms block at 4K. The old 1440p / 1800p tiers were
     // non-integer ratios of 4K and lost to 1080p on cost AND fidelity (see WorkAuto in main.cpp).
     { L"nr",  L"enabled", { L"1",         L"1",         L"1",         L"1" } },
-    { L"nr",  L"model",   { L"0",         L"1",         L"1",         L"1" } },
     { L"nr",  L"work",    { L"auto",      L"auto",      L"native",    L"native" } },
-    { L"nr",  L"model_every", { L"1",     L"1",         L"6",         L"3" } },
-    { L"nr",  L"artcnn",  { L"1",         L"0",         L"0",         L"0" } },
+    { L"nr",  L"model_every", { L"3",     L"1",         L"6",         L"3" } },
     { L"filters", L"sharpen", { L"0.4",   L"0.3",       L"0.2",       L"0.0" } },
     { L"ofa", L"input",   { L"640x360",   L"960x540",   L"960x540",   L"1280x720" } },
 };
@@ -247,21 +245,34 @@ std::vector<WORD> BuildTemplate()
     {
         const Setting& s = kSettings[i];
         const int y = 30 + row[s.tab]++ * 16;
-        item(SS_LEFT, 14, y + 2, 100, 9, (WORD)(ID_LBL0 + i), 0x0082, nullptr, s.label);
+        // label 116 DLU: the longest label measured 160 px against the old 150 (bench: label_fit)
+        item(SS_LEFT, 14, y + 2, 116, 9, (WORD)(ID_LBL0 + i), 0x0082, nullptr, s.label);
         if (s.type == Bool)
-            item(BS_AUTOCHECKBOX | WS_TABSTOP, 120, y, 120, 10, (WORD)(ID_CTL0 + i), 0x0080, nullptr, L"");
+            item(BS_AUTOCHECKBOX | WS_TABSTOP, 134, y, 120, 10, (WORD)(ID_CTL0 + i), 0x0080, nullptr, L"");
         else if (s.type == Enum)
-            item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 120, y, 110, 90, (WORD)(ID_CTL0 + i), 0x0085, nullptr, L"");
+            item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 134, y, 110, 90, (WORD)(ID_CTL0 + i), 0x0085, nullptr, L"");
         else
-            item(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 120, y, s.type == Hotkey ? 110 : 70, 12, (WORD)(ID_CTL0 + i), 0x0081, nullptr, L"");
+            item(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 134, y, s.type == Hotkey ? 110 : 70, 12, (WORD)(ID_CTL0 + i), 0x0081, nullptr, L"");
     }
     // Quality preset, outside the tabs because it reaches across them (neural, filters, flow input).
-    item(SS_LEFT, 7, btn_y + 3, 26, 9, ID_PRESET_LBL, 0x0082, nullptr, L"Quality");
-    item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 34, btn_y + 1, 88, 90, ID_PRESET, 0x0085, nullptr, L"");
+    item(SS_LEFT, 7, btn_y + 3, 32, 9, ID_PRESET_LBL, 0x0082, nullptr, L"Quality");
+    item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 40, btn_y + 1, 84, 90, ID_PRESET, 0x0085, nullptr, L"");
     item(BS_PUSHBUTTON | WS_TABSTOP, 128, btn_y, 52, 15, ID_APPLY, 0x0080, nullptr, L"Apply");
     item(BS_DEFPUSHBUTTON | WS_TABSTOP, 185, btn_y, 52, 15, IDOK, 0x0080, nullptr, L"OK");
     item(BS_PUSHBUTTON | WS_TABSTOP, 242, btn_y, 52, 15, IDCANCEL, 0x0080, nullptr, L"Cancel");
     return w;
+}
+
+// latewarp runs at the display's refresh: the multiplier and the governor mean nothing to it, so their
+// rows grey out while it is the engine - clearer than a label saying so, and the values are kept.
+void SyncFgRows(HWND h)
+{
+    auto row = [](const wchar_t* key) { for (int i = 0; i < kCount; ++i) if (!wcscmp(kSettings[i].sec, L"fg") && !wcscmp(kSettings[i].key, key)) return i; return -1; };
+    const int eng = row(L"engine"); if (eng < 0) return;
+    wchar_t v[32] = {}; GetDlgItemTextW(h, ID_CTL0 + eng, v, 32);
+    const BOOL on = wcscmp(v, FgEngineName(FG_LATEWARP)) != 0;
+    for (const wchar_t* k : { L"multiplier", L"min_gain", L"max_input_fps" })
+        if (const int i = row(k); i >= 0) { EnableWindow(GetDlgItem(h, ID_CTL0 + i), on); EnableWindow(GetDlgItem(h, ID_LBL0 + i), on); }
 }
 
 void ShowTab(HWND h, int tab)
@@ -319,24 +330,15 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             const Setting& s = kSettings[i];
             const std::wstring v = Read(FileFor(s, d->app, d->profile), s.sec, s.key, s.def);
             d->initial[i] = v;
-            const HWND c = GetDlgItem(h, ID_CTL0 + i);
-            if (s.type == Bool) CheckDlgButton(h, ID_CTL0 + i, v != L"0" && !v.empty() ? BST_CHECKED : BST_UNCHECKED);
-            else if (s.type == Enum)
-            {
-                int sel = -1;
+            if (s.type == Enum)   // the list first; SetCtl then selects (a hand-edited value outside it is added)
                 for (const wchar_t* p = s.opts; p; )
                 {
                     const wchar_t* bar = wcschr(p, L'|');
                     const std::wstring opt(p, bar ? bar - p : wcslen(p));
-                    const int idx = (int)SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)opt.c_str());
-                    if (_wcsicmp(opt.c_str(), v.c_str()) == 0) sel = idx;
+                    SendMessageW(GetDlgItem(h, ID_CTL0 + i), CB_ADDSTRING, 0, (LPARAM)opt.c_str());
                     p = bar ? bar + 1 : nullptr;
                 }
-                // A hand-edited value that is not in the list (a work= size of its own) stays put.
-                if (sel < 0) { sel = (int)SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)v.c_str()); }
-                SendMessageW(c, CB_SETCURSEL, sel, 0);
-            }
-            else SetDlgItemTextW(h, ID_CTL0 + i, v.c_str());
+            SetCtl(h, i, v.c_str());
         }
         {
             const HWND q = GetDlgItem(h, ID_PRESET);
@@ -345,6 +347,7 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             SendMessageW(q, CB_SETCURSEL, (d->profile && *d->profile) ? PresetCurrent(d->profile) + 1 : 0, 0);
         }
         ShowTab(h, 0);
+        SyncFgRows(h);
         PlaceClearOf(h, d->avoid);
         SetTimer(h, 1, 400, nullptr);   // live refresh, see WM_TIMER
         return TRUE;
@@ -363,6 +366,7 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                 if (v == d->initial[i]) continue;
                 d->initial[i] = v; SetCtl(h, i, v.c_str());
             }
+        if (wp == 1) SyncFgRows(h);
         return TRUE;
     case WM_NOTIFY:
         if (((NMHDR*)lp)->idFrom == ID_TAB && ((NMHDR*)lp)->code == TCN_SELCHANGE)
@@ -370,6 +374,7 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return FALSE;
     case WM_COMMAND:
         if (LOWORD(wp) == IDCANCEL) { EndDialog(h, 0); return TRUE; }
+        if (HIWORD(wp) == CBN_SELCHANGE && LOWORD(wp) >= ID_CTL0) SyncFgRows(h);   // the engine may have changed
         if (LOWORD(wp) == ID_PRESET && HIWORD(wp) == CBN_SELCHANGE)
         {
             // A preset FILLS IN the rows it owns and writes nothing: what it changes is visible on the
@@ -520,18 +525,21 @@ INT_PTR CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         L"; fill it in if two windows share a title. Both come from the window, never the process.\n\n"
         L"[capture]\nmode=auto\nwindow_class=" + win.cls + L"\nwindow_title=" + win.title + L"\ncursor=0\nborder=0\n"
         L"; class seen when this profile was made: " + win.cls + L"\n\n"
-        L"[nr]\n; enabled = the effect as a whole (F9). model = the DLSS model (~12 ms).\n"
-        L"; artcnn = ArtCNN (~2.3 ms), which needs no model.\n"
-        L"enabled=1\nmodel=1\nartcnn=0\nwork=1920x1080\nchroma=0.25\n"
+        L"[nr]\n; enabled = the neural layer (F9): the DLSS neural-rendering model, 4-12 ms. Off by default.\n"
+        L"; work=auto follows the capture (1080p on 4K); native runs the model at full size.\n"
+        L"enabled=0\nwork=auto\nchroma=0.25\n"
         L"; model_every=N runs the model on every Nth frame off the main path. Raise it (2-4) when the\n"
         L"; game presents faster than the model can follow - e.g. a game running its own frame generation.\n"
         L"model_every=1\n\n"
         L"[filters]\n; its own layer, applied after the neural one: sharpen then vibrance.\n"
         L"; enabled=0 bypasses the layer without losing these values (F6).\n"
-        L"enabled=1\nsharpen=0.4\nsaturation=1.10\n\n"
-        L"[ofa]\ninput=960x540\n\n"
+        L"enabled=0\nsharpen=0.4\nsaturation=1.10\n\n"
+        L"[ofa]\n; optical flow, for the DLSS model and the warp engines (DLSS-G does its own)\ninput=960x540\n\n"
         L"[ui]\nfeather=12\n\n"
-        L"[fg]\n; off by default: leave it off when the game has its own frame generation\nenabled=0\nmultiplier=2\n\n"
+        L"[fg]\n; on by default: turn it off (F8) when the game has its own frame generation\n"
+        L"; engine = dlssg (interpolates, +half a frame of latency) | warp (extrapolates our flow, no added\n"
+        L"; latency) | latewarp (NVIDIA Frame Warp to the mouse at every refresh; needs nvngx_latewarp.dll)\n"
+        L"enabled=1\nengine=dlssg\nmultiplier=2\n\n"
         L"[log]\nfile=justflow." + stem + L".log\n";
     FILE* f = nullptr;
     if (_wfopen_s(&f, path.c_str(), L"wt,ccs=UTF-8") == 0 && f)

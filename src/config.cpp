@@ -62,17 +62,6 @@ HotkeySpec ParseHotkey(std::wstring s, UINT def_vk)
     return h;
 }
 
-std::wstring FormatHotkey(const HotkeySpec& h)
-{
-    std::wstring s;
-    if (h.mods & MOD_CONTROL) s += L"Ctrl+";
-    if (h.mods & MOD_ALT) s += L"Alt+";
-    if (h.mods & MOD_SHIFT) s += L"Shift+";
-    if (h.vk >= VK_F1 && h.vk <= VK_F24) s += L"F" + std::to_wstring(h.vk - VK_F1 + 1);
-    else if (h.vk) s += (wchar_t)h.vk;   // letters/digits: vk == the character
-    return s;
-}
-
 int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
 {
     auto exists = [](const wchar_t* p) { return p && *p && GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES; };
@@ -102,7 +91,6 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.border = B(L"capture", L"border", c.border);
 
     c.nr_enabled = B(L"nr", L"enabled", c.nr_enabled);
-    c.nr_model = B(L"nr", L"model", c.nr_model);
     const std::wstring work = S(L"nr", L"work", L"auto");
     if (swscanf_s(work.c_str(), L"%ux%u", &c.work_w, &c.work_h) != 2) { c.work_w = c.work_h = 0; }
     c.work_auto = !c.work_w || !c.work_h;
@@ -134,7 +122,6 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.warp = F(L"nr", L"warp", c.warp);
     c.warp_reject = F(L"nr", L"warp_reject", c.warp_reject);
     c.model_max_fps = I(L"nr", L"model_max_fps", c.model_max_fps);
-    c.artcnn = B(L"nr", L"artcnn", c.artcnn);
 
     const std::wstring in = S(L"ofa", L"input", L"960x540");
     if (swscanf_s(in.c_str(), L"%ux%u", &c.ofa_w, &c.ofa_h) != 2) { c.ofa_w = 960; c.ofa_h = 540; }
@@ -164,7 +151,8 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.fg_enabled = B(L"fg", L"enabled", c.fg_enabled);
     c.fg_multiplier = I(L"fg", L"multiplier", c.fg_multiplier);
     c.fg_pacing_vblank = S(L"fg", L"pacing", c.fg_pacing_vblank ? L"vblank" : L"timer") != L"timer";
-    c.fg_mv_dilated = B(L"fg", L"mv_dilated", c.fg_mv_dilated);
+    { const std::wstring e = S(L"fg", L"engine", FgEngineName(c.fg_engine)); c.fg_engine = FG_DLSSG; for (int i = 0; i < FG_ENGINE_COUNT; ++i) if (e == FgEngineName(i)) c.fg_engine = i; }
+    c.fg_lw_vfov = F(L"fg", L"lw_fov", c.fg_lw_vfov);
     c.fg_phase_ms = F(L"fg", L"phase_ms", c.fg_phase_ms);
     c.fg_min_gain = F(L"fg", L"min_gain", c.fg_min_gain);
     c.fg_max_in_fps = F(L"fg", L"max_input_fps", c.fg_max_in_fps);
@@ -191,7 +179,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
 bool ConfigNeedsRebuild(const Config& a, const Config& b)
 {
     const NrTuning &x = a.tuning, &y = b.tuning;
-    return a.nr_model != b.nr_model || a.work_w != b.work_w || a.work_h != b.work_h || a.param_block != b.param_block ||
+    return a.work_w != b.work_w || a.work_h != b.work_h || a.param_block != b.param_block ||
            x.preset != y.preset || x.style != y.style || x.intensity != y.intensity || x.local_tone != y.local_tone ||
            x.local_structure != y.local_structure || x.skin_structure != y.skin_structure || x.auto_mask != y.auto_mask || x.ui_correction != y.ui_correction;
 }

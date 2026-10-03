@@ -138,7 +138,6 @@ bool GpuStampsMs(Gpu& g, double* ms, int pairs);
 bool GpuStampsMsSlot(Gpu& g, int slot, double* ms, int pairs);
 // Same three for a secondary context (stamps go into c.list's current slot).
 void GpuCtxStamp(GpuCtx& c, int i);
-bool GpuCtxStampsMs(GpuCtx& c, double* ms, int pairs);
 bool GpuCtxStampsMsSlot(GpuCtx& c, int slot, double* ms, int pairs);
 
 // ---- misc ------------------------------------------------------------------------------------

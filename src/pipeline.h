@@ -32,7 +32,9 @@ struct StageStats
 // per-stage stamp covers. They cannot be one span: GpuEnd advances the ring slot and GpuBegin
 // clears it, so a pair cannot cross a submission. Real frame cost is LIST1 + ofa + LIST2 - the old
 // frame_gpu_ms was a sum of stages with OFA excluded, which reported a fraction of the frame.
-enum PipeStage { PS_SWIZZLE, PS_GRAYDS, PS_OFA, PS_EXPAND, PS_EVAL, PS_COMPOSE, PS_OFA2, PS_ARTCNN, PS_FILTER, PS_LIST1, PS_LIST2, PS_COUNT };   // PS_OFA/PS_OFA2: bench only (CPU round trip); PS_ARTCNN: sync path only
+// The GPU-timed stages, in stamp-pair order: stage i is bracketed by stamps 2i and 2i+1 (PipelineReadStamps
+// reads the first PS_STAMPED pairs in one loop). PS_OFA / PS_OFA2 come last: bench only, a CPU round trip.
+enum PipeStage { PS_SWIZZLE, PS_GRAYDS, PS_EVAL, PS_COMPOSE, PS_EXPAND, PS_FILTER, PS_LIST1, PS_LIST2, PS_STAMPED, PS_OFA = PS_STAMPED, PS_OFA2, PS_COUNT };
 extern const char* const kPipeStageName[PS_COUNT];
 
 struct Pipeline
@@ -49,10 +51,9 @@ struct Pipeline
     HWND     target = nullptr;    // the game window: the settings dialog opens on some other monitor
     Fg*      fg = nullptr;        // the presenter thread: always exists with an overlay (passthrough, or generation while cfg.fg_enabled works)
     ID3D12Resource *color4k = nullptr, *gray = nullptr, *out4k = nullptr;   // rest: NPSR, UAV, COPY_SOURCE
-    ID3D12Resource *sharp4k = nullptr;                                     // out4k sharpened ([nr] sharpen > 0), rest COPY_SOURCE
+    ID3D12Resource *sharp4k = nullptr;                                     // out4k through the filter layer, rest COPY_SOURCE
     ID3D12Resource *shown = nullptr;                                       // the texture handed onward last frame (out4k or sharp4k)
     ID3D12Resource *nr_in = nullptr, *nr_out = nullptr, *mv = nullptr;     // rest: NPSR, UAV, NPSR
-    ID3D12Resource *nr_in2 = nullptr, *nr_in2_m = nullptr;                 // [nr] artcnn: CsArtCnn(nr_in[_m]) -> the evaluate input (NPSR); compose/residual keep nr_in
     // NR feature lifecycle
     bool create_pending = false;
     int  rebuild_countdown = 0;
@@ -71,7 +72,6 @@ struct Pipeline
     // stats (GPU timestamps by stage), cleared by the reader
     StageStats st[PS_COUNT];
     StageStats cpu_wait[4];   // 0 GpuBegin(list1) 1 OfaExecute 2 GpuBegin(list2) 3 FgSubmit (age/pipe latency: FgStats)
-    UINT64     last_stamp_fence = 0;
     UINT64     last_stamp_fence_slot[3] = {};
     int        ofa_cur = 0;       // per-frame OFA input ping-pong (slots 0/1); 2..4 are the model track's held grays
     UINT       frame_index = 0;   // frames fed (main thread)
@@ -104,7 +104,7 @@ struct Pipeline
     // nor cmp_held (main's flow reference until it moves to a newer residual); the model thread only
     // reads them, and asks for the next frame once its flow has consumed them.
     struct ModelFrame { int held = 2; UINT64 fence = 0; UINT index = 0; bool reset = true; };
-    struct ModelParams { float zero_below = 0.5f; float exposure = 1.0f; int max_fps = 0, warmup = 8; bool artcnn = false; };
+    struct ModelParams { float zero_below = 0.5f; float exposure = 1.0f; int max_fps = 0, warmup = 8; };
     GpuCtx     model_ctx;
     std::thread model_thread;
     std::mutex model_mu; std::condition_variable model_cv;   // guards model_stop/model_frame_ready/model_frame/model_params
@@ -116,6 +116,10 @@ struct Pipeline
     bool       model_reset_pending = true;             // main: reset flags accumulated since the last hand-off
     ID3D12Resource* model_src = nullptr;               // RGBA8 native, COPY_DEST at rest
     ID3D12Resource *nr_in_m = nullptr, *nr_out_m = nullptr, *mv_m = nullptr;   // work res: NPSR, UAV, NPSR
+    // latewarp engine: the flow averaged on a 32x18 grid, read back a few frames later for the mouse model
+    ID3D12Resource* mvgrid = nullptr; ID3D12Resource* mvgrid_rb[4] = {};
+    struct { UINT64 fence = 0; LONGLONG t0 = 0, t1 = 0; } mvgrid_q[4];
+    LONGLONG lw_prev_cap = 0;
     ID3D12Resource* mv_res = nullptr;                  // main: motion current frame -> residual's model frame (work res, NPSR)
     ID3D12Resource* residual[2] = {};                  // RGBA16F work res, NPSR at rest
     std::mutex pub_mu;                                 // guards pub_* and model_ms
@@ -126,7 +130,7 @@ struct Pipeline
 };
 
 std::wstring ExeDir();
-// work_w/h == 0 -> justflow.spike.ini [spike] work=WxH (+param_block) else 2560x1440.
+// param_block from justflow.spike.ini; the work size is WorkAuto's (main.cpp), resolved once the capture size is known.
 void ResolveWork(Config& c, const std::wstring& dir);
 // Profiles: profiles\*.ini next to the exe, `names` = the sorted stems. `ini` (--ini) wins when non-empty
 // (index = its stem's slot in names, -1 if none); else justflow.ini [app] profile=<name> when it is not "auto";

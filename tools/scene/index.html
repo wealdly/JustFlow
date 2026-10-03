@@ -187,6 +187,8 @@ async function exportRun() {
     renderer.render(scene, camera);
     const blob = await new Promise(r => renderer.domElement.toBlob(r, 'image/png'));
     await post(`frame_${pad(f)}.png`, blob);
+    // the camera that rendered it (three.js: column-major, column vectors, looking down -Z, GL clip z)
+    await post(`cam_${pad(f)}.json`, JSON.stringify({ view: camera.matrixWorldInverse.elements, proj: camera.projectionMatrix.elements, quat: camera.quaternion.toArray(), pos: camera.position.toArray(), fovY: camera.fov }));
     rememberPrev();
     document.title = `export ${f + 1}/${FRAMES}`;
   }

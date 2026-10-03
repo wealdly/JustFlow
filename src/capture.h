@@ -9,7 +9,7 @@ struct Capture;
 // Opens WGC on `target`. Fails if the window is not capturable. Logs sizes and formats.
 // prefer_dda: DXGI Desktop Duplication on the window's monitor first (monitor refresh rate; the overlay
 // must be excluded from capture), falling back to Windows.Graphics.Capture (60 Hz ceiling).
-Capture* CaptureOpen(Gpu& g, HWND target, bool show_cursor, bool show_border, bool prefer_dda = false);   // default off until main wires the overlay exclusion
+Capture* CaptureOpen(Gpu& g, HWND target, bool show_cursor, bool show_border, bool prefer_dda);
 bool     CaptureIsDda(Capture* c);
 void     CaptureClose(Capture* c);
 

@@ -1,4 +1,10 @@
 #include "fg.h"
+#include "config.h"   // FgEngine
+#include "latewarp.h"
+#include "mouse.h"
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include "log.h"
 #include "ngx_nr.h"          // NgxMutex
 #include "nvsdk_ngx.h"
@@ -32,15 +38,16 @@ static const D3D12_RESOURCE_STATES CSRC = D3D12_RESOURCE_STATE_COPY_SOURCE;
 static const D3D12_RESOURCE_STATES CDST = D3D12_RESOURCE_STATE_COPY_DEST;
 static const int kSlots = 3, kMaxGen = 3;
 
-// Rest states: real CSRC, mv CDST, gen[] CSRC, depth NPSR, disable UAV. state: 0 free, 1 writing
+// Rest states: real CSRC, gen[] CSRC, mv/depth NPSR, disable UAV. state: 0 free, 1 writing
 // (producer), 2 ready, 3 presenting; guarded by Fg::mu.
-// Queues: the main queue writes real/mv (FgRecord copies, fence = Gpu::fence value); the FG queue
-// (Fg::ctx) reads them + writes gen[] (eval_fence = ctx fence value); the present queue reads
-// real/gen[] after waiting on eval_fence. Reuse: the main queue waits on eval_fence and on the last
-// present copy before the next FgRecord copies into the slot.
+// Queues: the main queue writes real (list 2 composes into it; fence = Gpu::fence value) - and gen[]
+// too for engine=warp; the FG queue (Fg::ctx) reads real and writes gen[] for DLSS-G (eval_fence = ctx
+// fence value); the present queue reads real/gen[] after the fence that wrote them. Reuse: FgAcquire
+// makes the main queue wait on eval_fence and on the last present copy before list 2 writes the slot.
 struct FgSlot
 {
-    ID3D12Resource *real = nullptr, *mv = nullptr, *gen[kMaxGen] = {};
+    ID3D12Resource *real = nullptr, *gen[kMaxGen] = {};
+    bool     gen_ok = false;   // engine=warp: the pipeline wrote gen[] for THIS frame (not while paused)
     int    state = 0;
     UINT64 seq = 0, fence = 0, eval_fence = 0;
     int    eval_slot = -1;    // ctx ring slot the evaluate stamped, read back when the fence lands
@@ -60,20 +67,21 @@ struct Fg
     Overlay* ov = nullptr;
     UINT     w = 0, h = 0, mw = 0, mh = 0;
     int      count = 1;                      // generated frames per real frame (0 = passthrough)
-    bool     vblank = true, mv_dilated = true;
+    bool     warp = false;                   // engine=warp: the pipeline extrapolates into s->gen, no DLSS-G
+    bool     lw = false;                     // engine=latewarp: every refresh re-projects the newest frame to the mouse (Reproject)
+    Latewarp* lwf = nullptr; ID3D12Resource* lw_final[2] = {}; float lw_vfov = 1.0472f; ID3D12Resource* lw_last = nullptr;   // lw_last: bench
+    bool     vblank = true;
     std::atomic<double> phase{ 0.0 };        // FgSetTiming (main) -> Presenter
     std::atomic<double> min_gain{ 1.5 };     // governor threshold: presented / submitted (0 = governor off)
     std::atomic<double> max_in{ 90.0 };      // governor floor: no generation while the game already delivers more than this (0 = off)
     std::atomic<bool>   paused{ false };     // governor has generation switched off (HUD)
     std::atomic<UINT>   paused_frames{ 0 };  // real frames presented while paused
     std::wstring dir;
-    const wchar_t* path_list[1] = {};
-    NVSDK_NGX_FeatureCommonInfo common = {};
     HMODULE  dll = nullptr;
     PFN_FgCreate create = nullptr; PFN_FgRelease release = nullptr;
     NVSDK_NGX_Parameter* params = nullptr;
     NVSDK_NGX_Handle* feature = nullptr;
-    ID3D12Resource *depth = nullptr, *disable = nullptr, *disable_rb = nullptr;
+    ID3D12Resource *mv = nullptr, *depth = nullptr, *disable = nullptr, *disable_rb = nullptr;
     FgSlot   slots[kSlots];
     FgSlot*  pending = nullptr;              // reserved by FgRecord, handed over by FgSubmit
     UINT64   seq = 0; double last_submit = 0; bool history = false;
@@ -101,6 +109,20 @@ static bool Fail(Fg* f, const char* why)
     return false;
 }
 
+// The NEWEST ready slot, marked presenting; every older ready slot is dropped on the spot (counted).
+// Caller holds f->mu. nullptr when nothing is ready.
+static FgSlot* TakeNewestLocked(Fg* f)
+{
+    FgSlot* s = nullptr;
+    for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq > s->seq)) s = &x;
+    for (auto& x : f->slots) if (x.state == 2 && &x != s) { x.state = 0; ++f->drops; }
+    if (s) s->state = 3;
+    return s;
+}
+
+// CPU wait for the slot's list-2 writes (its render fence) - before presenting it or anything made from it.
+static bool WaitRendered(Fg* f, const FgSlot* s) { return GpuCtxWait(f->ctx, f->g->fence, s->fence, 10000) || Fail(f, "render fence wait (device removed?)"); }
+
 // ---- NGX calls with SEH (no unwindable objects in these frames) --------------------------------
 static NVSDK_NGX_Result SafeCreate(Fg* f, ID3D12GraphicsCommandList* cl, DWORD* code)
 {
@@ -119,10 +141,9 @@ static NVSDK_NGX_Result SafeEvaluate(Fg* f, ID3D12GraphicsCommandList* cl, NVSDK
 // Copy src (a texture of slot s) into the overlay backbuffer (present queue, after the slot's
 // evaluate on the FG queue; passthrough: after its render fence) and present. `real`: this is the
 // slot's real frame (latency stats).
-static bool Present(Fg* f, ID3D12Resource* src, const FgSlot* s, bool real, bool evaluated = true)
+static bool PresentAfter(Fg* f, ID3D12Resource* src, const FgSlot* s, bool real, ID3D12Fence* after, UINT64 after_value)
 {
-    const bool ok = (f->count && evaluated) ? OverlayPresent(f->ov, src, f->ctx.fence, s->eval_fence) : OverlayPresent(f->ov, src, f->g->fence, s->fence);
-    if (!ok) return Fail(f, "Present failed");
+    if (!OverlayPresent(f->ov, src, after, after_value)) return Fail(f, "Present failed");
     const FgSlot* real_of = real ? s : nullptr;
     const LONGLONG pq = OverlayPresentQpc(f->ov);
     const double t = QpcToMs(pq);
@@ -135,35 +156,60 @@ static bool Present(Fg* f, ID3D12Resource* src, const FgSlot* s, bool real, bool
     return true;
 }
 
+static bool Present(Fg* f, ID3D12Resource* src, const FgSlot* s, bool real, bool evaluated = true)
+{
+    return (f->count && evaluated) ? PresentAfter(f, src, s, real, f->ctx.fence, s->eval_fence) : PresentAfter(f, src, s, real, f->g->fence, s->fence);
+}
+
+// The slot's UI rects copied from src into dst (both COPY_SOURCE at rest): the UI never moves with
+// the world. Axis-aligned boxes from the addon, so a copy per rect - no shader, no descriptors.
+static void CopyRects(Fg* f, ID3D12GraphicsCommandList* cl, const FgSlot* s, ID3D12Resource* src_tex, ID3D12Resource* dst_tex)
+{
+    if (s->nrects <= 0) return;
+    GpuBarrier(cl, dst_tex, CSRC, CDST);
+    D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+    src.pResource = src_tex; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.pResource = dst_tex; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    for (int r = 0; r < s->nrects; ++r)
+    {
+        const UINT x0 = (UINT)std::clamp(s->rects[r].x0, 0, (int)f->w), y0 = (UINT)std::clamp(s->rects[r].y0, 0, (int)f->h);
+        const UINT x1 = (UINT)std::clamp(s->rects[r].x1, 0, (int)f->w), y1 = (UINT)std::clamp(s->rects[r].y1, 0, (int)f->h);
+        if (x1 <= x0 || y1 <= y0) continue;
+        const D3D12_BOX box = { x0, y0, 0, x1, y1, 1 };
+        cl->CopyTextureRegion(&dst, x0, y0, 0, &src, &box);
+    }
+    GpuBarrier(cl, dst_tex, CDST, CSRC);
+}
+
 static bool Evaluate(Fg* f, FgSlot* s, bool interpolate)
 {
     Gpu& g = *f->g;
     if (!GpuCtxBegin(g, f->ctx)) return Fail(f, "FG queue begin (device removed?)");
     ID3D12GraphicsCommandList* cl = f->ctx.list;
     GpuBarrier(cl, s->real, CSRC, NPSR);
-    GpuBarrier(cl, s->mv, CDST, NPSR);
     NVSDK_NGX_DLSSG_Opt_Eval_Params opt = {};
     for (int i = 0; i < 4; ++i)
         opt.cameraViewToClip[i][i] = opt.clipToCameraView[i][i] = opt.clipToLensClip[i][i] = opt.clipToPrevClip[i][i] = opt.prevClipToClip[i][i] = 1.0f;
-    // mv is in work-res pixels (same convention as NeuralScreen's field): 1/size normalises it.
+    // mv: a constant zero field (see below), so the scale is only a formality.
     opt.mvecScale[0] = 1.0f / (float)f->mw; opt.mvecScale[1] = 1.0f / (float)f->mh;
     opt.cameraUp[1] = opt.cameraRight[0] = opt.cameraFwd[2] = 1.0f;
     opt.cameraNear = 0.1f; opt.cameraFar = 1000.0f; opt.cameraFOV = 1.0f;
     opt.cameraAspectRatio = (float)f->w / (float)f->h;
     // Decisions (nvsdk_ngx_params_dlssg.h):
-    //  cameraMotionIncluded = true: OFA measures total screen motion (camera + objects), there is no
-    //    separate camera term to add.
+    //  cameraMotionIncluded = true: there is no separate camera term to add.
     //  orthoProjection = true + identity matrices + flat depth: no camera model exists for a capture.
     //  colorBuffersHDR = false: RGBA8 UNORM (sRGB-encoded SDR) backbuffer.
     //  motionVectorsInvalidValue: "which value represents an invalid (un-initialized) value" - the
-    //    zero-init default (0) would flag every static pixel and every zero_below-zeroed vector as
-    //    invalid. -65504 (min half) never comes out of the expand shader (R16G16_FLOAT, |v| < 4K).
-    //  motionVectorsDilated: "already dilated or not". Ours are a dense per-pixel field (bilinear
-    //    expand of a 1-px OFA grid), not depth-dilated - the honest value is false, but DLSS-G's
-    //    dilation pass keys on depth, which is flat here, so true (the NeuralScreen setting) just
-    //    skips a no-op pass. Default 1; [fg] mv_dilated=0 A/Bs it live (F11 rebuilds the Fg).
+    //    zero-init default (0) would flag our whole zero field as invalid, which scores worse.
+    //  The motion vectors are a constant ZERO field, and that is not a shortcut: DLSS-G measures the
+    //    motion itself and, with this camera model, ignores the values it is given. Scored against
+    //    the true in-between frame (tools/scene rendered at 2x, fed every other frame): our optical
+    //    flow, zeros and a field deliberately 50 px wrong all give 1.089 grey levels at 10 px/frame
+    //    and 3.22 at 5x that motion (run-to-run noise 0.01). Only the validity flag counts - the
+    //    invalid value is worse (1.32). The OFA pass it used to cost was 0.4-0.6 ms a frame.
+    //  motionVectorsDilated = true: skips DLSS-G's dilation pass over a field with nothing in it.
     opt.cameraMotionIncluded = opt.orthoProjection = true;
-    opt.motionVectorsDilated = f->mv_dilated;
+    opt.motionVectorsDilated = true;
     opt.motionVectorsInvalidValue = -65504.0f;
     opt.colorBuffersHDR = false;
     opt.reset = !interpolate;
@@ -171,7 +217,7 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate)
     opt.backbufferSubrectSize = opt.outputInterpSubrectSize = { f->w, f->h };
     opt.multiFrameCount = (unsigned)f->count;
     NVSDK_NGX_D3D12_DLSSG_Eval_Params ep = {};
-    ep.pBackbuffer = s->real; ep.pMVecs = s->mv; ep.pDepth = f->depth; ep.pOutputDisableInterpolation = f->disable;
+    ep.pBackbuffer = s->real; ep.pMVecs = f->mv; ep.pDepth = f->depth; ep.pOutputDisableInterpolation = f->disable;
     f->params->Reset();
     f->params->Set(NVSDK_NGX_DLSSG_Parameter_BackbufferFrameID, (unsigned long long)s->seq);
     NVSDK_NGX_Result r = NVSDK_NGX_Result_Success; DWORD code = 0;
@@ -195,24 +241,8 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate)
     // multiplier up. The rects come from the addon, so they are the game's own frame geometry rather
     // than a guess, and they are axis-aligned: a copy per rect, no shader and no descriptors.
     // Real and generated frames then agree inside the rects, which is what stops the UI shimmering.
-    for (int i = 0; i < f->count && s->nrects > 0; ++i)
-    {
-        GpuBarrier(cl, s->gen[i], CSRC, CDST);
-        D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
-        src.pResource = s->real; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        dst.pResource = s->gen[i]; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        for (int r = 0; r < s->nrects; ++r)
-        {
-            const UINT x0 = (UINT)std::clamp(s->rects[r].x0, 0, (int)f->w), y0 = (UINT)std::clamp(s->rects[r].y0, 0, (int)f->h);
-            const UINT x1 = (UINT)std::clamp(s->rects[r].x1, 0, (int)f->w), y1 = (UINT)std::clamp(s->rects[r].y1, 0, (int)f->h);
-            if (x1 <= x0 || y1 <= y0) continue;
-            const D3D12_BOX box = { x0, y0, 0, x1, y1, 1 };
-            cl->CopyTextureRegion(&dst, x0, y0, 0, &src, &box);
-        }
-        GpuBarrier(cl, s->gen[i], CDST, CSRC);
-    }
-    GpuBarrier(cl, s->mv, NPSR, CDST);
-    f->ctx.queue->Wait(g.fence, s->fence);   // GPU-side: the slot's real + mv copies (list 2) are complete on the main queue
+    for (int i = 0; i < f->count; ++i) CopyRects(f, cl, s, s->real, s->gen[i]);
+    f->ctx.queue->Wait(g.fence, s->fence);   // GPU-side: the slot's real frame (list 2) is complete on the main queue
     const int slot = f->ctx.slot;
     const UINT64 v = GpuCtxEnd(f->ctx);
     if (!v) return Fail(f, "FG queue submit");
@@ -320,9 +350,7 @@ static void Presenter(Fg* f)
             // stability, and 1x backlogged that nothing could escape. Every jitter source pushed it
             // into the second and none pushed it back. Keeping only the freshest frame means a
             // backlog cannot form, so the lag that arms pre-emption never builds.
-            for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq > s->seq)) s = &x;
-            for (auto& x : f->slots) if (x.state == 2 && &x != s) { x.state = 0; ++f->drops; }
-            s->state = 3;
+            s = TakeNewestLocked(f);
             seq_now = f->seq;
         }
         bool ok = true;
@@ -338,15 +366,16 @@ static void Presenter(Fg* f)
         // which `span` has just measured. Requiring seq == prev + 1 spent a generated frame on
         // every dropped one: fg_drops and fg_nopair came back equal on every single line.
         const bool interp = s->interpolate && prev != 0 && span < 100.0;
-        const double full_hold = span * f->count / (f->count + 1);   // how far the real frame trails its arrival while generating
+        const double full_hold = f->warp ? 0.0 : span * f->count / (f->count + 1);   // how far the real frame trails its arrival while generating (extrapolation: not at all)
         const double gmin = f->min_gain.load(std::memory_order_relaxed), gmax_in = f->max_in.load(std::memory_order_relaxed);
         if (gmin <= 0 && gmax_in <= 0 && gstate != G_ENGAGED) { gstate = G_RAMP; }   // governor switched off live: come back smoothly
         if (gstate == G_PAUSED && NowMs() >= resume_at) { gstate = G_RAMP; hold = 0; prev = 0; Log("[fg] governor: probing - generation back on"); }
+        if (f->warp && gstate == G_RAMP) { gstate = G_ENGAGED; f->paused = false; gwin_t0 = NowMs(); gwin_seq0 = seq_now; gwin_presented = 0; gbad = 0; }   // no history to warm, no hold to grow
         if (gstate == G_DRAIN || gstate == G_PAUSED)
         {
             // No Evaluate: the point of pausing is to stop paying. The real frame goes out `hold` after
             // it lands, and hold drains to zero a tenth at a time so no single interval takes the step.
-            ok = GpuCtxWait(f->ctx, f->g->fence, s->fence, 10000) || Fail(f, "render fence wait (device removed?)");
+            ok = WaitRendered(f, s);
             if (gstate == G_DRAIN) { hold = std::min(hold, full_hold) - full_hold * 0.1; if (hold <= 0) { hold = 0; gstate = G_PAUSED; } }
             if (ok && wait_until(NowMs() + hold)) ok = Present(f, s->real, s, true, false);
             ++f->paused_frames; prev = 0; prev_real_target = 0;
@@ -365,38 +394,63 @@ static void Presenter(Fg* f)
         }
         else
         {
-        if (ok) ok = Evaluate(f, s, interp);
+        if (ok && !f->warp) ok = Evaluate(f, s, interp);
         if (ok)
         {
             const double L = span / (f->count + 1);
             // phase shifts every present target; the cadence (prev_real_target) stays unshifted so it never accumulates.
             const double ph = f->phase.load(std::memory_order_relaxed);
-            const double anchor = std::max(NowMs(), prev_real_target + L);
-            double real_target = anchor;
-            bool preempted = false;
-            // Whatever happens next, the first thing to do is wait for `anchor`: generated frame 0
-            // targets it, and with no generation the real frame does. So pace FIRST and collect the
-            // evaluate afterwards - on schedule DLSS-G has had the whole L window to finish and the
-            // fence is already signalled, which turns a ~1.5 ms serial stall into nothing.
-            if (!wait_until(anchor + ph)) { ++f->preempts; preempted = true; }
-            if (!preempted && !EvaluateResolve(f, s, allow)) ok = false;
-            const bool gen = ok && !preempted && interp && allow;
-            if (!interp) ++f->no_pair; else if (!allow) ++f->disabled;
-            if (gen)
+            if (f->warp)
             {
-                for (int i = 0; i < f->count; ++i)
+                // Extrapolation: list 2 already pushed the real frame ahead along its own flow into
+                // s->gen, so nothing is held back. The real frame goes out on the next vblank, each
+                // generated one a further L after it, and a newer real frame cuts the rest short.
+                // No evaluate, no FG queue: the render fence covers the real and generated frames alike.
+                f->dbg = s;
+                const double t0 = NowMs();
+                ok = WaitRendered(f, s);
+                if (ok && wait_until(t0 + ph)) { ok = Present(f, s->real, s, true, false); ++gwin_presented; }
+                if (!interp) ++f->no_pair;
+                for (int i = 0; ok && interp && s->gen_ok && i < f->count; ++i)
                 {
-                    const double target = anchor + i * L + ph;
-                    if (i && !wait_until(target)) { preempted = true; ++f->preempts; break; }   // i == 0: waited above
-                    if (NowMs() - target > L * 0.5 + vb * 0.5) { ++f->drops; continue; }   // stale: skip, never burst
-                    if (!Present(f, s->gen[i], s, false)) { ok = false; break; }
+                    if (!wait_until(t0 + (i + 1) * L + ph)) break;
+                    bool newer = false;
+                    { std::lock_guard<std::mutex> lk(f->mu); newer = newer_ready(s->seq); }
+                    if (newer) { ++f->preempts; break; }
+                    if (!Present(f, s->gen[i], s, false, false)) { ok = false; break; }
                     ++f->gen_shown; ++gwin_presented;
                 }
-                real_target = preempted ? NowMs() : anchor + f->count * L;
+                prev_real_target = t0;
             }
-            // The real frame is never skipped for lateness: only `stop` interrupts (seq MAX = no pre-emption).
-            if (ok && wait_until(real_target + ph)) { ok = Present(f, s->real, s, true); ++gwin_presented; }
-            prev_real_target = real_target;
+            else
+            {
+                const double anchor = std::max(NowMs(), prev_real_target + L);
+                double real_target = anchor;
+                bool preempted = false;
+                // Whatever happens next, the first thing to do is wait for `anchor`: generated frame 0
+                // targets it, and with no generation the real frame does. So pace FIRST and collect the
+                // evaluate afterwards - on schedule DLSS-G has had the whole L window to finish and the
+                // fence is already signalled, which turns a ~1.5 ms serial stall into nothing.
+                if (!wait_until(anchor + ph)) { ++f->preempts; preempted = true; }
+                if (!preempted && !EvaluateResolve(f, s, allow)) ok = false;
+                const bool gen = ok && !preempted && interp && allow;
+                if (!interp) ++f->no_pair; else if (!allow) ++f->disabled;
+                if (gen)
+                {
+                    for (int i = 0; i < f->count; ++i)
+                    {
+                        const double target = anchor + i * L + ph;
+                        if (i && !wait_until(target)) { preempted = true; ++f->preempts; break; }   // i == 0: waited above
+                        if (NowMs() - target > L * 0.5 + vb * 0.5) { ++f->drops; continue; }   // stale: skip, never burst
+                        if (!Present(f, s->gen[i], s, false)) { ok = false; break; }
+                        ++f->gen_shown; ++gwin_presented;
+                    }
+                    real_target = preempted ? NowMs() : anchor + f->count * L;
+                }
+                // The real frame is never skipped for lateness: only `stop` interrupts.
+                if (ok && wait_until(real_target + ph)) { ok = Present(f, s->real, s, true); ++gwin_presented; }
+                prev_real_target = real_target;
+            }
             const double now = NowMs();
             if ((gmin > 0 || gmax_in > 0) && now - gwin_t0 >= 1000.0)
             {
@@ -437,16 +491,67 @@ static void Passthrough(Fg* f)
             std::unique_lock<std::mutex> lk(f->mu);
             f->cv.wait(lk, [&] { for (auto& x : f->slots) if (x.state == 2) return true; return f->stop.load(); });
             if (f->stop) break;
-            for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq > s->seq)) s = &x;
-            for (auto& x : f->slots) if (x.state == 2 && &x != s) { x.state = 0; ++f->drops; }
-            s->state = 3;
+            s = TakeNewestLocked(f);
         }
-        bool ok = GpuCtxWait(f->ctx, f->g->fence, s->fence, 10000) || Fail(f, "render fence wait (device removed?)");
+        bool ok = WaitRendered(f, s);
         if (ok && vb && !OverlayWaitVBlank(f->ov)) vb = false;   // no output: immediate from here on
         if (ok) Present(f, s->real, s, true);
         { std::lock_guard<std::mutex> lk(f->mu); s->state = 0; }
         f->cv.notify_all();   // FgRecord may be waiting for a free slot
     }
+}
+
+// engine=latewarp: Frame Warp at every refresh. The newest real frame is re-projected to the camera
+// the mouse has turned to since the game drew it (mouse.h: counts -> pixels, learned against our own
+// flow), so the view answers the mouse at the display's rate whatever the game's frame rate - Reflex 2's
+// idea from outside the game. With no reliable mouse model yet (or no mouse movement) a frame is shown
+// once, as passthrough would. The rotation is right for a camera turning in place; see latewarp.h for
+// orbit cameras.
+static void Reproject(Fg* f)
+{
+    Gpu& g = *f->g; bool vb = f->vblank; FgSlot* cur = nullptr; bool fresh = false, registered = false; int k = 0;
+    const float focal = (float)f->h * 0.5f / tanf(f->lw_vfov * 0.5f);   // output px per radian at the centre
+    const double period = OverlayVBlankMs(f->ov);
+    while (!f->stop && !f->failed)
+    {
+        if (vb) { if (!OverlayWaitVBlank(f->ov)) { Log("[fg] no DXGI output under the overlay - latewarp paced on the CPU timer"); vb = false; } }
+        else Sleep((DWORD)std::max(1.0, period));
+        {
+            std::lock_guard<std::mutex> lk(f->mu);
+            if (FgSlot* s = TakeNewestLocked(f)) { if (cur) cur->state = 0; cur = s; fresh = true; registered = false; }
+        }
+        f->cv.notify_all();   // FgAcquire may be waiting for a free slot
+        if (!cur) continue;
+        if (fresh && !WaitRendered(f, cur)) break;
+        LARGE_INTEGER now; QueryPerformanceCounter(&now);
+        float sx = 0, sy = 0;
+        bool warp = MousePredict(cur->cap_qpc ? cur->cap_qpc : cur->acq_qpc, now.QuadPart, sx, sy) && fabsf(sx) + fabsf(sy) >= 0.25f;
+        char t[64]; if (GetEnvironmentVariableA("JF_LW_SHIFT", t, sizeof t)) warp = sscanf_s(t, "%f,%f", &sx, &sy) == 2;   // TEST: a fixed shift, no mouse (bench)
+        if (!warp)
+        {
+            if (fresh && !PresentAfter(f, cur->real, cur, true, g.fence, cur->fence)) break;
+            fresh = false; continue;
+        }
+        if (!GpuCtxBegin(g, f->ctx)) { Fail(f, "FG queue begin (device removed?)"); break; }
+        ID3D12GraphicsCommandList* cl = f->ctx.list;
+        ID3D12Resource* dst = f->lw_final[k];
+        OverlayGuard(f->ov, f->ctx.queue);   // the last present copy has finished reading its source
+        GpuBarrier(cl, cur->real, CSRC, NPSR); GpuBarrier(cl, dst, CSRC, UAV);
+        // +yaw moves content left, +pitch moves it up (measured): turn the camera against the shift
+        const bool ok = LatewarpEvaluate(f->lwf, cl, cur->real, dst, !registered, atanf(-sx / focal), atanf(-sy / focal), 0.0f, f->lw_vfov);
+        registered = true;
+        GpuBarrier(cl, dst, UAV, CSRC); GpuBarrier(cl, cur->real, NPSR, CSRC);
+        CopyRects(f, cl, cur, cur->real, dst);
+        f->ctx.queue->Wait(g.fence, cur->fence);
+        const UINT64 v = GpuCtxEnd(f->ctx);
+        if (!ok || !v) { Fail(f, ok ? "latewarp submit" : "latewarp evaluate"); break; }
+        if (!PresentAfter(f, dst, cur, fresh, f->ctx.fence, v)) break;
+        if (!fresh) ++f->gen_shown;   // a refresh the game did not draw
+        f->lw_last = dst; f->dbg = cur;
+        k ^= 1; fresh = false;
+    }
+    { std::lock_guard<std::mutex> lk(f->mu); if (cur) cur->state = 0; }
+    f->cv.notify_all();
 }
 
 // ---- lifecycle ---------------------------------------------------------------------------------------
@@ -484,17 +589,17 @@ static void RaisePresenterPriority(std::thread& t)
         Log("[fg] presenter priority unchanged (err %lu) - normal priority is fine, just jitterier", GetLastError());
 }
 
-Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier, bool vblank_pacing, bool mv_dilated)
+Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier, bool vblank_pacing, int engine, float lw_vfov)
 {
     Fg* f = new Fg;
     f->g = &g; f->ov = ov; f->dir = dir; f->w = out_w; f->h = out_h; f->mw = mv_w; f->mh = mv_h;
     f->count = std::clamp(multiplier, 1, 4) - 1;
-    f->vblank = vblank_pacing; f->mv_dilated = mv_dilated;
+    f->vblank = vblank_pacing; f->warp = engine == FG_WARP; f->lw = engine == FG_LATEWARP; f->lw_vfov = lw_vfov;
     auto fail = [&](const char* why) { Fail(f, why); FgDestroy(f); return (Fg*)nullptr; };
 
     // ponytail: passthrough keeps the ctx too (its event is what the presenter waits on) - one code path.
     if (!GpuCtxInit(g, f->ctx, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, L"fg")) return fail("FG queue");
-    if (!f->count)
+    if (!f->count && !f->lw)
     {
         for (auto& s : f->slots)
             if (!(s.real = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_real"))) return fail("slot textures");
@@ -504,50 +609,55 @@ Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UI
         return f;
     }
 
-    // NGX core: Init is harmless if ngx_nr already did it; the parameter block comes from the core.
-    f->path_list[0] = f->dir.c_str();
-    f->common.PathListInfo.Path = f->path_list; f->common.PathListInfo.Length = 1;
-    f->common.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;
-    NVSDK_NGX_Result r = NVSDK_NGX_D3D12_Init(0x1000000ULL, dir, g.dev, &f->common, NVSDK_NGX_Version_API);
-    Log("[fg] NVSDK_NGX_D3D12_Init -> 0x%08X (%s)", r, NgxResultName(r));
-    r = NVSDK_NGX_D3D12_AllocateParameters(&f->params);
-    if (NVSDK_NGX_FAILED(r) || !f->params) { Log("[fg] AllocateParameters -> 0x%08X (%s)", r, NgxResultName(r)); return fail("no NGX parameter block"); }
-
-    f->create = NVSDK_NGX_D3D12_CreateFeature; f->release = NVSDK_NGX_D3D12_ReleaseFeature; g_fg_evaluate = NVSDK_NGX_D3D12_EvaluateFeature_C;
-    if (!CreateFeature(f, "NGX core"))
+    if (!f->warp && !f->lw)   // extrapolation and Frame Warp need no DLSS-G
     {
-        // Fallback: drive nvngx_dlssg.dll directly (NeuralScreen path) with the same parameter block.
-        const std::wstring path = f->dir + L"\\nvngx_dlssg.dll";
-        f->dll = LoadLibraryW(path.c_str());
-        if (!f->dll) { Log("[fg] %ls did not load (err %lu)", path.c_str(), GetLastError()); return fail("CreateFeature failed and no direct runtime"); }
-        auto init = (PFN_FgInitExt)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_Init_Ext");
-        f->create = (PFN_FgCreate)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_CreateFeature");
-        f->release = (PFN_FgRelease)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_ReleaseFeature");
-        g_fg_evaluate = (PFN_FgEvaluate)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_EvaluateFeature");
-        if (!init || !f->create || !f->release || !g_fg_evaluate) return fail("nvngx_dlssg.dll exports missing");
-        r = init(0x1000000ULL, dir, g.dev, NVSDK_NGX_Version_API, f->params);
-        Log("[fg] direct Init_Ext -> 0x%08X (%s)", r, NgxResultName(r));
-        if (NVSDK_NGX_FAILED(r) || !CreateFeature(f, "nvngx_dlssg.dll")) return fail("CreateFeature failed (core and direct)");
-    }
+        if (!(f->params = NgxCoreParams(g, dir, "[fg]"))) return fail("no NGX parameter block");
+        NVSDK_NGX_Result r;
 
-    // guides + outputs
-    f->depth = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_depth");
-    std::vector<float> flat((size_t)mv_w * mv_h, 0.5f);
-    if (!f->depth || !GpuUploadTex(g, f->depth, flat.data(), mv_w, mv_h, 4, NPSR)) return fail("depth texture");
-    f->disable = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_DEFAULT, UAV, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, L"fg_disable");
-    f->disable_rb = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"fg_disable_rb");
-    if (!f->disable || !f->disable_rb) return fail("disable buffers");
+        f->create = NVSDK_NGX_D3D12_CreateFeature; f->release = NVSDK_NGX_D3D12_ReleaseFeature; g_fg_evaluate = NVSDK_NGX_D3D12_EvaluateFeature_C;
+        if (!CreateFeature(f, "NGX core"))
+        {
+            // Fallback: drive nvngx_dlssg.dll directly (NeuralScreen path) with the same parameter block.
+            const std::wstring path = f->dir + L"\\nvngx_dlssg.dll";
+            f->dll = LoadLibraryW(path.c_str());
+            if (!f->dll) { Log("[fg] %ls did not load (err %lu)", path.c_str(), GetLastError()); return fail("CreateFeature failed and no direct runtime"); }
+            auto init = (PFN_FgInitExt)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_Init_Ext");
+            f->create = (PFN_FgCreate)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_CreateFeature");
+            f->release = (PFN_FgRelease)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_ReleaseFeature");
+            g_fg_evaluate = (PFN_FgEvaluate)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_EvaluateFeature");
+            if (!init || !f->create || !f->release || !g_fg_evaluate) return fail("nvngx_dlssg.dll exports missing");
+            r = init(0x1000000ULL, dir, g.dev, NVSDK_NGX_Version_API, f->params);
+            Log("[fg] direct Init_Ext -> 0x%08X (%s)", r, NgxResultName(r));
+            if (NVSDK_NGX_FAILED(r) || !CreateFeature(f, "nvngx_dlssg.dll")) return fail("CreateFeature failed (core and direct)");
+        }
+
+        // guides + outputs
+        f->depth = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_depth");
+        std::vector<float> flat((size_t)mv_w * mv_h, 0.5f);
+        if (!f->depth || !GpuUploadTex(g, f->depth, flat.data(), mv_w, mv_h, 4, NPSR)) return fail("depth texture");
+        f->mv = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_mv");   // zeros, for good: see Evaluate
+        const std::vector<uint32_t> zero((size_t)mv_w * mv_h, 0);
+        if (!f->mv || !GpuUploadTex(g, f->mv, zero.data(), mv_w, mv_h, 4, NPSR)) return fail("mv texture");
+        f->disable = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_DEFAULT, UAV, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, L"fg_disable");
+        f->disable_rb = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"fg_disable_rb");
+        if (!f->disable || !f->disable_rb) return fail("disable buffers");
+    }
     for (auto& s : f->slots)
     {
         s.real = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_real");
-        s.mv = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, CDST, L"fg_mv");
-        if (!s.real || !s.mv) return fail("slot textures");
-        for (int i = 0; i < f->count; ++i)
+        if (!s.real) return fail("slot textures");
+        for (int i = 0; i < (f->lw ? 0 : f->count); ++i)
             if (!(s.gen[i] = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_gen"))) return fail("slot textures");
     }
-    f->thread = std::thread(Presenter, f);
+    if (f->lw)
+    {
+        if (!(f->lwf = LatewarpCreate(g, dir, out_w, out_h, mv_w, mv_h))) return fail("Frame Warp unavailable (nvngx_latewarp.dll next to the exe?)");
+        for (auto& t : f->lw_final) t = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"lw_final");
+        if (!f->lw_final[0] || !f->lw_final[1]) return fail("latewarp textures");
+    }
+    f->thread = std::thread(f->lw ? Reproject : Presenter, f);
     RaisePresenterPriority(f->thread);
-    Log("[fg] feature created %ux%u mv %ux%u multiplier %d pacing=%s mv_dilated=%d", out_w, out_h, mv_w, mv_h, f->count + 1, vblank_pacing ? "vblank" : "timer", mv_dilated ? 1 : 0);
+    Log("[fg] %s %ux%u multiplier %d pacing=%s", f->lw ? "latewarp engine (Frame Warp to the mouse)" : f->warp ? "warp engine (extrapolation)" : "feature created", out_w, out_h, f->count + 1, vblank_pacing ? "vblank" : "timer");
     return f;
 }
 
@@ -563,8 +673,9 @@ void FgDestroy(Fg* f)
     if (f->feature) { std::lock_guard<std::mutex> lk(NgxMutex()); f->release(f->feature); f->feature = nullptr; }
     // ponytail: no Shutdown1 - NR's parameter block lives in the same core; the refcount leaks until exit.
     if (f->params) NVSDK_NGX_D3D12_DestroyParameters(f->params);
-    for (auto& s : f->slots) { REL(s.real); REL(s.mv); for (auto& t : s.gen) REL(t); }
-    REL(f->depth); REL(f->disable); REL(f->disable_rb);
+    for (auto& s : f->slots) { REL(s.real); for (auto& t : s.gen) REL(t); }
+    REL(f->mv); REL(f->depth); REL(f->disable); REL(f->disable_rb);
+    LatewarpDestroy(f->lwf); for (auto& t : f->lw_final) REL(t);
     GpuCtxShutdown(*f->g, f->ctx);
     if (f->dll) FreeLibrary(f->dll);
     delete f;
@@ -603,12 +714,20 @@ void FgStats(Fg* f, FgStatsOut& out)
 
 ID3D12Resource* FgDebugGen(Fg* f, int i)
 {
+    if (f && f->lw) return i == 0 ? f->lw_last : nullptr;   // latewarp: the last warped refresh
     return (f && f->dbg && i >= 0 && i < f->count) ? f->dbg->gen[i] : nullptr;
 }
 
 bool FgPaused(Fg* f) { return f && f->paused.load(std::memory_order_relaxed); }
 
 ID3D12Resource* FgDebugReal(Fg* f) { return (f && f->dbg) ? f->dbg->real : nullptr; }
+
+ID3D12Resource* FgWarpTarget(Fg* f, int i)
+{
+    if (!f->warp || !f->pending || i < 0 || i >= f->count) return nullptr;
+    f->pending->gen_ok = true;   // the caller writes it in this list
+    return f->pending->gen[i];
+}
 
 ID3D12Resource* FgAcquire(Fg* f)
 {
@@ -640,7 +759,7 @@ ID3D12Resource* FgAcquire(Fg* f)
             f->rec_us += (UINT64)((NowMs() - t_block) * 1000.0); ++f->rec_n;
             if (!s) return nullptr;
         }
-        s->state = 1; eval = s->eval_fence;
+        s->state = 1; eval = s->eval_fence; s->gen_ok = false;
     }
     f->pending = s;
     // GPU-side ordering for the reuse: the FG queue's last evaluate of this slot (reads real/mv,
@@ -651,16 +770,12 @@ ID3D12Resource* FgAcquire(Fg* f)
     return s->real;
 }
 
-bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, const UiRect* rects, int nrects)
+bool FgRecord(Fg* f, const UiRect* rects, int nrects)
 {
     FgSlot* s = f->pending;
     if (f->failed || !s) return false;
     s->nrects = std::clamp(nrects, 0, 64);
     if (s->nrects) memcpy(s->rects, rects, (size_t)s->nrects * sizeof(UiRect));
-    if (!f->count) return true;   // passthrough: no mv
-    GpuBarrier(cl, mv, NPSR, CSRC);
-    cl->CopyResource(s->mv, mv);
-    GpuBarrier(cl, mv, CSRC, NPSR);
     return true;
 }
 

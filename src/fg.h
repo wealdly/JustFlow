@@ -1,6 +1,7 @@
 // Phase 2: DLSS frame generation (nvngx_dlssg.dll, NGX feature 11) on the composed 4K frame.
 // Desktop path lifted from NeuralScreen's frame_generation.inl: identity camera, flat 0.5 depth,
-// our OFA motion field in work-res pixels. A presenter thread owns OverlayPresent while an Fg
+// a constant zero motion field (DLSS-G measures motion itself - see fg.cpp Evaluate).
+// A presenter thread owns OverlayPresent while an Fg
 // exists: it takes the oldest ready slot, evaluates DLSS-G (multiplier - 1) times on its own
 // D3D12 queue (a GpuCtx: the evaluates never queue behind NR / compose on Gpu::queue; the FG
 // queue waits GPU-side on the slot's render fence, the present queue on the evaluate fence),
@@ -21,9 +22,8 @@
 // anchor + k*L, anchor = max(now, previous real frame's target + L) - a continuous cadence when
 // the presenter is early, catch-up when late. Each frame goes out right after the vblank nearest
 // its target. A generated frame later than L/2 (+ half a vblank of quantisation) is skipped, never
-// shown stale; the real frame is never skipped for lateness (it is the freshest content), only
-// pre-empted: a newer ready slot cancels the remaining generated frames, the real frame goes out
-// on the next vblank and the newer slot takes over.
+// shown stale; the real frame is never skipped for lateness (it is the freshest content). A newer
+// ready slot waits for the current one to finish (DLSS-G); engine=warp cuts its generated frames short.
 //
 // Contract:
 //   FgAcquire (main thread, BEFORE list 2 writes the frame): takes a slot and returns the texture
@@ -32,9 +32,9 @@
 //             last present) before returning. No free slot: the OLDEST READY one is taken on the
 //             spot - the presenter keeps only the newest, so that frame was going to be dropped
 //             anyway and waiting for it only stalls the capture. nullptr = no slot, no present.
-//   FgRecord  (main thread, inside list 2): copies mv (NPSR, restored) into the acquired slot.
+//   FgRecord  (main thread): the acquired slot's UI rects.
 //   FgSubmit  (main thread, after GpuEnd): hands the recorded slot to the presenter with the fence
-//             value that completes the copy. reset = no interpolation against the previous frame.
+//             value that completes the frame. reset = no interpolation against the previous frame.
 //             cap_qpc/acq_qpc (QPC ticks, 0 = unknown) feed the age/pipe latency stats.
 // UI rects: the composed frame has them restored by the compose pass, and each generated frame
 // gets the same pixels copied back out of s->real before it is presented - axis-aligned boxes,
@@ -47,23 +47,24 @@
 
 struct Fg;
 
-// vblank_pacing: false = CPU timer schedule (the original path, for comparison).
-// mv_dilated: value of NVSDK_NGX_DLSSG_Opt_Eval_Params::motionVectorsDilated (see Evaluate).
+// vblank_pacing: false = CPU timer schedule.
 Fg*  FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier /* 1 = passthrough, 2..4 */,
-              bool vblank_pacing, bool mv_dilated);
+              bool vblank_pacing, int engine /* 0 DLSS-G, 1 warp (CsWarp extrapolation), 2 latewarp (Frame Warp to the mouse) */,
+              float lw_vfov = 1.0472f /* radians, engine 2 */);
 void FgDestroy(Fg* f);   // stops the presenter (drains the GPU), releases the feature and textures
 int  FgMultiplier(const Fg* f);   // as created (1 = passthrough)
-// mv may be nullptr in passthrough (never read).
-// rects/nrects: the addon UI mask for THIS frame, in output pixels, restored onto every generated
-// frame out of s->real before it is presented.
 // Diagnostics (bench): the generated frames of the slot evaluated most recently, in COPY_SOURCE.
 // i in [0, multiplier-1); nullptr when nothing has been generated yet.
 ID3D12Resource* FgDebugGen(Fg* f, int i);
 ID3D12Resource* FgDebugReal(Fg* f);      // the real frame those generated frames came from
 
 ID3D12Resource* FgAcquire(Fg* f);
-bool FgRecord(Fg* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv,
-              const UiRect* rects = nullptr, int nrects = 0);
+// engine=warp only: generated frame i of the slot FgAcquire took, for the pipeline to write (CSRC at
+// rest, UAV-capable) in the same list as the real frame. nullptr past the last one, or with DLSS-G.
+ID3D12Resource* FgWarpTarget(Fg* f, int i);
+// rects/nrects: the addon UI mask for THIS frame, in output pixels, restored onto every generated
+// frame out of s->real before it is presented.
+bool FgRecord(Fg* f, const UiRect* rects = nullptr, int nrects = 0);
 void FgSubmit(Fg* f, UINT64 render_fence_value, bool reset, LONGLONG cap_qpc, LONGLONG acq_qpc);
 // Live pacing knob (no rebuild): phase_ms shifts every scheduled present target (negative = earlier).
 // min_gain: the governor pauses generation when frames presented / frames submitted stays below

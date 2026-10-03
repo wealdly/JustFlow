@@ -22,7 +22,6 @@ struct HotkeyDef { int id; UINT mods; UINT vk; };   // mods = MOD_CONTROL|MOD_AL
 
 Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, int mode);
 void     OverlayDestroy(Overlay* o);
-bool     OverlayIsDirect(const Overlay* o);   // the mode actually in effect (after fallback)
 // Composed overlay whose swapchain lives on the CALLER's direct queue: the caller renders into
 // OverlayBackbuffer (a render target, state PRESENT at rest) on that queue and calls
 // OverlayPresentRecorded - no staging texture, no copy per present (justflow_xe). OverlayPresent,
@@ -58,9 +57,6 @@ bool OverlayHotkey(Overlay* o, int id);
 // Replace the registered hotkeys (unregister + register on the window thread, synchronous).
 // False = at least one RegisterHotKey failed (the others stay registered).
 bool OverlaySetHotkeys(Overlay* o, const HotkeyDef* keys, int nkeys);
-// Quit requested (WM_CLOSE / quit hotkey handled by main via OverlayHotkey).
-HWND OverlayHwnd(Overlay* o);
-// QPC of the last successful Present call and DXGI frame statistics scanout QPC (0 if unknown).
 // QPC at the last Present. (The scan-out time went with GetFrameStatistics: it was a DXGI call
 // on every present, up to 180 a second, and nothing ever read the answer.)
 LONGLONG OverlayPresentQpc(Overlay* o);
