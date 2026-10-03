@@ -280,7 +280,47 @@ struct Session
     PowerMode engaged_mode = PowerFull;          // the power mode frame generation was created for
     Gpu* gpu = nullptr;                          // for the memory reservation
     LONGLONG last_sysrel = 0; bool reset = true;
+    double fps_avg = 0, fps_avg_t = 0;           // distinct fps, smoothed over ~2 s (the cap advisor)
+    double fps_before = 0;                       // distinct fps when frame generation engaged
+    std::wstring advice, advice_next; double advice_next_t = 0;
 };
+
+// ---- cap advisor --------------------------------------------------------------------------------------------
+// Frame generation paces to the LONGEST gap between the game's frames (the hold), so a game running between
+// unit fractions of the refresh - 45 fps at 120 Hz: gaps of 3, 3, 2 refreshes - pays for its longest gap
+// anyway and shows uneven motion on top. Capped at refresh/n it has the same longest gap, every gap equal,
+// and the difference as spare GPU time (for the game, or for us on a GPU-bound one). The advice: the
+// largest refresh/n the game holds with 2% to spare.
+struct CapAdvice { bool already = false; int n = 0; double cap = 0, saved = 0, extra_ms = 0; };
+static CapAdvice AdviseCap(double fps, double cv, double hz)
+{
+    CapAdvice a;
+    if (fps <= 0 || hz <= 0) return a;
+    const int m = std::max(1, (int)lround(hz / fps));
+    if (fabs(fps - hz / m) < 0.02 * hz / m && cv < 0.3) { a.already = true; a.n = m; a.cap = hz / m; return a; }
+    a.n = std::max(1, (int)ceil(hz / (fps * 0.98)));
+    a.cap = hz / a.n;
+    a.saved = std::max(0.0, 1.0 - a.cap / fps);
+    const int longest = (int)ceil(hz / fps - 1e-6);   // refreshes between frames at worst, uncapped
+    a.extra_ms = std::max(0, a.n - longest) * 1000.0 / hz;
+    return a;
+}
+
+static std::wstring CapAdviceText(const CapAdvice& a, double hz, double slowed)
+{
+    if (!a.n) return L"";
+    wchar_t b[200];
+    if (a.already) swprintf_s(b, L"game capped well: %.0f fps = %.0f Hz / %d, even pacing", a.cap, hz, a.n);
+    else
+    {
+        wchar_t lat[40];
+        if (a.extra_ms > 0.5) swprintf_s(lat, L"+%.0f ms latency", a.extra_ms); else wcscpy_s(lat, L"same latency");
+        swprintf_s(b, L"tip: cap the game at %.0f fps (%.0f/%d) - even pacing, %ls, ~%.0f%% less GPU", a.cap, hz, a.n, lat, a.saved * 100);
+    }
+    std::wstring s = b;
+    if (slowed >= 0.08) { swprintf_s(b, L"GPU-bound: the game lost %.0f%% to frame generation; ", slowed * 100); s = b + s; }
+    return s;
+}
 
 static void Disengage(Session& s, const char* why)
 {
@@ -508,6 +548,25 @@ int RunTrayApp(const std::wstring& dir)
             const int lo = mode == PowerEconomy ? std::max(st.min_fps, 30) : st.min_fps, hi = st.Upper(s.hz);
             const bool steady = rule == 1 || (r.cv < 0.6 && r.span >= kWindowMs * 0.8);
             const bool in_range = r.fps >= lo && r.fps <= hi && r.gap < 100;
+            // ---- cap advisor: on a smoothed rate, a new suggestion only after it held for 3 s
+            {
+                const double dt = s.fps_avg_t > 0 ? now - s.fps_avg_t : 0; s.fps_avg_t = now;
+                const bool live = r.fps > 0 && r.gap < 250 && r.span >= kWindowMs * 0.8;
+                s.fps_avg = !live ? 0 : s.fps_avg <= 0 ? r.fps : s.fps_avg + (r.fps - s.fps_avg) * (1.0 - exp(-dt / 2000.0));
+                std::wstring want;
+                if (live && s.fps_avg >= lo && s.fps_avg <= hi)
+                {
+                    const double slowed = s.fg && s.fps_before > 0 ? 1.0 - s.fps_avg / s.fps_before : 0;
+                    want = CapAdviceText(AdviseCap(s.fps_avg, r.cv, s.hz), s.hz, slowed);
+                }
+                if (want.empty() || want == s.advice) { s.advice_next.clear(); if (want.empty()) s.advice.clear(); }
+                else if (want != s.advice_next) { s.advice_next = want; s.advice_next_t = now; }
+                else if (now - s.advice_next_t >= 3000.0)
+                {
+                    s.advice = want; s.advice_next.clear();
+                    Log("[cap] %ls: %ls (content %.1f fps, cadence cv %.2f, %.0f Hz)", s.exe.c_str(), s.advice.c_str(), s.fps_avg, r.cv, s.hz);
+                }
+            }
             wchar_t line[160];
             if (!s.fg)
             {
@@ -516,6 +575,7 @@ int RunTrayApp(const std::wstring& dir)
                 {
                     Log("[auto] engage %ls: %.1f distinct fps (cadence cv %.2f) at %.0f Hz, power %s%s", s.exe.c_str(), r.fps, r.cv, s.hz, ModeName(mode), rule == 1 ? " [always]" : "");
                     if (!Engage(s, g, st, mode)) { Log("[auto] engage failed"); s.good_since = -1; }
+                    else s.fps_before = s.fps_avg > 0 ? s.fps_avg : r.fps;
                 }
                 if (mode == PowerOff) swprintf_s(line, L"watching %ls - off on battery", s.exe.c_str());
                 else if (r.gap > 1000) swprintf_s(line, L"watching %ls - static", s.exe.c_str());
@@ -561,6 +621,7 @@ int RunTrayApp(const std::wstring& dir)
         {
             status_t = NowMs();
             XeTrayState ts; ts.auto_on = st.auto_on; ts.lock120 = st.lock120; ts.extrap = st.extrap; ts.vsync = st.vsync; ts.status = status; ts.battery = st.battery;
+            ts.advice = s.hwnd ? s.advice : L"";
             ts.icon = s.fg ? XeIconGenerating : (!st.auto_on || (!pw.ac && (pw.saver || st.battery == 2))) ? XeIconOff : XeIconWatching;
             if (!pw.ac) ts.status += pw.saver ? L" [battery saver]" : L" [battery]";
             ts.app = !s.exe.empty() ? s.exe : never_exe; ts.app_rule = !s.exe.empty() ? s.rule : ts.app.empty() ? 0 : 2;

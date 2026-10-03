@@ -46,6 +46,7 @@ static void ShowMenu(XeTray* t)
     { std::lock_guard<std::mutex> lk(t->mu); s = t->state; }
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING | MF_GRAYED, 0, s.status.c_str());
+    if (!s.advice.empty()) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, s.advice.c_str());
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING | (s.auto_on ? MF_CHECKED : 0), ID_AUTO, L"Automatic frame generation");
     AppendMenuW(m, MF_STRING | (s.lock120 ? MF_CHECKED : 0), ID_LOCK, L"Lock output to the display rate");
