@@ -68,7 +68,8 @@ struct GpuCtx
 };
 
 // ---- lifecycle -------------------------------------------------------------------------------
-bool   GpuInit(Gpu& g, int adapter_index /* -1 = first NVIDIA */);
+// vendor: PCI vendor id the adapter must have (0x10DE NVIDIA, 0x8086 Intel, 0 = any hardware adapter).
+bool   GpuInit(Gpu& g, int adapter_index /* -1 = first matching */, UINT vendor = 0x10DE);
 void   GpuShutdown(Gpu& g);
 // Waits for the ring slot, resets allocator + list, resets descriptor ring for the slot.
 bool   GpuBegin(Gpu& g);
@@ -123,6 +124,9 @@ bool GpuMakeCompute(Gpu& g, const void* cso, size_t cso_len, UINT num_srv, UINT 
 void GpuDispatch(Gpu& g, ID3D12GraphicsCommandList* cl, const ComputePso& p, const GpuView* srvs, const GpuView* uavs,
                  const void* consts, UINT groups_x, UINT groups_y, UINT groups_z = 1);
 inline UINT GpuGroups(UINT n, UINT size) { return (n + size - 1) / size; }
+// For draws: allocates n SRVs from the same ring GpuDispatch uses (by `cl`), sets the heap on `cl` and
+// returns the table's GPU handle (ptr 0 = ring exhausted).
+D3D12_GPU_DESCRIPTOR_HANDLE GpuSrvTable(Gpu& g, ID3D12GraphicsCommandList* cl, const GpuView* srvs, UINT n);
 
 // ---- timestamps ---------------------------------------------------------------------------------
 // Write timestamp i (0..kStamps-1) into the current slot. Read back with GpuStamps for a retired frame.

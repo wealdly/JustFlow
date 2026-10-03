@@ -14,7 +14,9 @@ set(FXC "${WINSDK_ROOT}/bin/${WINSDK_VER}/x64/fxc.exe")
 set(CPPWINRT_INC "${WINSDK_ROOT}/Include/${WINSDK_VER}/cppwinrt")
 
 # ---- shaders: fxc -> gen/<name>.h with g_cs_<name> byte array ----------------------------------
-set(SHADERS swizzle gray downscale expand compose residual compose_residual text sharpen artcnn)
+set(SHADERS swizzle gray downscale expand compose residual compose_residual text sharpen artcnn
+    xe_down xe_flow xe_flow_r2 xe_median xe_refine xe_warp xe_interp)
+set(SHADER_DEPS_xe_flow_r2 ${CMAKE_SOURCE_DIR}/shaders/xe_flow.hlsl)   # it #includes xe_flow.hlsl
 set(SHADER_HEADERS)
 # ponytail: artcnn is a ~250 KB generated blob. Embedding it made the unsigned exe look like a
 # packer to Smart App Control (it blocked the binary outright), so it ships as a .cso data file.
@@ -37,8 +39,21 @@ foreach(s ${SHADERS})
         OUTPUT ${out}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/gen
         COMMAND "${FXC}" /nologo /T cs_5_0 /E CSMain /O3 /Fh ${out} /Vn g_cs_${s} ${src}
-        DEPENDS ${src}
+        DEPENDS ${src} ${SHADER_DEPS_${s}}
         COMMENT "fxc ${s}.hlsl")
+    list(APPEND SHADER_HEADERS ${out})
+endforeach()
+# xe_interp_gfx: the interpolation as a vertex + pixel shader pair (render target = the backbuffer)
+foreach(stage vs ps)
+    set(src ${CMAKE_SOURCE_DIR}/shaders/xe_interp_gfx.hlsl)
+    set(out ${CMAKE_BINARY_DIR}/gen/${stage}_xe_interp_gfx.h)
+    string(TOUPPER ${stage} STAGE)
+    add_custom_command(
+        OUTPUT ${out}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/gen
+        COMMAND "${FXC}" /nologo /T ${stage}_5_0 /E ${STAGE}Main /O3 /Fh ${out} /Vn g_${stage}_xe_interp_gfx ${src}
+        DEPENDS ${src} ${CMAKE_SOURCE_DIR}/shaders/xe_interp.hlsl
+        COMMENT "fxc xe_interp_gfx.hlsl (${stage})")
     list(APPEND SHADER_HEADERS ${out})
 endforeach()
 add_custom_target(shaders DEPENDS ${SHADER_HEADERS})
@@ -63,7 +78,7 @@ add_custom_command(TARGET justflow_spike POST_BUILD
 if(EXISTS ${CMAKE_SOURCE_DIR}/src/main.cpp AND EXISTS ${CMAKE_SOURCE_DIR}/src/compose.cpp)
 add_executable(justflow
     src/main.cpp src/d3d.cpp src/capture.cpp src/present.cpp src/ngx_nr.cpp
-    src/nvofa.cpp src/compose.cpp src/bench.cpp src/config.cpp src/fg.cpp src/tray.cpp src/settings.cpp)
+    src/nvofa.cpp src/compose.cpp src/bench.cpp src/png.cpp src/config.cpp src/fg.cpp src/tray.cpp src/settings.cpp)
 add_dependencies(justflow shaders nvngx_dll_justflow)
 target_include_directories(justflow PRIVATE src ${CMAKE_BINARY_DIR}/gen third_party/ngx/include third_party/nvofa "${CPPWINRT_INC}")
 target_link_directories(justflow PRIVATE third_party/ngx/lib)
@@ -80,3 +95,19 @@ add_custom_command(TARGET justflow POST_BUILD
     COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DDEST=$<TARGET_FILE_DIR:justflow> -P ${CMAKE_SOURCE_DIR}/cmake/seed_ini.cmake
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssg.dll $<TARGET_FILE_DIR:justflow>)
 endif()
+
+# ---- justflow_xe: frame generation only, any D3D12 GPU (written for Intel Arc iGPUs) --------------
+# No NGX, no NVOFA, no NVIDIA runtimes: motion comes from xe_flow's compute shaders.
+# justflow_xe.exe is the tray app (windowed subsystem); justflow_xe_cli.exe is the same program as a
+# console exe for --bench / --interp / --live, which shells wait for and whose output can be piped.
+set(XE_SOURCES src/xe_main.cpp src/xe_app.cpp src/xe_tray.cpp src/xe_flow.cpp src/xe_interp.cpp src/xe_fg.cpp
+    src/d3d.cpp src/png.cpp src/capture.cpp src/present.cpp)
+foreach(t justflow_xe justflow_xe_cli)
+    add_executable(${t} ${XE_SOURCES})
+    add_dependencies(${t} shaders)
+    target_include_directories(${t} PRIVATE src ${CMAKE_BINARY_DIR}/gen "${CPPWINRT_INC}")
+    target_link_libraries(${t} PRIVATE d3d11 d3d12 dxgi dwmapi winmm user32 shell32 powrprof windowscodecs ole32 WindowsApp)
+    target_compile_options(${t} PRIVATE /await:strict)
+endforeach()
+set_target_properties(justflow_xe PROPERTIES WIN32_EXECUTABLE ON)
+target_compile_definitions(justflow_xe_cli PRIVATE XE_CONSOLE)

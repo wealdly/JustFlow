@@ -23,6 +23,13 @@ struct HotkeyDef { int id; UINT mods; UINT vk; };   // mods = MOD_CONTROL|MOD_AL
 Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, int mode);
 void     OverlayDestroy(Overlay* o);
 bool     OverlayIsDirect(const Overlay* o);   // the mode actually in effect (after fallback)
+// Composed overlay whose swapchain lives on the CALLER's direct queue: the caller renders into
+// OverlayBackbuffer (a render target, state PRESENT at rest) on that queue and calls
+// OverlayPresentRecorded - no staging texture, no copy per present (justflow_xe). OverlayPresent,
+// OverlayGuard and OverlayDrain are not for this mode; drain the caller's queue instead.
+Overlay* OverlayCreateOnQueue(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, ID3D12CommandQueue* queue);
+ID3D12Resource* OverlayBackbuffer(Overlay* o);   // the buffer the next OverlayPresentRecorded shows
+bool     OverlayPresentRecorded(Overlay* o);
 
 // Copies `src` (COPY_SOURCE, overlay size, RGBA8) into the current backbuffer on the present queue
 // and Presents (0, ALLOW_TEARING). `after`/`after_value`: fence the present queue waits on first

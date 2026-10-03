@@ -21,6 +21,7 @@ static const int kBuffers = 2;
 
 struct Overlay
 {
+    bool external = false;          // swapchain on the caller's queue (OverlayCreateOnQueue)
     Gpu*   g = nullptr;
     HWND   target = nullptr;
     HWND   hwnd = nullptr;
@@ -212,7 +213,19 @@ static void ReleaseBuffers(Overlay* o)
 
 bool OverlayIsDirect(const Overlay* o) { return o->direct; }
 
+static Overlay* Create(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, int mode, ID3D12CommandQueue* queue);
+
 Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, int mode)
+{
+    return Create(g, target, w, h, keys, nkeys, exclude_from_capture, mode, nullptr);
+}
+
+Overlay* OverlayCreateOnQueue(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, ID3D12CommandQueue* queue)
+{
+    return queue ? Create(g, target, w, h, keys, nkeys, false, 0, queue) : nullptr;
+}
+
+static Overlay* Create(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, int mode, ID3D12CommandQueue* queue)
 {
     Overlay* o = new Overlay();
     o->g = &g; o->target = target; o->w = w; o->h = h; o->exclude = exclude_from_capture;
@@ -240,16 +253,19 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
 
     D3D12_COMMAND_QUEUE_DESC qd = {}; qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     o->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (FAILED(g.dev->CreateCommandQueue(&qd, __uuidof(ID3D12CommandQueue), (void**)&o->pq)) ||
+    if (queue) { o->pq = queue; queue->AddRef(); o->external = true; }   // the caller records into the backbuffers on it
+    if ((!queue && FAILED(g.dev->CreateCommandQueue(&qd, __uuidof(ID3D12CommandQueue), (void**)&o->pq))) ||
         FAILED(g.dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, __uuidof(ID3D12CommandAllocator), (void**)&o->alloc)) ||
         FAILED(g.dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, o->alloc, nullptr, __uuidof(ID3D12GraphicsCommandList), (void**)&o->list)) ||
         FAILED(g.dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), (void**)&o->fence)) || !o->event)
     { Log("[present] present queue objects failed"); OverlayDestroy(o); return nullptr; }
     o->list->Close();
-    o->pq->SetName(L"present_queue");
+    if (!queue) o->pq->SetName(L"present_queue");
 
     DXGI_SWAP_CHAIN_DESC1 sd = {};
     sd.Width = w; sd.Height = h; sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count = 1;
+    // On the caller's queue the caller renders straight into the backbuffers: no staging copy per present.
+    // (Not as UAVs: DXGI_USAGE_UNORDERED_ACCESS fails CreateSwapChainForHwnd on the Arc B390 driver.)
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount = kBuffers;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE; sd.Flags = o->flags;
     IDXGISwapChain1* sc1 = nullptr;
@@ -271,7 +287,8 @@ Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
     }
     if (target) OverlayFollow(o, 0);
     const char* mode_name = !o->direct ? "composed" : o->layered ? "direct_layered" : "direct";
-    Log("[present] overlay %ux%u ready (flip-discard%s, %s%s, own present queue)", w, h, tearing ? ", tearing" : "", mode_name, exclude_from_capture ? ", excluded from capture" : "");
+    Log("[present] overlay %ux%u ready (flip-discard%s, %s%s, %s)", w, h, tearing ? ", tearing" : "", mode_name, exclude_from_capture ? ", excluded from capture" : "",
+        queue ? "caller's queue, written in place" : "own present queue");
     Log("[stats] present_mode=%s", mode_name);
     return o;
 }
@@ -309,6 +326,27 @@ static double UsSince(LARGE_INTEGER a)
 {
     LARGE_INTEGER b, f; QueryPerformanceCounter(&b); QueryPerformanceFrequency(&f);
     return (double)(b.QuadPart - a.QuadPart) * 1e6 / (double)f.QuadPart;
+}
+
+ID3D12Resource* OverlayBackbuffer(Overlay* o) { return o->bb[o->swap->GetCurrentBackBufferIndex()]; }
+
+bool OverlayPresentRecorded(Overlay* o)
+{
+    LARGE_INTEGER q; QueryPerformanceCounter(&q);
+    const HRESULT hr = o->swap->Present(0, o->present_flags);
+    o->pres_call_us += (UINT64)UsSince(q);
+    if (FAILED(hr)) { Log("[present] Present failed 0x%08X", (unsigned)hr); return false; }
+    o->present_qpc = q.QuadPart;
+    if (!o->revealed)
+    {
+        ShowWindow(o->hwnd, SW_SHOWNOACTIVATE);
+        SetWindowPos(o->hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        o->revealed = o->shown = true;
+        Log("[present] window revealed on the first Present");
+    }
+    o->pres_total_us += (UINT64)UsSince(q);
+    ++o->pres_n;
+    return true;
 }
 
 bool OverlayPresent(Overlay* o, ID3D12Resource* src, ID3D12Fence* after, UINT64 after_value)
@@ -403,6 +441,20 @@ void OverlayFollow(Overlay* o, int reassert_every)
     {
         if (o->shown) { ShowWindow(o->hwnd, SW_HIDE); o->shown = false; Log("[present] target minimised - overlay hidden"); }
         return;
+    }
+    // Alt-Tab away from a borderless game does not minimise it, so a topmost overlay kept covering
+    // whatever the user switched to - Alt-Tab looked broken. Only show while a window of the game's
+    // own process has the foreground (its launcher/dialogs count; ours never takes it, WS_EX_NOACTIVATE).
+    // No foreground window at all (mid-switch) changes nothing.
+    if (const HWND fg = GetForegroundWindow())
+    {
+        DWORD fg_pid = 0, target_pid = 0;
+        GetWindowThreadProcessId(fg, &fg_pid); GetWindowThreadProcessId(o->target, &target_pid);
+        if (fg != o->hwnd && fg_pid != target_pid)
+        {
+            if (o->shown) { ShowWindow(o->hwnd, SW_HIDE); o->shown = false; Log("[present] target lost the foreground - overlay hidden"); }
+            return;
+        }
     }
     // The geometry query is a cross-process round trip to DWM - ~20 us typical, and unbounded when
     // DWM is busy compositing, which is exactly when we are presenting. It ran once per captured

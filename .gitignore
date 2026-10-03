@@ -7,3 +7,4 @@ spike_results.txt
 bench.csv
 local/
 tools/scene/out/
+build-*/

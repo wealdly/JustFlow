@@ -47,7 +47,7 @@ const char* NgxResultName(unsigned r)
 }
 
 // ---------------------------------------------------------------------------------------------
-bool GpuInit(Gpu& g, int want)
+bool GpuInit(Gpu& g, int want, UINT vendor)
 {
     HRESULT hr = CreateDXGIFactory2(0, __uuidof(IDXGIFactory4), (void**)&g.factory);
     if (FAILED(hr)) { Log("[gpu] CreateDXGIFactory2 failed 0x%08X", hr); return false; }
@@ -57,7 +57,7 @@ bool GpuInit(Gpu& g, int want)
         IDXGIAdapter1* a = nullptr;
         if (g.factory->EnumAdapters1(i, &a) == DXGI_ERROR_NOT_FOUND) break;
         DXGI_ADAPTER_DESC1 d = {}; a->GetDesc1(&d);
-        const bool usable = d.VendorId == 0x10DE && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE);
+        const bool usable = (!vendor || d.VendorId == vendor) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE);
         Log("[gpu] adapter %u: %ls vram=%lluMB luid=%08X:%08X%s", i, d.Description,
             (unsigned long long)(d.DedicatedVideoMemory >> 20), (unsigned)d.AdapterLuid.HighPart,
             (unsigned)d.AdapterLuid.LowPart, usable ? "" : " (skipped)");
@@ -66,8 +66,8 @@ bool GpuInit(Gpu& g, int want)
     }
     if (!pick)
     {
-        if (want >= 0) Log("[gpu] [gpu] adapter=%d is not a usable NVIDIA adapter - see the indices listed above", want);
-        else Log("[gpu] no usable NVIDIA adapter");
+        if (want >= 0) Log("[gpu] [gpu] adapter=%d is not a usable adapter (vendor %04X) - see the indices listed above", want, vendor);
+        else Log("[gpu] no usable adapter (vendor %04X)", vendor);
         return false;
     }
     pick->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&g.adapter);
@@ -466,6 +466,31 @@ static void Dispatch(Gpu& g, ID3D12DescriptorHeap* heap, int slot, UINT& used, b
     if (p.num_srv) cl->SetComputeRootDescriptorTable(idx++, srv_table);
     if (p.num_uav) cl->SetComputeRootDescriptorTable(idx++, uav_table);
     cl->Dispatch(gx, gy, gz);
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE GpuSrvTable(Gpu& g, ID3D12GraphicsCommandList* cl, const GpuView* srvs, UINT n)
+{
+    ID3D12DescriptorHeap* heap = g.desc_heap; int slot = g.slot; UINT* used = &g.desc_used; bool* failed = &g.failed;
+    for (GpuCtx* c : g.ctx) if (c && c->list == cl) { heap = c->desc_heap; slot = c->slot; used = &c->desc_used; failed = &c->failed; }
+    D3D12_GPU_DESCRIPTOR_HANDLE table = {};
+    if (*used + n > Gpu::kDescPerSlot) { Log("[gpu] descriptor ring exhausted"); *failed = true; return table; }
+    const UINT base = slot * Gpu::kDescPerSlot + *used;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = heap->GetCPUDescriptorHandleForHeapStart();
+    table = heap->GetGPUDescriptorHandleForHeapStart();
+    cpu.ptr += (SIZE_T)base * g.desc_size; table.ptr += (UINT64)base * g.desc_size;
+    for (UINT i = 0; i < n; ++i)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC d = {};
+        d.Format = srvs[i].fmt == DXGI_FORMAT_UNKNOWN ? srvs[i].res->GetDesc().Format : srvs[i].fmt;
+        d.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; d.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        d.Texture2D.MipLevels = 1;
+        g.dev->CreateShaderResourceView(srvs[i].res, &d, cpu);
+        cpu.ptr += g.desc_size;
+    }
+    *used += n;
+    ID3D12DescriptorHeap* heaps[] = { heap };
+    cl->SetDescriptorHeaps(1, heaps);
+    return table;
 }
 
 void GpuDispatch(Gpu& g, ID3D12GraphicsCommandList* cl, const ComputePso& p, const GpuView* srvs, const GpuView* uavs,

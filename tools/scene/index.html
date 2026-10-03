@@ -199,7 +199,9 @@ function live() {
   addEventListener('resize', fit); fit();
   const cap = num('fps', 0), stat = document.getElementById('stat'); let last = 0, n = 0, t0 = performance.now();
   renderer.setAnimationLoop(now => {
-    if (cap && now - last < 1000 / cap - 0.5) return; last = now;
+    // the schedule accumulates, so ?fps=45 on a 120 Hz display averages 45 (a 3,3,2-vblank cadence, as a
+    // capped game shows) instead of snapping to every 3rd vblank (40)
+    if (cap && now - last < 1000 / cap - 0.5) return; last = (cap && now - last < 1500 / cap) ? last + 1000 / cap : now;
     update(now / 1000); renderer.render(scene, camera);
     if (++n === 60) { stat.textContent = `${innerWidth}x${innerHeight}  ${(60000 / (now - t0)).toFixed(0)} fps`; n = 0; t0 = now; }
   });
