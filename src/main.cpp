@@ -1226,7 +1226,7 @@ static int RealMain(int argc, char** argv)
 
         bool reset = true, dormant = false;
         LONGLONG last_sysrel = 0;
-        UINT frames = 0, skips = 0, rate_drops = 0; int follow_tick = 0; double last_processed_ms = 0;
+        UINT frames = 0, skips = 0, rate_drops = 0; double last_processed_ms = 0;
         double win_t0 = NowMs();
         std::vector<double> cpu_ms;
         // wall time inside CaptureAcquire (DDA wait + D3D11 copy/Flush), accumulated over the attempts
@@ -1321,7 +1321,9 @@ static int RealMain(int argc, char** argv)
             if (!acquired)
             {
                 ++skips;
-                if ((++follow_tick % 10) == 0) OverlayFollow(p->ov, cfg.reassert_topmost_every);
+                // Every empty wait: a game that lost the foreground often stops rendering, and the
+                // overlay must hide promptly (OverlayFollow throttles its own geometry query to 50 ms).
+                OverlayFollow(p->ov, cfg.reassert_topmost_every);
                 // No sleep here. CaptureAcquire already blocks on its own timeout (AcquireNextFrame /
                 // the frame event), and every early return runs after that wait, so this cannot spin.
                 // The Sleep(1) that was here stalled the capture loop on every MOUSE MOVE: Desktop

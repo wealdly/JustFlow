@@ -2,7 +2,6 @@
 #include "xe_flow.h"
 #include "xe_interp.h"
 #include "log.h"
-#include <dwmapi.h>
 #include <algorithm>
 #include <cstring>
 #include <atomic>
@@ -65,41 +64,29 @@ static bool Fail(XeFg* f, const char* why)
 }
 
 // ---- presenter ------------------------------------------------------------------------------------------
-// One wait per display refresh. IDXGIOutput::WaitForVBlank is the first choice, but on this laptop's
-// Intel eDP panel it returns at once (measured: presents 0.9 ms apart) - panel self-refresh / dynamic
-// refresh leave nothing to wait on. So every source is checked against the refresh period it should
-// take, and 30 short waits in a row demote it: WaitForVBlank -> DwmFlush (the next desktop
-// composition, which is what actually shows a composed overlay) -> a high-resolution waitable timer
-// on the refresh grid.
+// One wait per display refresh: OverlayWaitVBlank (which itself falls back from WaitForVBlank to
+// DwmFlush when the former returns without waiting - this laptop's panel), else a high-resolution
+// waitable timer on the refresh grid.
 struct DisplayClock
 {
-    enum { VBLANK, DWM, TIMER } mode = VBLANK;
-    double vb = 1000.0 / 60; int short_waits = 0; double next = 0;
+    bool timer_mode = false;
+    double vb = 1000.0 / 60; double next = 0;
     HANDLE timer = nullptr;
     ~DisplayClock() { if (timer) CloseHandle(timer); }
     void Wait(Overlay* ov)
     {
-        const double t0 = NowMs();
-        if (mode == VBLANK && !OverlayWaitVBlank(ov)) Demote("WaitForVBlank failed");
-        else if (mode == DWM && FAILED(DwmFlush())) Demote("DwmFlush failed");
-        if (mode == TIMER)
+        if (!timer_mode)
         {
-            if (!timer) timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-            if (next < t0) next = t0 + vb;   // (re)anchor after a stall
-            LARGE_INTEGER due; due.QuadPart = -(LONGLONG)((next - t0) * 10000.0);   // relative, 100 ns units
-            if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, 100);
-            else Sleep((DWORD)std::max(1.0, next - t0));
-            next += vb;
-            return;
+            if (OverlayWaitVBlank(ov)) return;
+            timer_mode = true; Log("[xefg] no usable vblank wait - pacing on a high-resolution timer");
         }
-        if (NowMs() - t0 < vb * 0.25) { if (++short_waits >= 30) Demote("returns without waiting"); }
-        else short_waits = 0;
-    }
-    void Demote(const char* why)
-    {
-        const char* from = mode == VBLANK ? "WaitForVBlank" : "DwmFlush";
-        mode = mode == VBLANK ? DWM : TIMER; short_waits = 0; next = 0;
-        Log("[xefg] display clock: %s %s - pacing on %s", from, why, mode == DWM ? "DwmFlush" : "a high-resolution timer");
+        const double t0 = NowMs();
+        if (!timer) timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        if (next < t0) next = t0 + vb;   // (re)anchor after a stall
+        LARGE_INTEGER due; due.QuadPart = -(LONGLONG)((next - t0) * 10000.0);   // relative, 100 ns units
+        if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, 100);
+        else Sleep((DWORD)std::max(1.0, next - t0));
+        next += vb;
     }
 };
 

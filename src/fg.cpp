@@ -326,10 +326,11 @@ static void Presenter(Fg* f)
             const bool vok = OverlayWaitVBlank(f->ov);
             QueryPerformanceCounter(&vt1);
             f->vbw_us += (UINT64)(QpcToMs(vt1.QuadPart - vt0.QuadPart) * 1000.0); ++f->vbw_n;
-            // WaitForVBlank only fails structurally (no DXGI output under the overlay), so this one
-            // IS permanent and the timer schedule is the right answer. It is logged now rather than
-            // silent - a run that quietly lost vblank pacing looked like a pacing bug for hours.
-            if (!vok) { Log("[fg] no DXGI output under the overlay - pacing on the CPU timer from here"); vb = 0; continue; }
+            // OverlayWaitVBlank only fails structurally (no DXGI output under the overlay, or no wait
+            // that actually waits - it already fell back to DwmFlush), so this one IS permanent and the
+            // timer schedule is the right answer. It is logged now rather than silent - a run that
+            // quietly lost vblank pacing looked like a pacing bug for hours.
+            if (!vok) { Log("[fg] no usable vblank wait under the overlay - pacing on the CPU timer from here"); vb = 0; continue; }
             if (NowMs() + vb * 0.5 >= target) return true;
         }
     };
@@ -514,7 +515,7 @@ static void Reproject(Fg* f)
     const double period = OverlayVBlankMs(f->ov);
     while (!f->stop && !f->failed)
     {
-        if (vb) { if (!OverlayWaitVBlank(f->ov)) { Log("[fg] no DXGI output under the overlay - latewarp paced on the CPU timer"); vb = false; } }
+        if (vb) { if (!OverlayWaitVBlank(f->ov)) { Log("[fg] no usable vblank wait under the overlay - latewarp paced on the CPU timer"); vb = false; } }
         else Sleep((DWORD)std::max(1.0, period));
         {
             std::lock_guard<std::mutex> lk(f->mu);

@@ -50,6 +50,8 @@ struct Overlay
     std::atomic<UINT64> pres_n{ 0 }, pres_prev_us{ 0 }, pres_call_us{ 0 }, pres_total_us{ 0 };
     IDXGIOutput* output = nullptr; bool output_looked_up = false;
     double vblank_ms = 1000.0 / 60.0;
+    bool   vblank_dwm = false;     // WaitForVBlank did not wait: OverlayWaitVBlank uses DwmFlush
+    int    short_waits = 0;        // consecutive waits far shorter than a refresh
 };
 
 static bool WaitPq(Overlay* o, UINT64 v, DWORD ms)
@@ -421,7 +423,26 @@ static IDXGIOutput* Output(Overlay* o)
     return nullptr;
 }
 
-bool OverlayWaitVBlank(Overlay* o) { IDXGIOutput* out = Output(o); return out && SUCCEEDED(out->WaitForVBlank()); }
+// A wait that returns at once is as broken as one that fails, and quieter: on the Intel eDP panel of
+// the laptop justflow_xe was written on, IDXGIOutput::WaitForVBlank returns immediately (panel
+// self-refresh / dynamic refresh leave nothing to wait on) - a presenter pacing on it spun a core and
+// presented 0.9 ms apart. So every wait is checked against the refresh: 30 in a row shorter than a
+// quarter of it demote WaitForVBlank to DwmFlush (the next desktop composition, which is what shows a
+// composed overlay), and if that does not wait either this returns false - every caller already
+// falls back to its CPU timer on false.
+bool OverlayWaitVBlank(Overlay* o)
+{
+    IDXGIOutput* out = Output(o);
+    const double t0 = NowMs();
+    const bool ok = o->vblank_dwm ? SUCCEEDED(DwmFlush()) : (out && SUCCEEDED(out->WaitForVBlank()));
+    if (!ok) return false;
+    if (NowMs() - t0 >= o->vblank_ms * 0.25) { o->short_waits = 0; return true; }
+    if (++o->short_waits < 30) return true;
+    o->short_waits = 0;
+    if (!o->vblank_dwm) { o->vblank_dwm = true; Log("[present] WaitForVBlank returns without waiting - pacing on DwmFlush"); return true; }
+    Log("[present] DwmFlush returns without waiting too - no display clock to pace on");
+    return false;
+}
 double OverlayVBlankMs(Overlay* o) { Output(o); return o->vblank_ms; }
 
 void OverlayHide(Overlay* o)

@@ -42,6 +42,8 @@ void OverlayGuard(Overlay* o, ID3D12CommandQueue* q);
 void OverlayDrain(Overlay* o);
 // Blocks until the next vblank of the monitor under the overlay. False = no DXGI output matches
 // (display on another adapter): caller falls back to timer pacing.
+// Blocks until the next refresh. False = no usable wait (no DXGI output matches, or neither
+// WaitForVBlank nor its DwmFlush fallback actually waits): pace on a CPU timer instead.
 bool   OverlayWaitVBlank(Overlay* o);
 double OverlayVBlankMs(Overlay* o);   // refresh period of that monitor (1000/60 if unknown)
 // Reposition over the target's DWMWA_EXTENDED_FRAME_BOUNDS, hide while the target is iconic,
