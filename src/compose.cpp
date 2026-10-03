@@ -78,7 +78,7 @@ Shaders* ShadersCreate(Gpu& g)
     ok &= GpuMakeCompute(g, g_cs_compose,   sizeof g_cs_compose,   4, 1, 12, s->compose,   L"cs_compose");
     ok &= GpuMakeCompute(g, g_cs_residual,  sizeof g_cs_residual,  2, 1, 2,  s->residual,  L"cs_residual");
     ok &= GpuMakeCompute(g, g_cs_compose_residual, sizeof g_cs_compose_residual, 4, 1, 14, s->compose_residual, L"cs_compose_residual");
-    ok &= GpuMakeCompute(g, g_cs_warp, sizeof g_cs_warp, 3, 1, 6, s->warp, L"cs_warp");
+    ok &= GpuMakeCompute(g, g_cs_warp, sizeof g_cs_warp, 5, 1, 8, s->warp, L"cs_warp");
     ok &= GpuMakeCompute(g, g_cs_mvgrid, sizeof g_cs_mvgrid, 1, 1, 2, s->mvgrid, L"cs_mvgrid");
     ok &= GpuMakeCompute(g, g_cs_text,      sizeof g_cs_text,      1, 1, 24, s->text,      L"cs_text");
     ok &= GpuMakeCompute(g, g_cs_sharpen,   sizeof g_cs_sharpen,   2, 1, 5,  s->sharpen,   L"cs_sharpen");
@@ -206,10 +206,11 @@ void CsComposeResidual(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12
 // src (w x h, NPSR) pushed t intervals ahead along mv (ww x wh backward flow, NPSR) -> out (UAV);
 // rect_tex holds this frame's rects (the compose uploaded them).
 void CsWarp(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* mv, ID3D12Resource* out,
-            UINT w, UINT h, UINT ww, UINT wh, float t, UINT nrects)
+            UINT w, UINT h, UINT ww, UINT wh, float t, UINT nrects, ID3D12Resource* gray_cur, ID3D12Resource* gray_prev, UINT gw, UINT gh)
 {
-    struct { UINT w, h, ww, wh; float t; UINT nrects; } c = { w, h, ww, wh, t, std::min(nrects, 64u) };
-    const GpuView srv[3] = { { src, DXGI_FORMAT_R8G8B8A8_UNORM }, { mv, DXGI_FORMAT_R16G16_FLOAT }, { s->rect_tex, DXGI_FORMAT_R32_SINT } };
+    struct { UINT w, h, ww, wh; float t; UINT nrects, gw, gh; } c = { w, h, ww, wh, t, std::min(nrects, 64u), gw, gh };
+    const GpuView srv[5] = { { src, DXGI_FORMAT_R8G8B8A8_UNORM }, { mv, DXGI_FORMAT_R16G16_FLOAT }, { s->rect_tex, DXGI_FORMAT_R32_SINT },
+                             { gray_cur, DXGI_FORMAT_UNKNOWN }, { gray_prev, DXGI_FORMAT_UNKNOWN } };
     const GpuView uav = { out, DXGI_FORMAT_R8G8B8A8_UNORM };
     GpuDispatch(g, cl, s->warp, srv, &uav, &c, GpuGroups(w, 8), GpuGroups(h, 8));
 }

@@ -811,13 +811,21 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // of an interval each, written straight into the slot. Not while the governor has FG paused.
     if (fg_dst && warp_fg && !FgPaused(p->fg) && FgWarpTarget(p->fg, 0))
     {
+        // The pair the flow came from, for the static-pixel test: OfaExecuteRef ran ofa_cur -> 1 - ofa_cur
+        // and ofa_cur has flipped since, so this frame's gray is 1 - ofa_cur and the previous one ofa_cur.
+        // OFA inputs rest in COMMON; the OFA queue is done with them (p->mv was expanded from its output).
+        ID3D12Resource* gcur = OfaInput(p->ofa, 1 - p->ofa_cur);
+        ID3D12Resource* gprev = OfaInput(p->ofa, p->ofa_cur);
         GpuBarrier(cl, shown, CSRC, NPSR);
+        GpuBarrier(cl, gcur, D3D12_RESOURCE_STATE_COMMON, NPSR); GpuBarrier(cl, gprev, D3D12_RESOURCE_STATE_COMMON, NPSR);
         for (int i = 0; ID3D12Resource* gen = FgWarpTarget(p->fg, i); ++i)
         {
             GpuBarrier(cl, gen, CSRC, UAV);
-            CsWarp(g, p->sh, cl, shown, p->mv, gen, p->w, p->h, p->ww, p->wh, (i + 1.0f) / (float)FgMultiplier(p->fg), (UINT)cp.nrects);
+            CsWarp(g, p->sh, cl, shown, p->mv, gen, p->w, p->h, p->ww, p->wh, (i + 1.0f) / (float)FgMultiplier(p->fg), (UINT)cp.nrects,
+                   gcur, gprev, p->gw, p->gh);
             GpuBarrier(cl, gen, UAV, CSRC);
         }
+        GpuBarrier(cl, gcur, NPSR, D3D12_RESOURCE_STATE_COMMON); GpuBarrier(cl, gprev, NPSR, D3D12_RESOURCE_STATE_COMMON);
         GpuBarrier(cl, shown, NPSR, CSRC);
     }
     const bool fg_recorded = fg_dst && FgRecord(p->fg, cp.rects, (int)cp.nrects);

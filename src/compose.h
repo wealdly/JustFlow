@@ -51,8 +51,10 @@ void CsResidual(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resourc
 void CsComposeResidual(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* native, ID3D12Resource* residual, UINT ww, UINT wh,
                        ID3D12Resource* mv, ID3D12Resource* out, UINT w, UINT h, const ComposeParams& p);
 // Frame generation by extrapolation (engine=warp): src pushed t real-frame intervals ahead along mv.
+// gray_cur/gray_prev: the OFA inputs of this and the previous frame (NPSR), for the static-pixel test.
 void CsWarp(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* mv, ID3D12Resource* out,
-            UINT w, UINT h, UINT ww, UINT wh, float t, UINT nrects);
+            UINT w, UINT h, UINT ww, UINT wh, float t, UINT nrects,
+            ID3D12Resource* gray_cur, ID3D12Resource* gray_prev, UINT gw, UINT gh);
 // mv (ww x wh, NPSR) averaged into a kMvGridW x kMvGridH R32G32_FLOAT grid (UAV), for the latewarp mouse
 // model. The shader (mvgrid.hlsl) has the same two numbers.
 constexpr UINT kMvGridW = 32, kMvGridH = 18, kMvGridPitch = kMvGridW * 8;   // readback row pitch: 256, already aligned
