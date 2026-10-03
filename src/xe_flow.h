@@ -22,6 +22,10 @@ void    XeFlowDestroy(XeFlow* f);
 void    XeFlowPyramid(XeFlow* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* frame, int slot);
 // Flow for the blocks of slot `from` into slot `to`, into output `dir` (0 or 1).
 void    XeFlowEstimate(XeFlow* f, ID3D12GraphicsCommandList* cl, int from, int to, int dir);
+// The static-pixel map of the pair just estimated (xe_static): (e0, ef) per L0 pixel of `cur` - luma
+// disagreement standing still vs following the backward flow (output 1, so estimate cur -> prev into
+// dir 1 first). dst: L0W x L0H R16G16_FLOAT, UAV-capable, NPSR at rest.
+void    XeFlowStaticMap(XeFlow* f, ID3D12GraphicsCommandList* cl, int cur, int prev, ID3D12Resource* dst);
 void    XeFlowSetRefine(XeFlow* f, int passes);    // propagation passes per level, 0..4 (default 1)
 void    XeFlowSetFine(XeFlow* f, int levels);      // the finest N levels search +-2 px instead of +-4 (default 1)
 void    XeFlowSetStamps(XeFlow* f, int base);      // profiling (Gpu list only): stamp pair base + 2k around level k; -1 = off

@@ -15,7 +15,7 @@ set(CPPWINRT_INC "${WINSDK_ROOT}/Include/${WINSDK_VER}/cppwinrt")
 
 # ---- shaders: fxc -> gen/<name>.h with g_cs_<name> byte array ----------------------------------
 set(SHADERS swizzle gray downscale expand compose residual compose_residual text sharpen warp mvgrid
-    xe_down xe_flow xe_flow_r2 xe_median xe_refine xe_warp xe_interp)
+    xe_down xe_flow xe_flow_r2 xe_median xe_refine xe_warp xe_interp xe_static)
 set(SHADER_DEPS_xe_flow_r2 ${CMAKE_SOURCE_DIR}/shaders/xe_flow.hlsl)   # it #includes xe_flow.hlsl
 set(SHADER_HEADERS)
 foreach(s ${SHADERS})

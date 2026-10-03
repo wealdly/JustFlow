@@ -15,9 +15,11 @@ Texture2D<float4>   prev : register(t0);
 Texture2D<float4>   cur  : register(t1);
 Texture2D<float2>   fwd  : register(t2);
 Texture2D<float2>   bwd  : register(t3);
+Texture2D<float2>   stat : register(t4);   // xe_static: (e0, ef) at L0
 RWTexture2D<float4> dst  : register(u0);
 SamplerState        lin  : register(s0);
 cbuffer C : register(b0) { uint w, h, gw, gh; float f, t, tol, tol_rel; uint debug, extrap; };
+
 
 float2 Flow(Texture2D<float2> g, float2 p) { return g.SampleLevel(lin, p / (f * 8.0 * float2(gw, gh)), 0) * f; }
 float4 Color(Texture2D<float4> c, float2 p) { return c.SampleLevel(lin, p / float2(w, h), 0); }
@@ -29,28 +31,64 @@ float Visible(Texture2D<float2> there, Texture2D<float2> back, float2 p)
     return exp(-(e * e) / (k * k));
 }
 
+// ---- static-pixel test: the UI fix ----------------------------------------------------------------------
+// One flow vector covers a 16x16 block and is bilinearly spread further, so static HUD text over a moving
+// world inherits the world's motion: each real frame's text is sampled from a different wrong place and
+// the two are blended - doubled, ghosted words (--ui bench: 35.3 dB inside the HUD vs 44.3 for just
+// repeating the frame). So every pixel also gets the zero-motion hypothesis: xe_static scored both on the
+// pair, per real frame at L0 - (e0, ef) = luma disagreement standing still / following the flow - and
+// where standing still is clearly better, the pixel stands still. Static UI has e0 ~ 0 by construction.
+// Ties (flat areas, where both are ~0) go to standing still when interpolating (it blends the two frames
+// at one place: invisible, and measured +0.3 dB) but to the flow when extrapolating (standing still
+// there freezes low-contrast moving texture: measured -2.5 dB).
+float StaticWeight(float2 x)
+{
+    uint sw, sh; stat.GetDimensions(sw, sh);
+    const float2 e = stat.SampleLevel(lin, x / (f * float2(sw, sh)), 0);
+    return extrap ? saturate((0.6 * e.y - e.x) / (0.4 * e.y + 1e-3))
+                  : saturate((1.0 - e.x / (e.y + 0.02)) / 0.4);
+}
+
 // Extrapolation (extrap = 1): cur pushed t frame intervals AHEAD along its own motion. bwd is previous
 // minus current, so the pixel shown at x a time t later was at x + t * bwd(x) in cur - sampled there,
 // clamped at the edge. Nothing to blend, so no visibility test: a disocclusion is filled by stretching
 // what was beside it (justflow's engine=warp, which measured 1.21 grey levels against the true future
 // frame vs 5.87 for repeating it and 1.09 for interpolation - which shows the frame a whole interval later).
+// Both paths branch on the static map first: a pixel that clearly stands still skips the flow work, one
+// that clearly moves skips the zero-motion samples, and only the boundary between them pays for both
+// (without this the static test added two full-resolution samples to every pixel: 0.22 -> 0.32 ms).
 float4 Extrapolate(float2 x)
 {
-    return float4(Color(cur, x + t * Flow(bwd, x)).rgb, 1);
+    const float ws = StaticWeight(x);
+    float3 c;
+    [branch] if (ws >= 0.999) c = Color(cur, x).rgb;
+    else
+    {
+        c = Color(cur, x + t * Flow(bwd, x)).rgb;
+        [branch] if (ws > 0.001) c = lerp(c, Color(cur, x).rgb, ws);
+    }
+    return float4(c, 1);
 }
 
 float4 Blend(float2 x)
 {
-    const float2 f01 = Flow(fwd, x), f10 = Flow(bwd, x);
-    const float2 p0 = x + (-(1 - t) * t * f01 + t * t * f10);
-    const float2 p1 = x + ((1 - t) * (1 - t) * f01 - t * (1 - t) * f10);
-    const float v0 = Visible(fwd, bwd, p0), v1 = Visible(bwd, fwd, p1);
-    // The floor keeps a both-sides-rejected pixel on the time blend; scaling it by the time weights keeps
-    // t = 0 and t = 1 exactly the real frames (the presenter shows real frames as t = 1).
-    const float w0 = (1 - t) * (v0 + 1e-3), w1 = t * (v1 + 1e-3);
-    float4 c = (w0 * Color(prev, p0) + w1 * Color(cur, p1)) / (w0 + w1);
-    if (debug) c = float4(1 - v0, 1 - v1, 0, 1);   // red: prev side rejected, green: cur side
-    return float4(c.rgb, 1);
+    const float ws = StaticWeight(x);   // the zero-motion hypothesis vs the flow's (see StaticWeight)
+    float3 still = 0, c = 0;
+    [branch] if (ws > 0.001) still = (1 - t) * Color(prev, x).rgb + t * Color(cur, x).rgb;
+    [branch] if (ws >= 0.999) c = debug ? float3(0, 0, 1) : still;
+    else
+    {
+        const float2 f01 = Flow(fwd, x), f10 = Flow(bwd, x);
+        const float2 p0 = x + (-(1 - t) * t * f01 + t * t * f10);
+        const float2 p1 = x + ((1 - t) * (1 - t) * f01 - t * (1 - t) * f10);
+        const float v0 = Visible(fwd, bwd, p0), v1 = Visible(bwd, fwd, p1);
+        // The floor keeps a both-sides-rejected pixel on the time blend; scaling it by the time weights
+        // keeps t = 0 and t = 1 exactly the real frames (the presenter shows real frames as t = 1).
+        const float w0 = (1 - t) * (v0 + 1e-3), w1 = t * (v1 + 1e-3);
+        c = lerp((w0 * Color(prev, p0).rgb + w1 * Color(cur, p1).rgb) / (w0 + w1), still, ws);
+        if (debug) c = float3(1 - v0, 1 - v1, ws);   // red: prev side rejected, green: cur side, blue: stands still
+    }
+    return float4(c, 1);
 }
 
 // The frame at time t at pixel centre x (also the body of xe_interp_gfx's pixel shader).

@@ -22,7 +22,7 @@ static const D3D12_RESOURCE_STATES PRESENT = D3D12_RESOURCE_STATE_PRESENT;
 struct XeFrame { ID3D12Resource* tex = nullptr; double t = 0; UINT64 read = 0; };   // read: ctx fence of the last interp that sampled it
 struct XePair
 {
-    ID3D12Resource *fwd = nullptr, *bwd = nullptr;
+    ID3D12Resource *fwd = nullptr, *bwd = nullptr, *stat = nullptr;   // stat: XeFlowStaticMap at L0
     int a = -1, b = -1;           // frame slots; a == b: a single real frame (no flow)
     bool valid = false, flow = false;
     double ta = 0, tb = 0, submit_ms = 0;
@@ -230,7 +230,7 @@ static void Presenter(XeFg* f)
         ID3D12Resource* dst = OverlayBackbuffer(f->ov);
         const XeFrame& A = f->fr[use->a]; const XeFrame& B = f->fr[use->b];
         GpuCtxStamp(f->ctx, 0);
-        XeInterpRecordRT(g, cl, f->interp, A.tex, B.tex, use->fwd, use->bwd, XeFlowGridW(f->flow), XeFlowGridH(f->flow), XeFlowFactor(f->flow),
+        XeInterpRecordRT(g, cl, f->interp, A.tex, B.tex, use->fwd, use->bwd, use->stat, XeFlowGridW(f->flow), XeFlowGridH(f->flow), XeFlowFactor(f->flow),
                          dst, PRESENT, f->w, f->h, use->flow || x ? t : 1.0f, x);
         GpuCtxStamp(f->ctx, 1);
         const bool snap = f->snap_req && !f->snap_pending && use->flow && t > 0.0f && (x || t < 1.0f);
@@ -279,7 +279,8 @@ XeFg* XeFgCreate(Gpu& g, HWND target, UINT w, UINT h, UINT flow_factor, const Ho
     {
         p.fwd = GpuMakeTex(g, XeFlowGridW(f->flow), XeFlowGridH(f->flow), DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"xefg_fwd");
         p.bwd = GpuMakeTex(g, XeFlowGridW(f->flow), XeFlowGridH(f->flow), DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"xefg_bwd");
-        if (!p.fwd || !p.bwd) return fail("pair grids");
+        p.stat = GpuMakeTex(g, XeFlowL0W(f->flow), XeFlowL0H(f->flow), DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"xefg_static");
+        if (!p.fwd || !p.bwd || !p.stat) return fail("pair grids");
     }
     {
         const D3D12_RESOURCE_DESC d = OverlayBackbuffer(f->ov)->GetDesc();
@@ -301,7 +302,7 @@ void XeFgDestroy(XeFg* f)
     if (f->ctx.queue) GpuCtxWaitIdle(f->ctx, 5000);   // the swapchain's queue: its presents and writes are done
     if (f->ov) { OverlayDestroy(f->ov); f->ov = nullptr; }
     for (auto& fr : f->fr) REL(fr.tex);
-    for (auto& p : f->pr) { REL(p.fwd); REL(p.bwd); }
+    for (auto& p : f->pr) { REL(p.fwd); REL(p.bwd); REL(p.stat); }
     REL(f->snap_rb);
     if (f->ctx.queue) GpuCtxShutdown(*f->g, f->ctx);
     XeInterpRelease(f->interp);
@@ -342,6 +343,7 @@ bool XeFgSubmit(XeFg* f, ID3D12Resource* src, ID3D12Fence* wait_fence, UINT64 wa
         XeFlowPyramid(f->flow, cl, f->fr[i].tex, f->slot);
         XeFlowEstimate(f->flow, cl, f->slot ^ 1, f->slot, 0);   // forward: prev -> cur
         XeFlowEstimate(f->flow, cl, f->slot, f->slot ^ 1, 1);   // backward: cur -> prev
+        XeFlowStaticMap(f->flow, cl, f->slot, f->slot ^ 1, f->pr[j].stat);   // where standing still beats the flow (UI)
         ID3D12Resource* grids[2] = { XeFlowGrid(f->flow, 0), XeFlowGrid(f->flow, 1) };
         ID3D12Resource* dst[2] = { f->pr[j].fwd, f->pr[j].bwd };
         for (int d = 0; d < 2; ++d)

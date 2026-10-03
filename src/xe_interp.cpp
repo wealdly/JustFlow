@@ -9,9 +9,9 @@ static const D3D12_RESOURCE_STATES UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
 bool XeInterpInit(Gpu& g, XeInterp& x)
 {
-    if (!GpuMakeCompute(g, g_cs_xe_interp, sizeof g_cs_xe_interp, 4, 1, 10, x.pso, L"xe_interp")) return false;
+    if (!GpuMakeCompute(g, g_cs_xe_interp, sizeof g_cs_xe_interp, 5, 1, 10, x.pso, L"xe_interp")) return false;
     // Graphics: b0 = 9 root constants, t0..t3 one table, s0 linear clamp - the compute layout minus the UAV.
-    D3D12_DESCRIPTOR_RANGE range = {}; range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; range.NumDescriptors = 4;
+    D3D12_DESCRIPTOR_RANGE range = {}; range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; range.NumDescriptors = 5;
     D3D12_ROOT_PARAMETER params[2] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; params[0].Constants.Num32BitValues = 10;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -52,12 +52,12 @@ void XeInterpRelease(XeInterp& x)
 }
 
 void XeInterpRecordRT(Gpu& g, ID3D12GraphicsCommandList* cl, const XeInterp& x,
-                      ID3D12Resource* prev, ID3D12Resource* cur, ID3D12Resource* fwd, ID3D12Resource* bwd,
+                      ID3D12Resource* prev, ID3D12Resource* cur, ID3D12Resource* fwd, ID3D12Resource* bwd, ID3D12Resource* stat,
                       UINT gw, UINT gh, UINT factor, ID3D12Resource* rt, D3D12_RESOURCE_STATES rt_rest, UINT w, UINT h, float t, bool extrap)
 {
     struct { UINT w, h, gw, gh; float f, t, tol, tol_rel; UINT debug, extrap; } c = { w, h, gw, gh, (float)factor, t, x.tol, x.tol_rel, 0u, extrap ? 1u : 0u };
-    const GpuView srv[4] = { { prev, DXGI_FORMAT_UNKNOWN }, { cur, DXGI_FORMAT_UNKNOWN }, { fwd, DXGI_FORMAT_UNKNOWN }, { bwd, DXGI_FORMAT_UNKNOWN } };
-    const D3D12_GPU_DESCRIPTOR_HANDLE table = GpuSrvTable(g, cl, srv, 4);   // sets the heap
+    const GpuView srv[5] = { { prev, DXGI_FORMAT_UNKNOWN }, { cur, DXGI_FORMAT_UNKNOWN }, { fwd, DXGI_FORMAT_UNKNOWN }, { bwd, DXGI_FORMAT_UNKNOWN }, { stat, DXGI_FORMAT_UNKNOWN } };
+    const D3D12_GPU_DESCRIPTOR_HANDLE table = GpuSrvTable(g, cl, srv, 5);   // sets the heap
     if (!table.ptr) return;
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = x.rtv_heap->GetCPUDescriptorHandleForHeapStart();
     g.dev->CreateRenderTargetView(rt, nullptr, rtv);
@@ -75,11 +75,11 @@ void XeInterpRecordRT(Gpu& g, ID3D12GraphicsCommandList* cl, const XeInterp& x,
 }
 
 void XeInterpRecord(Gpu& g, ID3D12GraphicsCommandList* cl, const XeInterp& x,
-                    ID3D12Resource* prev, ID3D12Resource* cur, ID3D12Resource* fwd, ID3D12Resource* bwd,
+                    ID3D12Resource* prev, ID3D12Resource* cur, ID3D12Resource* fwd, ID3D12Resource* bwd, ID3D12Resource* stat,
                     UINT gw, UINT gh, UINT factor, ID3D12Resource* dst, UINT w, UINT h, float t, bool debug, D3D12_RESOURCE_STATES dst_rest, bool extrap)
 {
     struct { UINT w, h, gw, gh; float f, t, tol, tol_rel; UINT debug, extrap; } c = { w, h, gw, gh, (float)factor, t, x.tol, x.tol_rel, debug ? 1u : 0u, extrap ? 1u : 0u };
-    const GpuView srv[4] = { { prev, DXGI_FORMAT_UNKNOWN }, { cur, DXGI_FORMAT_UNKNOWN }, { fwd, DXGI_FORMAT_UNKNOWN }, { bwd, DXGI_FORMAT_UNKNOWN } };
+    const GpuView srv[5] = { { prev, DXGI_FORMAT_UNKNOWN }, { cur, DXGI_FORMAT_UNKNOWN }, { fwd, DXGI_FORMAT_UNKNOWN }, { bwd, DXGI_FORMAT_UNKNOWN }, { stat, DXGI_FORMAT_UNKNOWN } };
     const GpuView out = { dst, DXGI_FORMAT_UNKNOWN };
     GpuBarrier(cl, dst, dst_rest, UAV);
     GpuDispatch(g, cl, x.pso, srv, &out, &c, GpuGroups(w, 8), GpuGroups(h, 8));

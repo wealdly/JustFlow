@@ -86,11 +86,83 @@ static Image Resize(const Image& a, UINT w, UINT h)
     return b;
 }
 
+// ---- synthetic HUD (--ui) -----------------------------------------------------------------------------
+// The scene's HUD is HTML over the WebGL canvas, so its exports have none. This draws a static one with
+// GDI - semi-transparent panels, an action bar, a minimap, small anti-aliased text like a game chat -
+// and Load composites it onto every frame: static UI over a moving world, the case frame generation
+// smears. Scaled to the frame height (1800 = the sizes below).
+struct UiLayer { UINT w = 0, h = 0; std::vector<uint8_t> rgba; };   // straight alpha
+static UiLayer g_ui;
+
+static void MakeUi(UINT w, UINT h)
+{
+    g_ui = UiLayer(); g_ui.w = w; g_ui.h = h; g_ui.rgba.assign((size_t)w * h * 4, 0);
+    BITMAPINFO bi = {}; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = (LONG)w; bi.bmiHeader.biHeight = -(LONG)h;
+    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr; HDC dc = CreateCompatibleDC(nullptr);
+    HBITMAP bm = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!dc || !bm) { if (dc) DeleteDC(dc); return; }
+    HGDIOBJ old = SelectObject(dc, bm);
+    const float s = h / 1800.0f;
+    auto S = [&](float v) { return (int)(v * s + 0.5f); };
+    const COLORREF panel = RGB(26, 24, 20);   // the panel colour marks panel pixels (alpha 180 below)
+    auto box = [&](int x0, int y0, int x1, int y1, COLORREF c) { RECT r = { x0, y0, x1, y1 }; HBRUSH b = CreateSolidBrush(c); FillRect(dc, &r, b); DeleteObject(b); };
+    HFONT font = CreateFontW(-S(24), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, FIXED_PITCH, L"Consolas");
+    HGDIOBJ oldf = SelectObject(dc, font);
+    SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(236, 236, 236));
+    auto text = [&](int x, int y, const wchar_t* t) { TextOutW(dc, x, y, t, (int)wcslen(t)); };
+    // unit frame
+    box(S(36), S(80), S(600), S(232), panel);
+    text(S(56), S(96), L"Testwalker <JustFlow>");
+    box(S(56), S(140), S(576), S(168), RGB(60, 150, 70)); box(S(56), S(180), S(420), S(208), RGB(60, 90, 180));
+    // chat
+    box(S(36), (int)h - S(420), S(820), (int)h - S(80), panel);
+    const wchar_t* lines[] = { L"[General] the quick brown fox jumps over the lazy dog", L"[Party] small text is what frame generation smears first",
+                               L"[Say] 0123456789 iIlL1 oO0 |/\\-_=+", L"[Trade] WTS [Glowing Thing of Smearing] 99g", L"[Guild] brb, flow fields" };
+    for (int i = 0; i < 5; ++i) text(S(56), (int)h - S(400) + i * S(40), lines[i]);
+    // action bar: 12 framed squares
+    const int bx = (int)w / 2 - S(12 * 72) / 2, by = (int)h - S(150);
+    box(bx - S(10), by - S(10), bx + S(12 * 72), by + S(82), panel);
+    for (int i = 0; i < 12; ++i) box(bx + i * S(72), by, bx + i * S(72) + S(62), by + S(62), i % 3 == 0 ? RGB(150, 60, 50) : i % 3 == 1 ? RGB(50, 80, 150) : RGB(130, 95, 50));
+    // minimap
+    HBRUSH mb = CreateSolidBrush(RGB(34, 52, 30)); HGDIOBJ ob = SelectObject(dc, mb);
+    HPEN pen = CreatePen(PS_SOLID, S(5), RGB(110, 95, 50)); HGDIOBJ op = SelectObject(dc, pen);
+    Ellipse(dc, (int)w - S(360), S(60), (int)w - S(60), S(360));
+    SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(mb); DeleteObject(pen);
+    // fps counter, on a small panel bottom right
+    box((int)w - S(300), (int)h - S(70), (int)w - S(30), (int)h - S(30), panel);
+    text((int)w - S(286), (int)h - S(68), L"2880x1800  45 fps");
+    GdiFlush();
+    const uint8_t* src = (const uint8_t*)bits;   // BGRA, 0 = no UI
+    for (size_t i = 0; i < (size_t)w * h; ++i)
+    {
+        const uint8_t b = src[i * 4], gch = src[i * 4 + 1], r = src[i * 4 + 2];
+        if (!b && !gch && !r) continue;
+        const bool is_panel = r == GetRValue(panel) && gch == GetGValue(panel) && b == GetBValue(panel);
+        uint8_t* o = &g_ui.rgba[i * 4];
+        o[0] = r; o[1] = gch; o[2] = b; o[3] = is_panel ? 180 : 255;
+    }
+    SelectObject(dc, oldf); DeleteObject(font); SelectObject(dc, old); DeleteObject(bm); DeleteDC(dc);
+}
+
+static void CompositeUi(Image& im)
+{
+    if (g_ui.w != im.w || g_ui.h != im.h) return;
+    for (size_t i = 0; i < (size_t)im.w * im.h; ++i)
+    {
+        const uint8_t* u = &g_ui.rgba[i * 4];
+        if (!u[3]) continue;
+        uint8_t* p = &im.px[i * 4];
+        for (int c = 0; c < 3; ++c) p[c] = (uint8_t)((u[c] * u[3] + p[c] * (255 - u[3]) + 127) / 255);
+    }
+}
+
 static bool Load(const std::wstring& path, Image& im, UINT want_w, UINT want_h)
 {
     Image raw;
     if (!LoadPngRgba(path.c_str(), raw.px, raw.w, raw.h)) return false;
     im = (want_w && want_h) ? Resize(raw, want_w, want_h) : std::move(raw);
+    CompositeUi(im);
     return true;
 }
 
@@ -408,6 +480,7 @@ static int RunBench(int argc, char** argv)
     if (profile)
     {
         ID3D12Resource* rtt = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, NPSR, L"prof_rt");
+        ID3D12Resource* stat = GpuMakeTex(g, XeFlowL0W(xf), XeFlowL0H(xf), DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"prof_static");
         XeInterp xi; ComputePso probe; ID3D12Resource* tiny = GpuMakeTex(g, (w + 7) / 8, (h + 7) / 8, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"prof_tiny");
         if (!XeInterpInit(g, xi) || !tiny || !GpuMakeCompute(g, g_cs_gray, sizeof g_cs_gray, 1, 1, 6, probe, L"prof_probe")) return 1;
         const int L = XeFlowLevels(xf), pc = 1 + L + 4;
@@ -420,6 +493,7 @@ static int RunBench(int argc, char** argv)
             ID3D12GraphicsCommandList* cl = g.list;
             GpuStamp(g, cl, 0); XeFlowPyramid(xf, cl, tex[s], s); GpuStamp(g, cl, 1);
             XeFlowEstimate(xf, cl, s, s ^ 1, 1);
+            XeFlowStaticMap(xf, cl, s, s ^ 1, stat);
             const int b = 2 + 2 * L;
             GpuStamp(g, cl, b);
             GpuBarrier(cl, tex[s], NPSR, D3D12_RESOURCE_STATE_COPY_SOURCE); GpuBarrier(cl, recon, NPSR, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -427,7 +501,7 @@ static int RunBench(int argc, char** argv)
             GpuBarrier(cl, tex[s], D3D12_RESOURCE_STATE_COPY_SOURCE, NPSR); GpuBarrier(cl, recon, D3D12_RESOURCE_STATE_COPY_DEST, NPSR);
             GpuStamp(g, cl, b + 1);
             GpuStamp(g, cl, b + 2);
-            XeInterpRecord(g, cl, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), gw, gh, f, recon, w, h, 0.5f);
+            XeInterpRecord(g, cl, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), stat, gw, gh, f, recon, w, h, 0.5f);
             GpuStamp(g, cl, b + 3);
             GpuStamp(g, cl, b + 4);
             const UINT pcn[6] = { w, h, (w + 7) / 8, (h + 7) / 8, 8, 8 };
@@ -435,7 +509,7 @@ static int RunBench(int argc, char** argv)
             GpuBarrier(cl, tiny, NPSR, UAV); GpuDispatch(g, cl, probe, &ps, &pu, pcn, GpuGroups(pcn[2], 8), GpuGroups(pcn[3], 8)); GpuBarrier(cl, tiny, UAV, NPSR);
             GpuStamp(g, cl, b + 5);
             GpuStamp(g, cl, b + 6);
-            XeInterpRecordRT(g, cl, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), gw, gh, f, rtt, NPSR, w, h, 0.5f);
+            XeInterpRecordRT(g, cl, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), stat, gw, gh, f, rtt, NPSR, w, h, 0.5f);
             GpuStamp(g, cl, b + 7);
             if (!GpuEnd(g) || !GpuWaitIdle(g)) return 1;
             double ms[16];
@@ -463,7 +537,7 @@ static int RunBench(int argc, char** argv)
                 Log("[profile] draw vs compute output: %zu of %zu values differ, max difference %d", diff, a.size(), maxd);
             }
         }
-        REL(rtt); REL(tiny); REL(probe.pso); REL(probe.root); XeInterpRelease(xi);
+        REL(rtt); REL(stat); REL(tiny); REL(probe.pso); REL(probe.root); XeInterpRelease(xi);
     }
 
     REL(tex[0]); REL(tex[1]); REL(recon); REL(warp.pso); REL(warp.root);
@@ -481,6 +555,7 @@ static int RunInterpBench(int argc, char** argv)
 {
     std::wstring input; UINT size_w = 0, size_h = 0, factor = 2; int n = 3, pairs = 1 << 30, adapter = -1, refine = 1, fine = 1; UINT vendor = 0;
     bool extrap = false;   // --extrap: predict the frames AFTER the pair (cur pushed ahead), truth = the real ones
+    bool ui = false;       // --ui: a static synthetic HUD on every frame, and PSNR inside it reported apart
     bool dump = false; XeInterp xi;
     for (int i = 1; i < argc; ++i)
     {
@@ -495,6 +570,7 @@ static int RunInterpBench(int argc, char** argv)
         else if (!strcmp(argv[i], "--tol") && more) xi.tol = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--tolrel") && more) xi.tol_rel = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--extrap")) extrap = true;
+        else if (!strcmp(argv[i], "--ui")) ui = true;
         else if (!strcmp(argv[i], "--adapter") && more) adapter = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--vendor") && more) vendor = (UINT)strtoul(argv[++i], nullptr, 16);
         else if (!strcmp(argv[i], "--dump")) dump = true;
@@ -506,6 +582,13 @@ static int RunInterpBench(int argc, char** argv)
     std::vector<Image> fr(n + 1);
     if (!Load(input + L"\\" + names[0], fr[0], size_w, size_h)) return 1;
     const UINT w = fr[0].w, h = fr[0].h;
+    std::vector<uint8_t> ui_mask;   // --ui: pixels the HUD covers
+    if (ui)
+    {
+        MakeUi(w, h); CompositeUi(fr[0]);
+        ui_mask.resize((size_t)w * h);
+        for (size_t i = 0; i < ui_mask.size(); ++i) ui_mask[i] = g_ui.rgba[i * 4 + 3] != 0;
+    }
 
     Gpu g;
     if (!GpuInit(g, adapter, vendor)) return 1;
@@ -515,11 +598,13 @@ static int RunInterpBench(int argc, char** argv)
     ID3D12Resource* tex[2] = { GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, NPSR, L"interp_a"),
                                GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, NPSR, L"interp_b") };
     ID3D12Resource* out = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"interp_out");
+    ID3D12Resource* stat = GpuMakeTex(g, XeFlowL0W(xf), XeFlowL0H(xf), DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"interp_static");
     if (!tex[0] || !tex[1] || !out) return 1;
     Log("[interp] %ls: %zu frames of %ux%u, base = every %dth frame, %d generated per pair, tol %.2f + %.2f x motion",
         input.c_str(), names.size(), w, h, n, n - 1, xi.tol, xi.tol_rel);
 
     std::vector<double> ours[8], rep[8], mix[8], cost;   // per j
+    std::vector<double> ui_ours, ui_rep;                 // --ui: PSNR inside the HUD
     std::vector<uint8_t> px((size_t)w * h * 4), blend((size_t)w * h * 4);
     int done = 0;
     for (size_t k = 0; (k + 1) * n < names.size() && done < pairs; ++k, ++done)
@@ -537,10 +622,10 @@ static int RunInterpBench(int argc, char** argv)
             if (j == 1)
             {
                 XeFlowPyramid(xf, g.list, tex[0], 0); XeFlowPyramid(xf, g.list, tex[1], 1);
-                XeFlowEstimate(xf, g.list, 0, 1, 0); XeFlowEstimate(xf, g.list, 1, 0, 1);
+                XeFlowEstimate(xf, g.list, 0, 1, 0); XeFlowEstimate(xf, g.list, 1, 0, 1); XeFlowStaticMap(xf, g.list, 1, 0, stat);
             }
             GpuStamp(g, g.list, 0);
-            XeInterpRecord(g, g.list, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), XeFlowGridW(xf), XeFlowGridH(xf), XeFlowFactor(xf), out, w, h, t,
+            XeInterpRecord(g, g.list, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), stat, XeFlowGridW(xf), XeFlowGridH(xf), XeFlowFactor(xf), out, w, h, t,
                            false, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, extrap);
             GpuStamp(g, g.list, 1);
             if (!GpuEnd(g) || !GpuWaitIdle(g) || !GpuReadbackTex(g, out, px.data(), w, h, 4, NPSR)) return 1;
@@ -554,12 +639,13 @@ static int RunInterpBench(int argc, char** argv)
             ours[j].push_back(Psnr(truth, px, 16));
             rep[j].push_back(Psnr(truth, extrap ? fr[n].px : t <= 0.5f ? fr[0].px : fr[n].px, 16));
             mix[j].push_back(Psnr(truth, blend, 16));
+            if (ui) { ui_ours.push_back(Psnr(truth, px, 16, &ui_mask)); ui_rep.push_back(Psnr(truth, extrap ? fr[n].px : t <= 0.5f ? fr[0].px : fr[n].px, 16, &ui_mask)); }
             if (dump)
             {
                 wchar_t path[MAX_PATH];
                 _snwprintf_s(path, _TRUNCATE, L"%ls\\xe_interp_%03zu_%d.png", dir.c_str(), k, j); SavePngRgba(path, px.data(), w, h);
                 if (!GpuBegin(g)) return 1;
-                XeInterpRecord(g, g.list, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), XeFlowGridW(xf), XeFlowGridH(xf), XeFlowFactor(xf), out, w, h, t, true);
+                XeInterpRecord(g, g.list, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), stat, XeFlowGridW(xf), XeFlowGridH(xf), XeFlowFactor(xf), out, w, h, t, true);
                 if (!GpuEnd(g) || !GpuWaitIdle(g) || !GpuReadbackTex(g, out, px.data(), w, h, 4, NPSR)) return 1;
                 _snwprintf_s(path, _TRUNCATE, L"%ls\\xe_vis_%03zu_%d.png", dir.c_str(), k, j); SavePngRgba(path, px.data(), w, h);
             }
@@ -573,10 +659,12 @@ static int RunInterpBench(int argc, char** argv)
             j, n, ours[j].size(), mean(ours[j]), mean(rep[j]), mean(mix[j]));
         all[0] += mean(ours[j]); all[1] += mean(rep[j]); all[2] += mean(mix[j]); ++nall;
     }
+    if (ui) Log("[interp] inside the HUD (%.1f%% of the frame): ours %.2f dB | repeat nearest %.2f dB   (a perfect static UI is identical in every frame)",
+                100.0 * std::count(ui_mask.begin(), ui_mask.end(), 1) / ui_mask.size(), mean(ui_ours), mean(ui_rep));
     std::sort(cost.begin(), cost.end());
     Log("[interp] all generated frames: ours %.2f dB (%+.2f vs repeat, %+.2f vs crossfade); interpolation pass %.3f ms median per generated frame (%ls)",
         all[0] / nall, (all[0] - all[1]) / nall, (all[0] - all[2]) / nall, cost.empty() ? -1.0 : cost[cost.size() / 2], L"flow not included");
-    REL(tex[0]); REL(tex[1]); REL(out);
+    REL(tex[0]); REL(tex[1]); REL(out); REL(stat);
     XeInterpRelease(xi); XeFlowDestroy(xf); GpuShutdown(g);
     return 0;
 }
@@ -740,7 +828,7 @@ static int CliMain(int argc, char** argv)
     fprintf(stderr, "justflow_xe: frame generation for any D3D12 GPU (work in progress)\n"
                     "  --bench <dir|png> [--size WxH] [--factor N] [--lambda X] [--refine N] [--frames N] [--pairs N] [--dump]\n"
                     "          [--shift DX,DY] [--zoom Z] [--adapter I] [--vendor HEX]\n"
-                    "  --interp N --seq <dir> [--size WxH] [--pairs K] [--tol PX] [--tolrel X] [--refine N] [--dump]\n"
+                    "  --interp N --seq <dir> [--size WxH] [--pairs K] [--tol PX] [--tolrel X] [--refine N] [--extrap] [--ui] [--dump]\n"
                     "  --live --window <title substring> [--class C] [--off] [--factor N] [--margin MS] [--max-in FPS] [--cursor] [--snap S] [--extrap]\n");
     return 2;
 }

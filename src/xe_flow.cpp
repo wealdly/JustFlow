@@ -5,6 +5,7 @@
 #include "cs_xe_flow.h"
 #include "cs_xe_flow_r2.h"
 #include "cs_xe_median.h"
+#include "cs_xe_static.h"
 #include "cs_xe_refine.h"
 #include <algorithm>
 
@@ -24,7 +25,7 @@ struct XeFlow
     int  refine = 1;                                 // same-level propagation passes per level
     int  fine = 1;                                   // the finest `fine` levels search +-2 px (xe_flow_r2), the rest +-4
     int  stamp_base = -1;                            // profiling: GpuStamp pair stamp_base + 2k around level k (-1 = off)
-    ComputePso gray, down, flow, flow_r2, median, prop;
+    ComputePso gray, down, flow, flow_r2, median, prop, stat;
     ID3D12Resource* pyr[2][kMaxLevels] = {};         // R8 luma, NPSR
     ID3D12Resource* grid[2][kMaxLevels] = {};        // R16G16F flow per direction, NPSR
     ID3D12Resource* tmp[kMaxLevels] = {};            // raw (pre-median) flow, NPSR
@@ -51,7 +52,8 @@ XeFlow* XeFlowCreate(Gpu& g, UINT w, UINT h, UINT factor, int levels)
            && GpuMakeCompute(g, g_cs_xe_flow, sizeof g_cs_xe_flow, 3, 1, 7, f->flow, L"xe_flow")
            && GpuMakeCompute(g, g_cs_xe_flow_r2, sizeof g_cs_xe_flow_r2, 3, 1, 7, f->flow_r2, L"xe_flow_r2")
            && GpuMakeCompute(g, g_cs_xe_median, sizeof g_cs_xe_median, 1, 1, 2, f->median, L"xe_median")
-           && GpuMakeCompute(g, g_cs_xe_refine, sizeof g_cs_xe_refine, 3, 1, 5, f->prop, L"xe_refine");
+           && GpuMakeCompute(g, g_cs_xe_refine, sizeof g_cs_xe_refine, 3, 1, 5, f->prop, L"xe_refine")
+           && GpuMakeCompute(g, g_cs_xe_static, sizeof g_cs_xe_static, 3, 1, 4, f->stat, L"xe_static");
     for (int k = 0; ok && k < n; ++k)
     {
         f->gw[k] = (f->lw[k] + kBlock - 1) / kBlock; f->gh[k] = (f->lh[k] + kBlock - 1) / kBlock;
@@ -72,7 +74,7 @@ void XeFlowDestroy(XeFlow* f)
 {
     if (!f) return;
     for (int k = 0; k < kMaxLevels; ++k) { REL(f->pyr[0][k]); REL(f->pyr[1][k]); REL(f->grid[0][k]); REL(f->grid[1][k]); REL(f->tmp[k]); }
-    for (ComputePso* p : { &f->gray, &f->down, &f->flow, &f->flow_r2, &f->median, &f->prop }) { REL(p->pso); REL(p->root); }
+    for (ComputePso* p : { &f->gray, &f->down, &f->flow, &f->flow_r2, &f->median, &f->prop, &f->stat }) { REL(p->pso); REL(p->root); }
     delete f;
 }
 
@@ -140,6 +142,16 @@ void XeFlowEstimate(XeFlow* f, ID3D12GraphicsCommandList* cl, int from, int to, 
 
 void XeFlowSetLambda(XeFlow* f, float lambda) { f->lambda = std::max(0.0f, lambda); }
 void XeFlowSetRefine(XeFlow* f, int passes) { f->refine = std::clamp(passes, 0, 4); }
+
+void XeFlowStaticMap(XeFlow* f, ID3D12GraphicsCommandList* cl, int cur, int prev, ID3D12Resource* dst)
+{
+    const UINT c[4] = { f->lw[0], f->lh[0], f->gw[0], f->gh[0] };
+    const GpuView srv[3] = { { f->pyr[cur & 1][0], DXGI_FORMAT_UNKNOWN }, { f->pyr[prev & 1][0], DXGI_FORMAT_UNKNOWN }, { f->grid[1][0], DXGI_FORMAT_UNKNOWN } };
+    const GpuView uav = { dst, DXGI_FORMAT_UNKNOWN };
+    GpuBarrier(cl, dst, NPSR, UAV);
+    GpuDispatch(*f->g, cl, f->stat, srv, &uav, c, GpuGroups(f->lw[0], 8), GpuGroups(f->lh[0], 8));
+    GpuBarrier(cl, dst, UAV, NPSR);
+}
 void XeFlowSetStamps(XeFlow* f, int base) { f->stamp_base = base; }
 void XeFlowSetFine(XeFlow* f, int levels) { f->fine = std::clamp(levels, 0, kMaxLevels); }
 ID3D12Resource* XeFlowGrid(XeFlow* f, int dir) { return f->grid[dir & 1][0]; }
