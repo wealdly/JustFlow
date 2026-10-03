@@ -9,11 +9,11 @@ static const D3D12_RESOURCE_STATES UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
 bool XeInterpInit(Gpu& g, XeInterp& x)
 {
-    if (!GpuMakeCompute(g, g_cs_xe_interp, sizeof g_cs_xe_interp, 5, 1, 10, x.pso, L"xe_interp")) return false;
+    if (!GpuMakeCompute(g, g_cs_xe_interp, sizeof g_cs_xe_interp, 5, 1, 11, x.pso, L"xe_interp")) return false;
     // Graphics: b0 = 9 root constants, t0..t3 one table, s0 linear clamp - the compute layout minus the UAV.
     D3D12_DESCRIPTOR_RANGE range = {}; range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; range.NumDescriptors = 5;
     D3D12_ROOT_PARAMETER params[2] = {};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; params[0].Constants.Num32BitValues = 10;
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; params[0].Constants.Num32BitValues = 11;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; params[1].DescriptorTable.NumDescriptorRanges = 1;
     params[1].DescriptorTable.pDescriptorRanges = &range; params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -53,9 +53,9 @@ void XeInterpRelease(XeInterp& x)
 
 void XeInterpRecordRT(Gpu& g, ID3D12GraphicsCommandList* cl, const XeInterp& x,
                       ID3D12Resource* prev, ID3D12Resource* cur, ID3D12Resource* fwd, ID3D12Resource* bwd, ID3D12Resource* stat,
-                      UINT gw, UINT gh, UINT factor, ID3D12Resource* rt, D3D12_RESOURCE_STATES rt_rest, UINT w, UINT h, float t, bool extrap)
+                      UINT gw, UINT gh, UINT factor, UINT cell, ID3D12Resource* rt, D3D12_RESOURCE_STATES rt_rest, UINT w, UINT h, float t, bool extrap)
 {
-    struct { UINT w, h, gw, gh; float f, t, tol, tol_rel; UINT debug, extrap; } c = { w, h, gw, gh, (float)factor, t, x.tol, x.tol_rel, 0u, extrap ? 1u : 0u };
+    struct { UINT w, h, gw, gh; float f, t, tol, tol_rel; UINT debug, extrap; float cell; } c = { w, h, gw, gh, (float)factor, t, x.tol, x.tol_rel, 0u, extrap ? 1u : 0u, (float)cell };
     const GpuView srv[5] = { { prev, DXGI_FORMAT_UNKNOWN }, { cur, DXGI_FORMAT_UNKNOWN }, { fwd, DXGI_FORMAT_UNKNOWN }, { bwd, DXGI_FORMAT_UNKNOWN }, { stat, DXGI_FORMAT_UNKNOWN } };
     const D3D12_GPU_DESCRIPTOR_HANDLE table = GpuSrvTable(g, cl, srv, 5);   // sets the heap
     if (!table.ptr) return;
@@ -64,7 +64,7 @@ void XeInterpRecordRT(Gpu& g, ID3D12GraphicsCommandList* cl, const XeInterp& x,
     GpuBarrier(cl, rt, rt_rest, D3D12_RESOURCE_STATE_RENDER_TARGET);
     cl->SetGraphicsRootSignature(x.gfx_root);
     cl->SetPipelineState(x.gfx_pso);
-    cl->SetGraphicsRoot32BitConstants(0, 10, &c, 0);
+    cl->SetGraphicsRoot32BitConstants(0, 11, &c, 0);
     cl->SetGraphicsRootDescriptorTable(1, table);
     const D3D12_VIEWPORT vp = { 0, 0, (float)w, (float)h, 0, 1 }; const D3D12_RECT sc = { 0, 0, (LONG)w, (LONG)h };
     cl->RSSetViewports(1, &vp); cl->RSSetScissorRects(1, &sc);
@@ -76,9 +76,9 @@ void XeInterpRecordRT(Gpu& g, ID3D12GraphicsCommandList* cl, const XeInterp& x,
 
 void XeInterpRecord(Gpu& g, ID3D12GraphicsCommandList* cl, const XeInterp& x,
                     ID3D12Resource* prev, ID3D12Resource* cur, ID3D12Resource* fwd, ID3D12Resource* bwd, ID3D12Resource* stat,
-                    UINT gw, UINT gh, UINT factor, ID3D12Resource* dst, UINT w, UINT h, float t, bool debug, D3D12_RESOURCE_STATES dst_rest, bool extrap)
+                    UINT gw, UINT gh, UINT factor, UINT cell, ID3D12Resource* dst, UINT w, UINT h, float t, bool debug, D3D12_RESOURCE_STATES dst_rest, bool extrap)
 {
-    struct { UINT w, h, gw, gh; float f, t, tol, tol_rel; UINT debug, extrap; } c = { w, h, gw, gh, (float)factor, t, x.tol, x.tol_rel, debug ? 1u : 0u, extrap ? 1u : 0u };
+    struct { UINT w, h, gw, gh; float f, t, tol, tol_rel; UINT debug, extrap; float cell; } c = { w, h, gw, gh, (float)factor, t, x.tol, x.tol_rel, debug ? 1u : 0u, extrap ? 1u : 0u, (float)cell };
     const GpuView srv[5] = { { prev, DXGI_FORMAT_UNKNOWN }, { cur, DXGI_FORMAT_UNKNOWN }, { fwd, DXGI_FORMAT_UNKNOWN }, { bwd, DXGI_FORMAT_UNKNOWN }, { stat, DXGI_FORMAT_UNKNOWN } };
     const GpuView out = { dst, DXGI_FORMAT_UNKNOWN };
     GpuBarrier(cl, dst, dst_rest, UAV);

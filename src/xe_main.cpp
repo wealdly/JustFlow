@@ -235,33 +235,33 @@ static float Texture(const Image& im, UINT x0, UINT y0, UINT n)
 
 // Score one grid: every block whose centre is at least `margin` native px inside the frame, into
 // `all` and, when the block of `from` (the frame the grid's blocks belong to) has texture, `tex`.
-static void Score(const std::vector<uint16_t>& grid, UINT gw, UINT gh, UINT f, UINT w, UINT h, const Truth& t, int dir,
+static void Score(const std::vector<uint16_t>& grid, UINT gw, UINT gh, UINT f, UINT cell, UINT w, UINT h, const Truth& t, int dir,
                   const Image& from, Epe& all, Epe& tex)
 {
     const float margin = 32;
     for (UINT by = 0; by < gh; ++by)
         for (UINT bx = 0; bx < gw; ++bx)
         {
-            const float x = (bx * 8 + 4.0f) * f, y = (by * 8 + 4.0f) * f;
+            const float x = (bx * cell + cell * 0.5f) * f, y = (by * cell + cell * 0.5f) * f;
             if (x < margin || y < margin || x > w - margin || y > h - margin) continue;
             float gx, gy;
             if (!t.Get(dir, w, h, x, y, gx, gy)) continue;
             const size_t i = ((size_t)by * gw + bx) * 2;
             const float ex = Half(grid[i]) * f, ey = Half(grid[i + 1]) * f;
             all.Add(ex, ey, gx, gy);
-            if (Texture(from, bx * 8 * f, by * 8 * f, 8 * f) >= 2.0f) tex.Add(ex, ey, gx, gy);
+            if (Texture(from, bx * cell * f, by * cell * f, cell * f) >= 2.0f) tex.Add(ex, ey, gx, gy);
         }
 }
 
 // Flow grid as colour (hue = direction, brightness = magnitude / scale), each block 8x8 pixels.
-static void DumpFlow(const wchar_t* path, const std::vector<uint16_t>& grid, UINT gw, UINT gh, UINT f, float scale)
+static void DumpFlow(const wchar_t* path, const std::vector<uint16_t>& grid, UINT gw, UINT gh, UINT f, UINT cell, float scale)
 {
-    const UINT w = gw * 8, h = gh * 8;
+    const UINT w = gw * cell, h = gh * cell;
     std::vector<uint8_t> px((size_t)w * h * 4);
     for (UINT y = 0; y < h; ++y)
         for (UINT x = 0; x < w; ++x)
         {
-            const size_t i = ((size_t)(y / 8) * gw + x / 8) * 2;
+            const size_t i = ((size_t)(y / cell) * gw + x / cell) * 2;
             const float vx = Half(grid[i]) * f, vy = Half(grid[i + 1]) * f;
             const float v = std::min(1.0f, std::hypot(vx, vy) / scale), a = atan2f(vy, vx) / 6.2831853f + 0.5f;
             uint8_t* o = &px[((size_t)y * w + x) * 4];
@@ -300,7 +300,7 @@ static bool ReadFile(const std::wstring& path, std::vector<char>& data)
 
 static int RunBench(int argc, char** argv)
 {
-    std::wstring input; UINT size_w = 0, size_h = 0, factor = 2; int frames = 200, pairs = 1 << 30, adapter = -1, refine = 1, fine = 1; bool profile = false; UINT vendor = 0;
+    std::wstring input; UINT size_w = 0, size_h = 0, factor = 2; int frames = 200, pairs = 1 << 30, adapter = -1, refine = 1, fine = 1, sub = 1; bool profile = false; UINT vendor = 0;
     float lambda = 0.0f, zoom = 1.02f, shx = 23.0f, shy = -11.0f; bool dump = false;
     for (int i = 1; i < argc; ++i)
     {
@@ -311,6 +311,7 @@ static int RunBench(int argc, char** argv)
         else if (!strcmp(argv[i], "--lambda") && more) lambda = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--refine") && more) refine = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fine") && more) fine = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--sub") && more) sub = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--profile")) profile = true;
         else if (!strcmp(argv[i], "--frames") && more) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pairs") && more) pairs = atoi(argv[++i]);
@@ -369,13 +370,13 @@ static int RunBench(int argc, char** argv)
     XeFlow* xf = XeFlowCreate(g, w, h, factor);
     if (!xf) return 1;
     XeFlowSetLambda(xf, lambda);
-    XeFlowSetRefine(xf, refine); XeFlowSetFine(xf, fine);
-    const UINT gw = XeFlowGridW(xf), gh = XeFlowGridH(xf), f = XeFlowFactor(xf);
+    XeFlowSetRefine(xf, refine); XeFlowSetFine(xf, fine); XeFlowSetSubsel(xf, sub != 0);
+    const UINT gw = XeFlowGridW(xf), gh = XeFlowGridH(xf), f = XeFlowFactor(xf), cell = XeFlowCell(xf);
     ComputePso warp;
     ID3D12Resource* tex[2] = { GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, NPSR, L"bench_prev"),
                                GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, NPSR, L"bench_cur") };
     ID3D12Resource* recon = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"bench_recon");
-    if (!tex[0] || !tex[1] || !recon || !GpuMakeCompute(g, g_cs_xe_warp, sizeof g_cs_xe_warp, 2, 1, 5, warp, L"xe_warp")) return 1;
+    if (!tex[0] || !tex[1] || !recon || !GpuMakeCompute(g, g_cs_xe_warp, sizeof g_cs_xe_warp, 2, 1, 6, warp, L"xe_warp")) return 1;
 
     // ---- accuracy: every pair ----
     Epe epe[2], epe_tex[2]; double psnr_sum = 0, psnr0_sum = 0; int npairs = 0;
@@ -408,7 +409,7 @@ static int RunBench(int argc, char** argv)
         XeFlowPyramid(xf, g.list, tex[1], 1);
         XeFlowEstimate(xf, g.list, 0, 1, 0);   // forward: prev blocks -> cur
         XeFlowEstimate(xf, g.list, 1, 0, 1);   // backward: cur blocks -> prev
-        struct { UINT w, h, gw, gh; float f; } wc = { w, h, gw, gh, (float)f };
+        struct { UINT w, h, gw, gh; float f, cell; } wc = { w, h, gw, gh, (float)f, (float)cell };
         const GpuView ws[2] = { { tex[0], DXGI_FORMAT_UNKNOWN }, { XeFlowGrid(xf, 1), DXGI_FORMAT_UNKNOWN } }, wu = { recon, DXGI_FORMAT_UNKNOWN };
         GpuBarrier(g.list, recon, NPSR, UAV);
         GpuDispatch(g, g.list, warp, ws, &wu, &wc, GpuGroups(w, 8), GpuGroups(h, 8));
@@ -418,7 +419,7 @@ static int RunBench(int argc, char** argv)
         {
             grid[d].resize((size_t)gw * gh * 2);
             if (!GpuReadbackTex(g, XeFlowGrid(xf, d), grid[d].data(), gw, gh, 4, NPSR)) return 1;
-            Score(grid[d], gw, gh, f, w, h, truth, d, d ? cur : prev, epe[d], epe_tex[d]);
+            Score(grid[d], gw, gh, f, cell, w, h, truth, d, d ? cur : prev, epe[d], epe_tex[d]);
         }
         if (!GpuReadbackTex(g, recon, rec.data(), w, h, 4, NPSR)) return 1;
         const double p = Psnr(cur, rec, 16), p0 = Psnr(cur, prev.px, 16);
@@ -438,7 +439,7 @@ static int RunBench(int argc, char** argv)
         if (dump)
         {
             wchar_t path[MAX_PATH];
-            _snwprintf_s(path, _TRUNCATE, L"%ls\\xe_flow_%03zu.png", dir.c_str(), i); DumpFlow(path, grid[1], gw, gh, f, 64.0f);
+            _snwprintf_s(path, _TRUNCATE, L"%ls\\xe_flow_%03zu.png", dir.c_str(), i); DumpFlow(path, grid[1], gw, gh, f, cell, 64.0f);
             _snwprintf_s(path, _TRUNCATE, L"%ls\\xe_warp_%03zu.png", dir.c_str(), i); SavePngRgba(path, rec.data(), w, h);
         }
         if (!truth.synth) Log("[bench] pair %zu: PSNR warped %.2f dB, unwarped %.2f dB", i, p, p0);
@@ -501,7 +502,7 @@ static int RunBench(int argc, char** argv)
             GpuBarrier(cl, tex[s], D3D12_RESOURCE_STATE_COPY_SOURCE, NPSR); GpuBarrier(cl, recon, D3D12_RESOURCE_STATE_COPY_DEST, NPSR);
             GpuStamp(g, cl, b + 1);
             GpuStamp(g, cl, b + 2);
-            XeInterpRecord(g, cl, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), stat, gw, gh, f, recon, w, h, 0.5f);
+            XeInterpRecord(g, cl, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), stat, gw, gh, f, cell, recon, w, h, 0.5f);
             GpuStamp(g, cl, b + 3);
             GpuStamp(g, cl, b + 4);
             const UINT pcn[6] = { w, h, (w + 7) / 8, (h + 7) / 8, 8, 8 };
@@ -509,7 +510,7 @@ static int RunBench(int argc, char** argv)
             GpuBarrier(cl, tiny, NPSR, UAV); GpuDispatch(g, cl, probe, &ps, &pu, pcn, GpuGroups(pcn[2], 8), GpuGroups(pcn[3], 8)); GpuBarrier(cl, tiny, UAV, NPSR);
             GpuStamp(g, cl, b + 5);
             GpuStamp(g, cl, b + 6);
-            XeInterpRecordRT(g, cl, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), stat, gw, gh, f, rtt, NPSR, w, h, 0.5f);
+            XeInterpRecordRT(g, cl, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), stat, gw, gh, f, cell, rtt, NPSR, w, h, 0.5f);
             GpuStamp(g, cl, b + 7);
             if (!GpuEnd(g) || !GpuWaitIdle(g)) return 1;
             double ms[16];
@@ -553,7 +554,7 @@ static int RunBench(int argc, char** argv)
 // real frame (what no frame generation shows) and a plain crossfade.
 static int RunInterpBench(int argc, char** argv)
 {
-    std::wstring input; UINT size_w = 0, size_h = 0, factor = 2; int n = 3, pairs = 1 << 30, adapter = -1, refine = 1, fine = 1; UINT vendor = 0;
+    std::wstring input; UINT size_w = 0, size_h = 0, factor = 2; int n = 3, pairs = 1 << 30, adapter = -1, refine = 1, fine = 1, sub = 1; UINT vendor = 0;
     bool extrap = false;   // --extrap: predict the frames AFTER the pair (cur pushed ahead), truth = the real ones
     bool ui = false;       // --ui: a static synthetic HUD on every frame, and PSNR inside it reported apart
     bool dump = false; XeInterp xi;
@@ -566,6 +567,7 @@ static int RunInterpBench(int argc, char** argv)
         else if (!strcmp(argv[i], "--factor") && more) factor = (UINT)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--refine") && more) refine = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fine") && more) fine = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--sub") && more) sub = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pairs") && more) pairs = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tol") && more) xi.tol = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--tolrel") && more) xi.tol_rel = (float)atof(argv[++i]);
@@ -594,7 +596,7 @@ static int RunInterpBench(int argc, char** argv)
     if (!GpuInit(g, adapter, vendor)) return 1;
     XeFlow* xf = XeFlowCreate(g, w, h, factor);
     if (!xf || !XeInterpInit(g, xi)) return 1;
-    XeFlowSetRefine(xf, refine); XeFlowSetFine(xf, fine);
+    XeFlowSetRefine(xf, refine); XeFlowSetFine(xf, fine); XeFlowSetSubsel(xf, sub != 0);
     ID3D12Resource* tex[2] = { GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, NPSR, L"interp_a"),
                                GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, NPSR, L"interp_b") };
     ID3D12Resource* out = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"interp_out");
@@ -625,7 +627,7 @@ static int RunInterpBench(int argc, char** argv)
                 XeFlowEstimate(xf, g.list, 0, 1, 0); XeFlowEstimate(xf, g.list, 1, 0, 1); XeFlowStaticMap(xf, g.list, 1, 0, stat);
             }
             GpuStamp(g, g.list, 0);
-            XeInterpRecord(g, g.list, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), stat, XeFlowGridW(xf), XeFlowGridH(xf), XeFlowFactor(xf), out, w, h, t,
+            XeInterpRecord(g, g.list, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), stat, XeFlowGridW(xf), XeFlowGridH(xf), XeFlowFactor(xf), XeFlowCell(xf), out, w, h, t,
                            false, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, extrap);
             GpuStamp(g, g.list, 1);
             if (!GpuEnd(g) || !GpuWaitIdle(g) || !GpuReadbackTex(g, out, px.data(), w, h, 4, NPSR)) return 1;
@@ -645,7 +647,7 @@ static int RunInterpBench(int argc, char** argv)
                 wchar_t path[MAX_PATH];
                 _snwprintf_s(path, _TRUNCATE, L"%ls\\xe_interp_%03zu_%d.png", dir.c_str(), k, j); SavePngRgba(path, px.data(), w, h);
                 if (!GpuBegin(g)) return 1;
-                XeInterpRecord(g, g.list, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), stat, XeFlowGridW(xf), XeFlowGridH(xf), XeFlowFactor(xf), out, w, h, t, true);
+                XeInterpRecord(g, g.list, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), stat, XeFlowGridW(xf), XeFlowGridH(xf), XeFlowFactor(xf), XeFlowCell(xf), out, w, h, t, true);
                 if (!GpuEnd(g) || !GpuWaitIdle(g) || !GpuReadbackTex(g, out, px.data(), w, h, 4, NPSR)) return 1;
                 _snwprintf_s(path, _TRUNCATE, L"%ls\\xe_vis_%03zu_%d.png", dir.c_str(), k, j); SavePngRgba(path, px.data(), w, h);
             }

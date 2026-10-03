@@ -6,6 +6,7 @@
 #include "cs_xe_flow_r2.h"
 #include "cs_xe_median.h"
 #include "cs_xe_static.h"
+#include "cs_xe_subsel.h"
 #include "cs_xe_refine.h"
 #include <algorithm>
 
@@ -24,11 +25,14 @@ struct XeFlow
     float lambda = 0.0f;
     int  refine = 1;                                 // same-level propagation passes per level
     int  fine = 1;                                   // the finest `fine` levels search +-2 px (xe_flow_r2), the rest +-4
+    bool subsel = true;                              // xe_subsel: 4x4 sub-blocks re-pick among their block's and neighbours' vectors
+    UINT sw = 0, sh = 0;                             // sub-block grid size (L0 / 4)
     int  stamp_base = -1;                            // profiling: GpuStamp pair stamp_base + 2k around level k (-1 = off)
-    ComputePso gray, down, flow, flow_r2, median, prop, stat;
+    ComputePso gray, down, flow, flow_r2, median, prop, stat, sub;
     ID3D12Resource* pyr[2][kMaxLevels] = {};         // R8 luma, NPSR
     ID3D12Resource* grid[2][kMaxLevels] = {};        // R16G16F flow per direction, NPSR
     ID3D12Resource* tmp[kMaxLevels] = {};            // raw (pre-median) flow, NPSR
+    ID3D12Resource* subgrid[2] = {};                 // R16G16F 4x4-block flow per direction (xe_subsel), NPSR
 };
 
 #define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
@@ -53,7 +57,8 @@ XeFlow* XeFlowCreate(Gpu& g, UINT w, UINT h, UINT factor, int levels)
            && GpuMakeCompute(g, g_cs_xe_flow_r2, sizeof g_cs_xe_flow_r2, 3, 1, 7, f->flow_r2, L"xe_flow_r2")
            && GpuMakeCompute(g, g_cs_xe_median, sizeof g_cs_xe_median, 1, 1, 2, f->median, L"xe_median")
            && GpuMakeCompute(g, g_cs_xe_refine, sizeof g_cs_xe_refine, 3, 1, 5, f->prop, L"xe_refine")
-           && GpuMakeCompute(g, g_cs_xe_static, sizeof g_cs_xe_static, 3, 1, 4, f->stat, L"xe_static");
+           && GpuMakeCompute(g, g_cs_xe_static, sizeof g_cs_xe_static, 3, 1, 5, f->stat, L"xe_static")
+           && GpuMakeCompute(g, g_cs_xe_subsel, sizeof g_cs_xe_subsel, 3, 1, 6, f->sub, L"xe_subsel");
     for (int k = 0; ok && k < n; ++k)
     {
         f->gw[k] = (f->lw[k] + kBlock - 1) / kBlock; f->gh[k] = (f->lh[k] + kBlock - 1) / kBlock;
@@ -64,6 +69,8 @@ XeFlow* XeFlowCreate(Gpu& g, UINT w, UINT h, UINT factor, int levels)
         }
         ok = ok && (f->tmp[k] = GpuMakeTex(g, f->gw[k], f->gh[k], DXGI_FORMAT_R16G16_FLOAT, uav, NPSR, L"xe_grid_raw"));
     }
+    f->sw = (f->lw[0] + 3) / 4; f->sh = (f->lh[0] + 3) / 4;
+    for (int d = 0; ok && d < 2; ++d) ok = (f->subgrid[d] = GpuMakeTex(g, f->sw, f->sh, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"xe_subgrid")) != nullptr;
     if (!ok) { Log("[xeflow] create failed"); XeFlowDestroy(f); return nullptr; }
     Log("[xeflow] %ux%u factor %u: L0 %ux%u, %d levels down to %ux%u, grid %ux%u, reach ~%u native px",
         w, h, f->factor, f->lw[0], f->lh[0], n, f->lw[n - 1], f->lh[n - 1], f->gw[0], f->gh[0], 4u * ((1u << n) - 1) * f->factor);
@@ -73,8 +80,9 @@ XeFlow* XeFlowCreate(Gpu& g, UINT w, UINT h, UINT factor, int levels)
 void XeFlowDestroy(XeFlow* f)
 {
     if (!f) return;
+    REL(f->subgrid[0]); REL(f->subgrid[1]);
     for (int k = 0; k < kMaxLevels; ++k) { REL(f->pyr[0][k]); REL(f->pyr[1][k]); REL(f->grid[0][k]); REL(f->grid[1][k]); REL(f->tmp[k]); }
-    for (ComputePso* p : { &f->gray, &f->down, &f->flow, &f->flow_r2, &f->median, &f->prop, &f->stat }) { REL(p->pso); REL(p->root); }
+    for (ComputePso* p : { &f->gray, &f->down, &f->flow, &f->flow_r2, &f->median, &f->prop, &f->stat, &f->sub }) { REL(p->pso); REL(p->root); }
     delete f;
 }
 
@@ -138,6 +146,16 @@ void XeFlowEstimate(XeFlow* f, ID3D12GraphicsCommandList* cl, int from, int to, 
         }
         if (f->stamp_base >= 0) GpuStamp(g, cl, f->stamp_base + 2 * k + 1);
     }
+    if (f->subsel)
+    {
+        // 4x4 sub-blocks re-pick among their 8x8 block's vector and its neighbours' (xe_subsel.hlsl)
+        const UINT c[6] = { f->lw[0], f->lh[0], f->gw[0], f->gh[0], f->sw, f->sh };
+        const GpuView srv[3] = { { f->pyr[from & 1][0], DXGI_FORMAT_UNKNOWN }, { f->pyr[to & 1][0], DXGI_FORMAT_UNKNOWN }, { out[0], DXGI_FORMAT_UNKNOWN } };
+        const GpuView uav = { f->subgrid[dir & 1], DXGI_FORMAT_UNKNOWN };
+        GpuBarrier(cl, f->subgrid[dir & 1], NPSR, UAV);
+        GpuDispatch(g, cl, f->sub, srv, &uav, c, GpuGroups(f->sw, 8), GpuGroups(f->sh, 8));
+        GpuBarrier(cl, f->subgrid[dir & 1], UAV, NPSR);
+    }
 }
 
 void XeFlowSetLambda(XeFlow* f, float lambda) { f->lambda = std::max(0.0f, lambda); }
@@ -145,18 +163,20 @@ void XeFlowSetRefine(XeFlow* f, int passes) { f->refine = std::clamp(passes, 0, 
 
 void XeFlowStaticMap(XeFlow* f, ID3D12GraphicsCommandList* cl, int cur, int prev, ID3D12Resource* dst)
 {
-    const UINT c[4] = { f->lw[0], f->lh[0], f->gw[0], f->gh[0] };
-    const GpuView srv[3] = { { f->pyr[cur & 1][0], DXGI_FORMAT_UNKNOWN }, { f->pyr[prev & 1][0], DXGI_FORMAT_UNKNOWN }, { f->grid[1][0], DXGI_FORMAT_UNKNOWN } };
+    struct { UINT lw, lh, gw, gh; float cell; } c = { f->lw[0], f->lh[0], XeFlowGridW(f), XeFlowGridH(f), (float)XeFlowCell(f) };
+    const GpuView srv[3] = { { f->pyr[cur & 1][0], DXGI_FORMAT_UNKNOWN }, { f->pyr[prev & 1][0], DXGI_FORMAT_UNKNOWN }, { XeFlowGrid(f, 1), DXGI_FORMAT_UNKNOWN } };
     const GpuView uav = { dst, DXGI_FORMAT_UNKNOWN };
     GpuBarrier(cl, dst, NPSR, UAV);
-    GpuDispatch(*f->g, cl, f->stat, srv, &uav, c, GpuGroups(f->lw[0], 8), GpuGroups(f->lh[0], 8));
+    GpuDispatch(*f->g, cl, f->stat, srv, &uav, &c, GpuGroups(f->lw[0], 8), GpuGroups(f->lh[0], 8));
     GpuBarrier(cl, dst, UAV, NPSR);
 }
 void XeFlowSetStamps(XeFlow* f, int base) { f->stamp_base = base; }
 void XeFlowSetFine(XeFlow* f, int levels) { f->fine = std::clamp(levels, 0, kMaxLevels); }
-ID3D12Resource* XeFlowGrid(XeFlow* f, int dir) { return f->grid[dir & 1][0]; }
-UINT XeFlowGridW(const XeFlow* f) { return f->gw[0]; }
-UINT XeFlowGridH(const XeFlow* f) { return f->gh[0]; }
+ID3D12Resource* XeFlowGrid(XeFlow* f, int dir) { return f->subsel ? f->subgrid[dir & 1] : f->grid[dir & 1][0]; }
+UINT XeFlowGridW(const XeFlow* f) { return f->subsel ? f->sw : f->gw[0]; }
+UINT XeFlowGridH(const XeFlow* f) { return f->subsel ? f->sh : f->gh[0]; }
+UINT XeFlowCell(const XeFlow* f) { return f->subsel ? 4u : kBlock; }
+void XeFlowSetSubsel(XeFlow* f, bool on) { f->subsel = on; }
 UINT XeFlowFactor(const XeFlow* f) { return f->factor; }
 int  XeFlowLevels(const XeFlow* f) { return f->levels; }
 UINT XeFlowL0W(const XeFlow* f) { return f->lw[0]; }

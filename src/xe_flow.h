@@ -31,7 +31,11 @@ void    XeFlowSetFine(XeFlow* f, int levels);      // the finest N levels search
 void    XeFlowSetStamps(XeFlow* f, int base);      // profiling (Gpu list only): stamp pair base + 2k around level k; -1 = off
 void    XeFlowSetLambda(XeFlow* f, float lambda);   // search penalty per pixel of offset from the predictor (default 0: measured best on the scene sequences)
 
-ID3D12Resource* XeFlowGrid(XeFlow* f, int dir);     // L0 grid of output `dir`, NPSR
+// The flow of output `dir` for consumers: the 4x4-block sub-grid (xe_subsel) when on, else the 8x8-block
+// L0 grid. NPSR. XeFlowCell = L0 pixels per vector (4 or 8); GridW/H are that grid's size.
+ID3D12Resource* XeFlowGrid(XeFlow* f, int dir);
+UINT XeFlowCell(const XeFlow* f);
+void XeFlowSetSubsel(XeFlow* f, bool on);           // default on
 UINT XeFlowGridW(const XeFlow* f);
 UINT XeFlowGridH(const XeFlow* f);
 UINT XeFlowFactor(const XeFlow* f);

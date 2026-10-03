@@ -10,7 +10,7 @@
 //    flow is wrong there), so it should not be shown. Tolerance grows with the motion (block flow is
 //    coarse on fast content). A side that fails loses its weight; the time weights ((1-t), t) blend
 //    the rest.
-// Flow grids are in L0 pixels, one vector per 8x8 L0 block: `f` native pixels per L0 pixel.
+// Flow grids are in L0 pixels, one vector per cell x cell L0 block (4 after xe_subsel, else 8): `f` native px per L0 px.
 Texture2D<float4>   prev : register(t0);
 Texture2D<float4>   cur  : register(t1);
 Texture2D<float2>   fwd  : register(t2);
@@ -18,10 +18,10 @@ Texture2D<float2>   bwd  : register(t3);
 Texture2D<float2>   stat : register(t4);   // xe_static: (e0, ef) at L0
 RWTexture2D<float4> dst  : register(u0);
 SamplerState        lin  : register(s0);
-cbuffer C : register(b0) { uint w, h, gw, gh; float f, t, tol, tol_rel; uint debug, extrap; };
+cbuffer C : register(b0) { uint w, h, gw, gh; float f, t, tol, tol_rel; uint debug, extrap; float cell; };   // cell: L0 px per grid vector
 
 
-float2 Flow(Texture2D<float2> g, float2 p) { return g.SampleLevel(lin, p / (f * 8.0 * float2(gw, gh)), 0) * f; }
+float2 Flow(Texture2D<float2> g, float2 p) { return g.SampleLevel(lin, p / (f * cell * float2(gw, gh)), 0) * f; }
 float4 Color(Texture2D<float4> c, float2 p) { return c.SampleLevel(lin, p / float2(w, h), 0); }
 
 float Visible(Texture2D<float2> there, Texture2D<float2> back, float2 p)

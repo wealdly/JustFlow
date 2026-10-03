@@ -230,7 +230,7 @@ static void Presenter(XeFg* f)
         ID3D12Resource* dst = OverlayBackbuffer(f->ov);
         const XeFrame& A = f->fr[use->a]; const XeFrame& B = f->fr[use->b];
         GpuCtxStamp(f->ctx, 0);
-        XeInterpRecordRT(g, cl, f->interp, A.tex, B.tex, use->fwd, use->bwd, use->stat, XeFlowGridW(f->flow), XeFlowGridH(f->flow), XeFlowFactor(f->flow),
+        XeInterpRecordRT(g, cl, f->interp, A.tex, B.tex, use->fwd, use->bwd, use->stat, XeFlowGridW(f->flow), XeFlowGridH(f->flow), XeFlowFactor(f->flow), XeFlowCell(f->flow),
                          dst, PRESENT, f->w, f->h, use->flow || x ? t : 1.0f, x);
         GpuCtxStamp(f->ctx, 1);
         const bool snap = f->snap_req && !f->snap_pending && use->flow && t > 0.0f && (x || t < 1.0f);
