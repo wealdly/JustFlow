@@ -898,6 +898,9 @@ static HWND FindTarget(const Config& c)
 {
     // Both empty matches the FIRST window on the desktop, which is how a profile-less start would
     // attach itself to something arbitrary. A profile that names nothing targets nothing.
+    // Full desktop: the desktop window stands for the primary monitor - DDA duplicates its output, WGC
+    // captures the monitor, the overlay covers it and never hides for a foreground change.
+    if (c.desktop) return GetDesktopWindow();
     if (c.window_class.empty() && c.window_title.empty()) return nullptr;
     // The LARGEST plausible match, not the first. A title like "World of Warcraft" is also carried by
     // launcher pages, taskbar thumbnails, tooltips and browser tabs, and first-in-Z-order once
@@ -966,7 +969,7 @@ std::wstring PickProfile(const std::wstring& dir, const std::wstring& ini, std::
         if (index < 0) Log("[main] justflow.ini [app] profile=%ls is not in profiles\\ - auto-picking", a.profile.c_str());
     }
     for (size_t i = 0; i < names.size() && index < 0; ++i)   // the first profile whose window is up right now
-    { Config c; if ((ConfigLoad(nullptr, (pdir + L"\\" + names[i] + L".ini").c_str(), c) & 2) && FindTarget(c)) index = (int)i; }
+    { Config c; if ((ConfigLoad(nullptr, (pdir + L"\\" + names[i] + L".ini").c_str(), c) & 2) && FindTarget(c) && !c.desktop) index = (int)i; }
     if (index < 0) index = find(L"wow");
     if (index < 0) index = 0;
     return pdir + L"\\" + names[index] + L".ini";
@@ -1273,8 +1276,9 @@ static int RealMain(int argc, char** argv)
         }
         Log("[main] target window %p", (void*)target);
         Capture* cap = CaptureOpen(g, target, cfg.cursor, cfg.border, cfg.dda);
-        // Desktop Duplication sees the whole monitor, our overlay included: exclusion is mandatory there.
-        if (cap && CaptureIsDda(cap)) cfg.exclude_from_capture = true;
+        // Desktop Duplication and monitor capture see the whole monitor, our overlay included:
+        // exclusion is mandatory there, or it captures and re-presents itself.
+        if (cap && (CaptureIsDda(cap) || cfg.desktop)) cfg.exclude_from_capture = true;
         if (!cap) { Sleep(1000); continue; }
         p = PipelineCreate(g, cfg, CaptureWidth(cap), CaptureHeight(cap), true, target);
         if (p) Log("[gpu] reserved %.0f MB of video memory (residency priority high)", GpuReserveCurrentUsage(g));
@@ -1288,6 +1292,10 @@ static int RealMain(int argc, char** argv)
         }
 
         bool reset = true, dormant = false;
+        // Protected (DRM) video is blacked out in any capture; re-presented, it is a black hole on the
+        // screen. DDA says when it masked some: the overlay steps aside until a frame arrives without.
+        bool masked = false;
+        auto follow = [&] { if (!masked) OverlayFollow(p->ov, cfg.reassert_topmost_every); };
         LONGLONG last_sysrel = 0;
         UINT frames = 0, skips = 0, rate_drops = 0; double last_processed_ms = 0;
         double win_t0 = NowMs();
@@ -1386,7 +1394,7 @@ static int RealMain(int argc, char** argv)
                 ++skips;
                 // Every empty wait: a game that lost the foreground often stops rendering, and the
                 // overlay must hide promptly (OverlayFollow throttles its own geometry query to 50 ms).
-                OverlayFollow(p->ov, cfg.reassert_topmost_every);
+                follow();
                 // No sleep here. CaptureAcquire already blocks on its own timeout (AcquireNextFrame /
                 // the frame event), and every early return runs after that wait, so this cannot spin.
                 // The Sleep(1) that was here stalled the capture loop on every MOUSE MOVE: Desktop
@@ -1398,6 +1406,13 @@ static int RealMain(int argc, char** argv)
                 continue;
             }
             if (CaptureIsFloat(cap)) { Log("[main] FP16 (HDR) capture is not supported in phase 1 - exiting"); quit = true; rc = 2; break; }
+            if (CaptureProtected(cap) != masked)
+            {
+                masked = !masked;
+                Log("[main] protected video %s", masked ? "on screen - overlay steps aside" : "gone - overlay back");
+                if (masked) OverlayHide(p->ov);
+            }
+            if (masked) continue;
             LARGE_INTEGER acq; QueryPerformanceCounter(&acq);
             const double t0 = NowMs();
             // max_fps: a GPU-bound game (Dawnwalker with 3X FG presents ~135 fps) would otherwise get a
@@ -1422,7 +1437,7 @@ static int RealMain(int argc, char** argv)
             acq_ms.add(acq_acc); hud_acq.add(acq_acc); acq_acc = 0;
             if (!PipelineFrame(p, CaptureTexture(cap), CaptureFence(cap), fv, reset)) { Log("[main] frame failed - exiting"); GpuLogDeviceRemoved(g, "frame"); quit = true; rc = 3; break; }
             reset = false;
-            OverlayFollow(p->ov, cfg.reassert_topmost_every);
+            follow();
             if (cfg.stats_every > 0) cpu_ms.push_back(NowMs() - t0);   // only the [stats] tick reads it, and only that tick clears it
             if (p->last_evaluated && dumped < dump) DumpFrame(p, dir, dumped++);
             ++hud_frames;

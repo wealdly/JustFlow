@@ -37,3 +37,5 @@ bool CaptureSizeChanged(Capture* c, UINT& new_w, UINT& new_h);
 bool CaptureLost(Capture* c);
 // True if frames arrive as FP16 (HDR). Phase 1 refuses these with a log line.
 bool CaptureIsFloat(Capture* c);
+// DDA: the last frame had protected (DRM) content blacked out by Windows. WGC cannot tell (false).
+bool CaptureProtected(Capture* c);

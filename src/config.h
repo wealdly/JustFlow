@@ -27,6 +27,7 @@ struct Config
     std::wstring window_class = L"";      // profiles name the game; the binary carries no game-specific strings
     std::wstring window_title = L"";
     bool cursor = false, border = false;
+    bool desktop = false;   // [capture] desktop=1: the whole primary monitor, not a window (full-desktop FG)
     // capture.mode: auto | wgc | dda. auto = window capture when this Windows can run it uncapped
     // (MinUpdateInterval, Win11 24H2+), Desktop Duplication otherwise. WGC only reports updates of the
     // TARGET window; DDA reports the whole desktop, including our own overlay's presents, which

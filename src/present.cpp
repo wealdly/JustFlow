@@ -480,7 +480,8 @@ void OverlayFollow(Overlay* o, int reassert_every)
     // whatever the user switched to - Alt-Tab looked broken. Only show while a window of the game's
     // own process has the foreground (its launcher/dialogs count; ours never takes it, WS_EX_NOACTIVATE).
     // No foreground window at all (mid-switch) changes nothing.
-    if (const HWND fg = GetForegroundWindow())
+    // Full desktop (the target is the desktop window): every app is ours, nothing to step aside for.
+    if (const HWND fg = o->target != GetDesktopWindow() ? GetForegroundWindow() : nullptr)
     {
         DWORD fg_pid = 0, target_pid = 0;
         GetWindowThreadProcessId(fg, &fg_pid); GetWindowThreadProcessId(o->target, &target_pid);

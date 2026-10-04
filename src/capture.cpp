@@ -51,7 +51,7 @@ struct Capture
     wgc::GraphicsCaptureItem::Closed_revoker              closed_rev;
     wgc::Direct3D11CaptureFramePool::FrameArrived_revoker arrived_rev;
     volatile LONG closed = 0;
-    bool is_float = false, format_logged = false;
+    bool is_float = false, format_logged = false, masked = false;
     UINT pend_w = 0, pend_h = 0; ULONGLONG pend_since = 0;   // size-change deadband
     // Desktop Duplication path (delivers at the monitor refresh; WGC window capture tops out at 60 Hz)
     IDXGIOutputDuplication* dup = nullptr;
@@ -171,6 +171,7 @@ static bool AcquireDda(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG&
     c->dup_frame_held = true;
     c->accum_last = info.AccumulatedFrames; c->accum_sum += info.AccumulatedFrames; ++c->accum_n;
     if (info.LastPresentTime.QuadPart == 0) { res->Release(); return false; }   // only the cursor / metadata moved
+    c->masked = info.ProtectedContentMaskedOut != 0;
     // Desktop Duplication reports updates of the whole OUTPUT, and LastPresentTime moves for any of
     // them - another app repainting, a notification, a video on the same monitor. Cropping to our
     // window afterwards does not make that a frame of the game: measured on a Notepad window that
@@ -280,8 +281,11 @@ Capture* CaptureOpen(Gpu& g, HWND target, bool show_cursor, bool show_border, bo
         c->device = insp.as<wd3d::IDirect3DDevice>();
 
         auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
-        hr = interop->CreateForWindow(target, winrt::guid_of<wgc::GraphicsCaptureItem>(), winrt::put_abi(c->item));
-        if (FAILED(hr) || !c->item) { Log("[cap] CreateForWindow failed 0x%08X", hr); CaptureFree(c); return nullptr; }
+        // the desktop window stands for its monitor (full-desktop mode): capture the monitor
+        hr = target == GetDesktopWindow()
+            ? interop->CreateForMonitor(MonitorFromWindow(target, MONITOR_DEFAULTTOPRIMARY), winrt::guid_of<wgc::GraphicsCaptureItem>(), winrt::put_abi(c->item))
+            : interop->CreateForWindow(target, winrt::guid_of<wgc::GraphicsCaptureItem>(), winrt::put_abi(c->item));
+        if (FAILED(hr) || !c->item) { Log("[cap] CreateForWindow/Monitor failed 0x%08X", hr); CaptureFree(c); return nullptr; }
         const auto size = c->item.Size();
         if (size.Width <= 0 || size.Height <= 0) { Log("[cap] window has no size (minimised?)"); CaptureFree(c); return nullptr; }
         c->w = (UINT)size.Width; c->h = (UINT)size.Height;
@@ -420,6 +424,8 @@ bool CaptureSizeChanged(Capture* c, UINT& new_w, UINT& new_h)
     new_w = c->pend_w; new_h = c->pend_h;
     return true;
 }
+
+bool CaptureProtected(Capture* c) { return c && c->masked; }
 
 bool CaptureLost(Capture* c)
 {

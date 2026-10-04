@@ -84,6 +84,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.window_class = S(L"capture", L"window_class", c.window_class);
     c.window_title = S(L"capture", L"window_title", c.window_title);
     c.cursor = B(L"capture", L"cursor", c.cursor);
+    c.desktop = B(L"capture", L"desktop", c.desktop);
     {
         const std::wstring m = S(L"capture", L"mode", L"auto");
         c.dda = m == L"dda" || (m != L"wgc" && !CaptureWgcUncapped());   // auto: WGC only where it is not pinned to ~60 Hz
@@ -187,7 +188,7 @@ bool ConfigNeedsRebuild(const Config& a, const Config& b)
 bool ConfigNeedsRestart(const Config& a, const Config& b)
 {
     return a.dda != b.dda || a.overlay_mode != b.overlay_mode || a.cursor != b.cursor ||
-           a.border != b.border || a.window_class != b.window_class || a.window_title != b.window_title;
+           a.border != b.border || a.desktop != b.desktop || a.window_class != b.window_class || a.window_title != b.window_title;
 }
 
 NrConfig ConfigToNr(const Config& c)
