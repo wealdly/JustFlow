@@ -62,6 +62,11 @@ ID3D12Resource* FgAcquire(Fg* f);
 // engine=warp only: generated frame i of the slot FgAcquire took, for the pipeline to write (CSRC at
 // rest, UAV-capable) in the same list as the real frame. nullptr past the last one, or with DLSS-G.
 ID3D12Resource* FgWarpTarget(Fg* f, int i);
+// engine=latewarp only: the no-warp mask of the slot FgAcquire took (R8, NPSR at rest), for the pipeline to
+// write in the same list (CsNoWarpMask). nullptr for the other engines. FgDebugMask: bench.
+ID3D12Resource* FgMaskTarget(Fg* f);
+ID3D12Resource* FgDebugMask(Fg* f);
+void FgDebugHold(Fg* f);   // bench: freeze the latewarp presenter before reading the debug textures
 // rects/nrects: the addon UI mask for THIS frame, in output pixels, restored onto every generated
 // frame out of s->real before it is presented.
 bool FgRecord(Fg* f, const UiRect* rects = nullptr, int nrects = 0);

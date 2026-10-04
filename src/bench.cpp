@@ -39,6 +39,7 @@ int RunBench(int argc, char** argv)
 {
     std::wstring input, ini; int frames = 120; UINT work_w = 0, work_h = 0; bool present = true; double pace = 0; bool lw = false; float lw_a[4] = { 0, 0, 0, 60 };
     UINT rework_w = 0, rework_h = 0;   // --rework WxH: change the work size LIVE a third of the way in
+    int nr_toggle_at = -1;             // --nr-toggle-at N: flip [nr] enabled through PipelineReload at frame N (what Settings and the tray do)
     for (int i = 1; i < argc; ++i)
     {
         if (!strcmp(argv[i], "--bench") && i + 1 < argc) { const char* s = argv[++i]; input.assign(s, s + strlen(s)); }
@@ -48,6 +49,7 @@ int RunBench(int argc, char** argv)
         else if (!strcmp(argv[i], "--pace") && i + 1 < argc) pace = atof(argv[++i]);
         else if (!strcmp(argv[i], "--lwtest") && i + 1 < argc) { lw = true; sscanf_s(argv[++i], "%f,%f,%f,%f", &lw_a[0], &lw_a[1], &lw_a[2], &lw_a[3]); }
         else if (!strcmp(argv[i], "--rework") && i + 1 < argc) sscanf_s(argv[++i], "%ux%u", &rework_w, &rework_h);
+        else if (!strcmp(argv[i], "--nr-toggle-at") && i + 1 < argc) nr_toggle_at = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ini") && i + 1 < argc) { const char* s = argv[++i]; ini.assign(s, s + strlen(s)); }   // profile next to the exe, or a path
     }
     const std::wstring dir = ExeDir();
@@ -83,7 +85,15 @@ int RunBench(int argc, char** argv)
         Latewarp* l = LatewarpCreate(g, dir.c_str(), w, h, w / 2, h / 2);
         if (in && out && l && GpuUploadTex(g, in, images.back().data(), w, h, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) && GpuBegin(g))
         {
-            const bool ok = LatewarpEvaluate(l, g.list, in, out, true, lw_a[0] * k, lw_a[1] * k, lw_a[2] * k, lw_a[3] * k);
+            ID3D12Resource* mask = nullptr; char mt[4];   // TEST JF_LW_MASKTEST: the left half held still
+            if (GetEnvironmentVariableA("JF_LW_MASKTEST", mt, 4))
+            {
+                std::vector<uint8_t> m((size_t)(w / 4) * (h / 4));
+                for (UINT y = 0; y < h / 4; ++y) for (UINT x = 0; x < w / 4; ++x) m[(size_t)y * (w / 4) + x] = x < w / 8 ? 255 : 0;
+                mask = GpuMakeTex(g, w / 4, h / 4, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"lw_mask");
+                GpuEnd(g); GpuUploadTex(g, mask, m.data(), w / 4, h / 4, 1, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE); GpuBegin(g);
+            }
+            const bool ok = LatewarpEvaluate(l, g.list, in, out, true, lw_a[0] * k, lw_a[1] * k, lw_a[2] * k, lw_a[3] * k, mask);
             if (GpuEnd(g) && GpuWaitIdle(g) && ok)
             {
                 if (SaveTexPng(g, out, w, h, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"lw_out.png")) rc = 0;
@@ -132,6 +142,12 @@ int RunBench(int argc, char** argv)
             Log("[bench] live work-size change %ux%u -> %ux%u at frame %d", p->ww, p->wh, rework_w, rework_h, i);
             PipelineReload(p, nc);
         }
+        if (i == nr_toggle_at)
+        {
+            Config nc = p->cfg; nc.nr_enabled = !nc.nr_enabled;
+            Log("[bench] neural layer %s by reload at frame %d", nc.nr_enabled ? "ON" : "OFF", i);
+            PipelineReload(p, nc);
+        }
         if (toast_test && i == 6) p->toast_until_ms = 0;
         if (pace > 0) { const double due = t0 + i * 1000.0 / pace; while (NowMs() < due) Sleep(1); }
         if (!PipelineFrame(p, tex[last_in], nullptr, 0, i == 0)) { Log("[bench] frame %d failed", i); GpuLogDeviceRemoved(g, "bench"); rc = 2; break; }
@@ -176,8 +192,15 @@ int RunBench(int argc, char** argv)
 
     if (p->fg && FgMultiplier(p->fg) > 1)
     {
+        FgDebugHold(p->fg);
         SaveTexPng(g, FgDebugGen(p->fg, 0), w, h, D3D12_RESOURCE_STATE_COPY_SOURCE, L"fg_gen.png");
         SaveTexPng(g, FgDebugReal(p->fg), w, h, D3D12_RESOURCE_STATE_COPY_SOURCE, L"fg_real.png");
+        if (ID3D12Resource* m = FgDebugMask(p->fg))
+        {
+            const D3D12_RESOURCE_DESC md = m->GetDesc(); std::vector<uint8_t> px((size_t)md.Width * md.Height), rgba(px.size() * 4, 255);
+            if (GpuReadbackTex(g, m, px.data(), (UINT)md.Width, md.Height, 1, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
+            { for (size_t i = 0; i < px.size(); ++i) rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = px[i]; SavePngRgba(L"fg_mask.png", rgba.data(), (UINT)md.Width, md.Height); }
+        }
     }
 
     // The UI restore on generated frames: inside a mask rect a generated frame must be pixel-exact

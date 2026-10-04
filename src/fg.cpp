@@ -48,6 +48,8 @@ struct FgSlot
 {
     ID3D12Resource *real = nullptr, *gen[kMaxGen] = {};
     bool     gen_ok = false;   // engine=warp: the pipeline wrote gen[] for THIS frame (not while paused)
+    ID3D12Resource* mask = nullptr;   // engine=latewarp: Frame Warp's no-warp mask for this frame (R8, NPSR)
+    bool     mask_ok = false;  // the pipeline wrote it for THIS frame
     int    state = 0;
     UINT64 seq = 0, fence = 0, eval_fence = 0;
     int    eval_slot = -1;    // ctx ring slot the evaluate stamped, read back when the fence lands
@@ -89,7 +91,7 @@ struct Fg
     // presenter thread
     std::thread thread;
     std::mutex mu; std::condition_variable cv;
-    std::atomic<bool> stop{ false }, failed{ false };
+    std::atomic<bool> stop{ false }, failed{ false }, hold{ false };   // hold: bench, the latewarp presenter idles so its debug textures stay put
     std::atomic<UINT> presented{ 0 }, drops{ 0 };
     // why a real frame produced no generated frame: no pair (sequence gap / reset),
     // DLSS-G raised its disable flag, or a newer slot pre-empted the schedule
@@ -517,6 +519,7 @@ static void Reproject(Fg* f)
     {
         if (vb) { if (!OverlayWaitVBlank(f->ov)) { Log("[fg] no usable vblank wait under the overlay - latewarp paced on the CPU timer"); vb = false; } }
         else Sleep((DWORD)std::max(1.0, period));
+        if (f->hold) continue;
         {
             std::lock_guard<std::mutex> lk(f->mu);
             if (FgSlot* s = TakeNewestLocked(f)) { if (cur) cur->state = 0; cur = s; fresh = true; registered = false; }
@@ -539,7 +542,7 @@ static void Reproject(Fg* f)
         OverlayGuard(f->ov, f->ctx.queue);   // the last present copy has finished reading its source
         GpuBarrier(cl, cur->real, CSRC, NPSR); GpuBarrier(cl, dst, CSRC, UAV);
         // +yaw moves content left, +pitch moves it up (measured): turn the camera against the shift
-        const bool ok = LatewarpEvaluate(f->lwf, cl, cur->real, dst, !registered, atanf(-sx / focal), atanf(-sy / focal), 0.0f, f->lw_vfov);
+        const bool ok = LatewarpEvaluate(f->lwf, cl, cur->real, dst, !registered, atanf(-sx / focal), atanf(-sy / focal), 0.0f, f->lw_vfov, cur->mask_ok && !GetEnvironmentVariableA("JF_LW_NOMASK", t, sizeof t) ? cur->mask : nullptr);
         registered = true;
         GpuBarrier(cl, dst, UAV, CSRC); GpuBarrier(cl, cur->real, NPSR, CSRC);
         CopyRects(f, cl, cur, cur->real, dst);
@@ -654,6 +657,8 @@ Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UI
     {
         if (!(f->lwf = LatewarpCreate(g, dir, out_w, out_h, mv_w, mv_h))) return fail("Frame Warp unavailable (nvngx_latewarp.dll next to the exe?)");
         for (auto& t : f->lw_final) t = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"lw_final");
+        for (auto& s : f->slots)
+            if (!(s.mask = GpuMakeTex(g, (mv_w + 3) / 4, (mv_h + 3) / 4, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"lw_mask"))) return fail("latewarp mask");
         if (!f->lw_final[0] || !f->lw_final[1]) return fail("latewarp textures");
     }
     f->thread = std::thread(f->lw ? Reproject : Presenter, f);
@@ -674,7 +679,7 @@ void FgDestroy(Fg* f)
     if (f->feature) { std::lock_guard<std::mutex> lk(NgxMutex()); f->release(f->feature); f->feature = nullptr; }
     // ponytail: no Shutdown1 - NR's parameter block lives in the same core; the refcount leaks until exit.
     if (f->params) NVSDK_NGX_D3D12_DestroyParameters(f->params);
-    for (auto& s : f->slots) { REL(s.real); for (auto& t : s.gen) REL(t); }
+    for (auto& s : f->slots) { REL(s.real); REL(s.mask); for (auto& t : s.gen) REL(t); }
     REL(f->mv); REL(f->depth); REL(f->disable); REL(f->disable_rb);
     LatewarpDestroy(f->lwf); for (auto& t : f->lw_final) REL(t);
     GpuCtxShutdown(*f->g, f->ctx);
@@ -723,6 +728,16 @@ bool FgPaused(Fg* f) { return f && f->paused.load(std::memory_order_relaxed); }
 
 ID3D12Resource* FgDebugReal(Fg* f) { return (f && f->dbg) ? f->dbg->real : nullptr; }
 
+ID3D12Resource* FgMaskTarget(Fg* f)
+{
+    if (!f->lw || !f->pending) return nullptr;
+    f->pending->mask_ok = true;   // the caller writes it in this list
+    return f->pending->mask;
+}
+
+void FgDebugHold(Fg* f) { if (f && f->lw) { f->hold = true; Sleep(100); } }   // one in-flight refresh finishes
+ID3D12Resource* FgDebugMask(Fg* f) { return (f && f->dbg) ? f->dbg->mask : nullptr; }
+
 ID3D12Resource* FgWarpTarget(Fg* f, int i)
 {
     if (!f->warp || !f->pending || i < 0 || i >= f->count) return nullptr;
@@ -760,7 +775,7 @@ ID3D12Resource* FgAcquire(Fg* f)
             f->rec_us += (UINT64)((NowMs() - t_block) * 1000.0); ++f->rec_n;
             if (!s) return nullptr;
         }
-        s->state = 1; eval = s->eval_fence; s->gen_ok = false;
+        s->state = 1; eval = s->eval_fence; s->gen_ok = false; s->mask_ok = false;
     }
     f->pending = s;
     // GPU-side ordering for the reuse: the FG queue's last evaluate of this slot (reads real/mv,

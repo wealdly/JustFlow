@@ -86,7 +86,7 @@ static void TurnedView(float m[16], float yaw, float pitch, float roll)
 }
 
 bool LatewarpEvaluate(Latewarp* l, ID3D12GraphicsCommandList* cl, ID3D12Resource* color, ID3D12Resource* out,
-                      bool rendered, float yaw, float pitch, float roll, float vfov)
+                      bool rendered, float yaw, float pitch, float roll, float vfov, ID3D12Resource* no_warp)
 {
     static float proj[16], src[16], dst[16];   // the runtime reads these while recording: keep them alive
     Perspective(proj, vfov, (float)l->w / (float)l->h);
@@ -95,7 +95,7 @@ bool LatewarpEvaluate(Latewarp* l, ID3D12GraphicsCommandList* cl, ID3D12Resource
     p->Set("Latewarp.Backbuffer", color); p->Set("Latewarp.HudlessColor", color);
     p->Set("Latewarp.UIColorAlpha", l->no_ui);
     p->Set("Depth", l->depth); p->Set("MotionVectors", l->mv); p->Set("Output", out);
-    p->Set("Latewarp.NoWarpMask", (ID3D12Resource*)nullptr);
+    p->Set("Latewarp.NoWarpMask", no_warp);
     auto rect = [&](const char* k, UINT rw, UINT rh)
     {
         const std::string b = k;
@@ -104,6 +104,7 @@ bool LatewarpEvaluate(Latewarp* l, ID3D12GraphicsCommandList* cl, ID3D12Resource
     };
     rect("Latewarp.Backbuffer", l->w, l->h); rect("Latewarp.HudlessColor", l->w, l->h); rect("Latewarp.UIColorAlpha", l->w, l->h);
     rect("Latewarp.Output", l->w, l->h); rect("Latewarp.Depth", l->dw, l->dh); rect("Latewarp.MV", l->dw, l->dh);
+    if (no_warp) { const D3D12_RESOURCE_DESC d = no_warp->GetDesc(); rect("Latewarp.NoWarpMask", (UINT)d.Width, d.Height); }
     p->Set("Latewarp.WorldToViewMatrix", (void*)dst); p->Set("Latewarp.ViewToClipMatrix", (void*)proj);
     p->Set("Latewarp.PrevRenderedWorldToViewMatrix", (void*)src); p->Set("Latewarp.PrevRenderedViewToClipMatrix", (void*)proj);
     p->Set("Latewarp.DepthInverted", 0u); p->Set("Latewarp.EvalFlags", 0u); p->Set("Latewarp.UsePremultiplyUIAlpha", 0u);
