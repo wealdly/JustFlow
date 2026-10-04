@@ -64,7 +64,7 @@ std::wstring ExeDir()
 static void WorkAuto(Config& c, UINT w, UINT h)
 {
     if (!c.work_auto || !w || !h) return;
-    if (c.work_native) { c.work_w = w; c.work_h = h; return; }
+    if (c.work_scale >= 1.0f) { c.work_w = std::max(64u, (UINT)(w / c.work_scale + 0.5f)); c.work_h = std::max(64u, (UINT)(h / c.work_scale + 0.5f)); return; }
     UINT best = 1; long best_d = 1L << 30;
     // Any divisor, rounded: CsDownscale is an exact area filter over fractional footprints. Exact
     // divisors only gave a 3840x2159 window (Chrome unfocused) no candidate but 1 - the model at 4K.
@@ -342,7 +342,7 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
     Pipeline* p = new Pipeline();
     p->g = &g; p->cfg = cfg; p->w = w; p->h = h; p->target = target;
     WorkAuto(p->cfg, w, h);
-    if (p->cfg.work_auto) Log("[nr] work auto -> %ux%u (integer divisor of the %ux%u capture nearest 1080 lines)", p->cfg.work_w, p->cfg.work_h, w, h);
+    if (p->cfg.work_auto) Log("[nr] work auto -> %ux%u (render scale of the %ux%u capture)", p->cfg.work_w, p->cfg.work_h, w, h);
     // CsGray needs an integer block: round the block, derive the gray size from it.
     const UINT bx = std::max(1u, (UINT)std::lround((double)w / cfg.ofa_w)), by = std::max(1u, (UINT)std::lround((double)h / cfg.ofa_h));
     p->gw = w / bx; p->gh = h / by;

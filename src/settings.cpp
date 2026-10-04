@@ -46,6 +46,7 @@ struct Setting
     Type           type;
     const wchar_t* opts;    // Enum: "a|b|c"
     const wchar_t* def;     // shown when the key is absent from the file
+    const wchar_t* tip;     // the row's tooltip: what it does, in the user's terms
 };
 
 // One tab per pipeline LAYER, in the order a frame passes through them: neural (the DLSS model,
@@ -56,60 +57,91 @@ struct Setting
 const wchar_t* const kTabs[] = { L"Neural", L"Filters", L"Frame gen", L"Display", L"System", L"Hotkeys" };
 const int kTabCount = (int)(sizeof kTabs / sizeof *kTabs);
 
-// Model resolutions. auto = the integer divisor of the capture nearest 1080 lines (1080p on 4K),
-// native = the capture itself. 3200x1800 and 3840x2160 are gone: the first is a non-integer ratio of
-// 4K and lost to 1080p on cost AND fidelity (main.cpp, WorkAuto), the second is `native` on 4K.
-const wchar_t* const kWork = L"auto|native|1920x1080|2560x1440";
+// Render scale, as NR / upscaler tools state it: the model at capture / N. auto = nearest 1080 lines
+// (2x on 4K). native and WxH in an ini still work (config.cpp) and show up as extra entries.
+const wchar_t* const kWork = L"auto|1x|1.5x|2x|3x";
 // Optical flow input: read by the DLSS model and the warp engines only - DLSS-G measures motion itself.
 // Measured on an idle 5080 from a 4K capture: 0.55 / 1.05 / 1.49 / 3.61 ms.
 const wchar_t* const kFlow = L"640x360|960x540|1280x720|1920x1080";
 
 const Setting kSettings[] = {
     // ---- 0 Neural layer: the switch, what runs under it, and how the model is tuned ------------
-    { 0, L"nr", L"enabled",           L"Neural layer (F9, all profiles)", Bool, nullptr, L"0" },
-    { 0, L"nr", L"work",              L"Model resolution",   Enum,  kWork,   L"auto" },
-    { 0, L"nr", L"model_every",       L"Model every Nth frame", Enum, L"1|2|3|4|6|8", L"1" },
-    { 0, L"nr", L"residual_strength", L"Neural strength",    Float, nullptr, L"1.0" },
-    { 0, L"nr", L"chroma",            L"Keep model colour",  Float, nullptr, L"1.0" },
-    { 0, L"nr", L"style",             L"Style 0=std 1=nat 2=cine", Int, nullptr, L"0" },
-    { 0, L"nr", L"local_tone",        L"Local tone/colour",  Float, nullptr, L"0.2" },
-    { 0, L"nr", L"local_structure",   L"Local structure",    Float, nullptr, L"1.0" },
+    { 0, L"nr", L"enabled",           L"Neural layer (F9, all profiles)", Bool, nullptr, L"0",
+      L"Turns the DLSS neural-rendering model on or off, for every profile. It re-renders each frame with more detail and realistic lighting. Costs 4-12 ms of GPU per frame, which can lower the game's own frame rate." },
+    { 0, L"nr", L"work",              L"Render scale",       Enum,  kWork,   L"auto",
+      L"Render scale: the size the model works at, relative to the screen. 1x = full resolution (most detail, slowest - about 12 ms at 4K). 2x = half width and height (about 4 ms at 4K). 3x = a third (fastest, softest). auto = whichever is nearest 1080p. The result is always applied at full resolution." },
+    { 0, L"nr", L"model_every",       L"Model every Nth frame", Enum, L"1|2|3|4|6|8", L"1",
+      L"Run the model on every Nth frame and reuse its result, motion-corrected, in between. 1 = every frame. Higher costs much less and keeps most of the effect, because the model mostly changes broad tone and texture." },
+    { 0, L"nr", L"residual_strength", L"Neural strength",    Float, nullptr, L"1.0",
+      L"How much of the model's change is applied. 0 = none (the original image), 1 = all of it, above 1 exaggerates it." },
+    { 0, L"nr", L"chroma",            L"Keep model colour",  Float, nullptr, L"1.0",
+      L"How much of the model's colour change to keep. 0 = the original colours, taking only its detail and lighting; 1 = its colours too." },
+    { 0, L"nr", L"style",             L"Style 0=std 1=nat 2=cine", Int, nullptr, L"0",
+      L"The model's overall look. 0 = Standard (closest to the original art), 1 = Natural, 2 = Cinematic." },
+    { 0, L"nr", L"local_tone",        L"Local tone/colour",  Float, nullptr, L"0.2",
+      L"How freely the model re-grades local tone and colour. Low keeps the original grading; high gives a stronger, more photographic look." },
+    { 0, L"nr", L"local_structure",   L"Local structure",    Float, nullptr, L"1.0",
+      L"How much fine detail and surface texture the model adds. Higher = more." },
 
     // ---- 1 Filters: ordinary post passes, independent of the neural layer ----------------------
-    { 1, L"filters", L"enabled",      L"Filter layer (F6, all profiles)",  Bool,  nullptr, L"0" },
-    { 1, L"filters", L"sharpen",      L"Sharpen",            Float, nullptr, L"0.0" },
-    { 1, L"filters", L"saturation",   L"Vibrance",           Float, nullptr, L"1.0" },
+    { 1, L"filters", L"enabled",      L"Filter layer (F6, all profiles)",  Bool,  nullptr, L"0",
+      L"Turns the sharpen and vibrance passes on or off, for every profile. They cost well under 1 ms and run after the neural layer." },
+    { 1, L"filters", L"sharpen",      L"Sharpen",            Float, nullptr, L"0.0",
+      L"Contrast-adaptive sharpening. 0 = off, 0.2-0.5 is subtle; higher can leave halos on edges." },
+    { 1, L"filters", L"saturation",   L"Vibrance",           Float, nullptr, L"1.0",
+      L"Vibrance: lifts muted colours more than ones that are already strong. 1.0 = unchanged." },
 
     // ---- 2 Frame generation ---------------------------------------------------------------------
-    { 2, L"fg", L"enabled",           L"Frame generation (F8, all profiles)", Bool, nullptr, L"1" },
+    { 2, L"fg", L"enabled",           L"Frame generation (F8, all profiles)", Bool, nullptr, L"1",
+      L"Turns frame generation on or off, for every profile: extra frames are shown between the ones the game draws, for smoother motion." },
     // engine first: it decides what the rows under it mean. latewarp runs at the display's refresh,
     // so the multiplier and the governor mean nothing to it: they grey out (SyncFgRows).
-    { 2, L"fg", L"engine",            L"Engine",             Enum,  L"dlssg|warp|latewarp", L"dlssg" },
-    { 2, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4", L"2" },
-    { 2, L"fg", L"min_gain",          L"Pause below gain",   Float, nullptr, L"1.5" },
-    { 2, L"fg", L"max_input_fps",     L"Pause above input fps", Float, nullptr, L"90" },
+    { 2, L"fg", L"engine",            L"Engine",             Enum,  L"dlssg|warp|latewarp", L"dlssg",
+      L"dlssg = NVIDIA DLSS frame generation: interpolates between two frames - the smoothest, adds about half a frame of latency. warp = pushes the newest frame ahead along its motion: no added latency, more artefacts in fast motion. latewarp = NVIDIA Frame Warp re-aims the newest frame to your mouse at every refresh: lowest latency (needs nvngx_latewarp.dll)." },
+    { 2, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4", L"2",
+      L"Frames shown per frame the game draws: 2 = double. The display has to keep up: 60 fps x4 needs 240 Hz." },
+    { 2, L"fg", L"min_gain",          L"Pause below gain",   Float, nullptr, L"1.5",
+      L"Frame generation pauses when it is not paying off - shown frames per game frame below this for 2 s (the GPU cannot keep up). 0 = never pause." },
+    { 2, L"fg", L"max_input_fps",     L"Pause above input fps", Float, nullptr, L"90",
+      L"Frame generation pauses while the game already runs faster than this: it adds little there and costs latency. 0 = no limit." },
 
     // ---- 3 Display --------------------------------------------------------------------------------
-    { 3, L"ui", L"hud",               L"Status HUD (F7)",    Bool,  nullptr, L"0" },
-    { 3, L"ui", L"hud_corner",        L"HUD corner",         Enum,  L"tl|tr|bl|br", L"tl" },
-    { 3, L"ui", L"hud_scale",         L"HUD size",           Int,   nullptr, L"3" },
-    { 3, L"ui", L"toast",             L"Toasts",             Bool,  nullptr, L"1" },
-    { 3, L"ui", L"mask",              L"JustFlow addon mask",Bool,  nullptr, L"0" },
+    { 3, L"ui", L"hud",               L"Status HUD (F7)",    Bool,  nullptr, L"0",
+      L"A small status readout in a corner: frame rates in and out, and the GPU cost of each layer." },
+    { 3, L"ui", L"hud_corner",        L"HUD corner",         Enum,  L"tl|tr|bl|br", L"tl",
+      L"Which corner the status HUD sits in: top/bottom, left/right." },
+    { 3, L"ui", L"hud_scale",         L"HUD size",           Int,   nullptr, L"3",
+      L"Status HUD text size." },
+    { 3, L"ui", L"toast",             L"Toasts",             Bool,  nullptr, L"1",
+      L"Short on-screen messages when something changes: profile, a layer switched on or off, model ready." },
+    { 3, L"ui", L"mask",              L"JustFlow addon mask",Bool,  nullptr, L"0",
+      L"Use the interface mask the JustFlow game addon publishes, so the game's UI is left untouched by the neural layer and frame generation. Only for games with the addon." },
 
     // ---- 4 System: this machine, rarely touched ---------------------------------------------------
-    { 4, L"gpu", L"adapter",          L"GPU (-1 = auto)",    Int,   nullptr, L"-1" },
-    { 4, L"capture", L"mode",         L"Capture",            Enum,  L"auto|wgc|dda", L"auto" },
-    { 4, L"ofa", L"input",            L"Flow input (model, warp)", Enum, kFlow, L"960x540" },
-    { 4, L"nr", L"max_fps",           L"FPS cap (0 = off)",  Int,   nullptr, L"0" },
+    { 4, L"gpu", L"adapter",          L"GPU (-1 = auto)",    Int,   nullptr, L"-1",
+      L"Which GPU runs JustFlow. -1 = the first NVIDIA card. The log lists the others by number." },
+    { 4, L"capture", L"mode",         L"Capture",            Enum,  L"auto|wgc|dda", L"auto",
+      L"How the picture is captured. auto = the best for this Windows version. wgc = Windows Graphics Capture (one window). dda = Desktop Duplication (the whole monitor, full refresh rate)." },
+    { 4, L"ofa", L"input",            L"Flow input (model, warp)", Enum, kFlow, L"960x540",
+      L"Size of the motion-measuring pass used by the neural model and the warp engines (DLSS frame generation measures its own). Larger = more accurate motion and more GPU time: about 0.5 ms at 640x360, 3.6 ms at 1920x1080." },
+    { 4, L"nr", L"max_fps",           L"FPS cap (0 = off)",  Int,   nullptr, L"0",
+      L"Caps how many frames per second JustFlow processes, to save GPU time when the game runs faster than you need. 0 = no cap." },
 
     // ---- 5 Hotkeys ---------------------------------------------------------------------------------
-    { 5, L"hotkeys", L"toggle",       L"Neural layer",       Hotkey, nullptr, L"F9" },
-    { 5, L"hotkeys", L"filters",      L"Filter layer",       Hotkey, nullptr, L"F6" },
-    { 5, L"hotkeys", L"fg",           L"Frame generation",   Hotkey, nullptr, L"F8" },
-    { 5, L"hotkeys", L"hud",          L"Status HUD",         Hotkey, nullptr, L"F7" },
-    { 5, L"hotkeys", L"wipe",         L"Wipe compare",       Hotkey, nullptr, L"F10" },
-    { 5, L"hotkeys", L"reload",       L"Reload config",      Hotkey, nullptr, L"F11" },
-    { 5, L"hotkeys", L"quit",         L"Quit",               Hotkey, nullptr, L"Ctrl+F12" },
+    { 5, L"hotkeys", L"toggle",       L"Neural layer",       Hotkey, nullptr, L"F9",
+      L"Global hotkey: neural layer on/off." },
+    { 5, L"hotkeys", L"filters",      L"Filter layer",       Hotkey, nullptr, L"F6",
+      L"Global hotkey: filter layer on/off." },
+    { 5, L"hotkeys", L"fg",           L"Frame generation",   Hotkey, nullptr, L"F8",
+      L"Global hotkey: frame generation on/off." },
+    { 5, L"hotkeys", L"hud",          L"Status HUD",         Hotkey, nullptr, L"F7",
+      L"Global hotkey: status HUD on/off." },
+    { 5, L"hotkeys", L"wipe",         L"Wipe compare",       Hotkey, nullptr, L"F10",
+      L"Global hotkey: before/after compare - a split, then a moving wipe, then off." },
+    { 5, L"hotkeys", L"reload",       L"Reload config",      Hotkey, nullptr, L"F11",
+      L"Global hotkey: re-read justflow.ini and the profile after editing them by hand." },
+    { 5, L"hotkeys", L"quit",         L"Quit",               Hotkey, nullptr, L"Ctrl+F12",
+      L"Global hotkey: quit JustFlow." },
 };
 const int kCount = (int)(sizeof kSettings / sizeof *kSettings);
 
@@ -160,7 +192,7 @@ const PresetKey kPreset[] = {
     // Performance stays the small per-frame evaluate because it is the one that cannot hitch a game
     // sharing the GPU; a native evaluate is one ~12 ms block at 4K. The old 1440p / 1800p tiers were
     // non-integer ratios of 4K and lost to 1080p on cost AND fidelity (see WorkAuto in main.cpp).
-    { L"nr",  L"work",    { L"auto",      L"auto",      L"native",    L"native" } },
+    { L"nr",  L"work",    { L"auto",      L"auto",      L"1x",        L"1x" } },
     { L"nr",  L"model_every", { L"3",     L"1",         L"6",         L"3" } },
     { L"filters", L"sharpen", { L"0.4",   L"0.3",       L"0.2",       L"0.0" } },
     { L"ofa", L"input",   { L"640x360",   L"960x540",   L"960x540",   L"1280x720" } },
@@ -245,7 +277,7 @@ std::vector<WORD> BuildTemplate()
         const Setting& s = kSettings[i];
         const int y = 30 + row[s.tab]++ * 16;
         // label 116 DLU: the longest label measured 160 px against the old 150 (bench: label_fit)
-        item(SS_LEFT, 14, y + 2, 116, 9, (WORD)(ID_LBL0 + i), 0x0082, nullptr, s.label);
+        item(SS_LEFT | SS_NOTIFY, 14, y + 2, 116, 9, (WORD)(ID_LBL0 + i), 0x0082, nullptr, s.label);
         if (s.type == Bool)
             item(BS_AUTOCHECKBOX | WS_TABSTOP, 134, y, 120, 10, (WORD)(ID_CTL0 + i), 0x0080, nullptr, L"");
         else if (s.type == Enum)
@@ -254,7 +286,7 @@ std::vector<WORD> BuildTemplate()
             item(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 134, y, s.type == Hotkey ? 110 : 70, 12, (WORD)(ID_CTL0 + i), 0x0081, nullptr, L"");
     }
     // Quality preset, outside the tabs because it reaches across them (neural, filters, flow input).
-    item(SS_LEFT, 7, btn_y + 3, 32, 9, ID_PRESET_LBL, 0x0082, nullptr, L"Quality");
+    item(SS_LEFT | SS_NOTIFY, 7, btn_y + 3, 32, 9, ID_PRESET_LBL, 0x0082, nullptr, L"Quality");
     item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 40, btn_y + 1, 84, 90, ID_PRESET, 0x0085, nullptr, L"");
     item(BS_PUSHBUTTON | WS_TABSTOP, 128, btn_y, 52, 15, ID_APPLY, 0x0080, nullptr, L"Apply");
     item(BS_DEFPUSHBUTTON | WS_TABSTOP, 185, btn_y, 52, 15, IDOK, 0x0080, nullptr, L"OK");
@@ -344,6 +376,24 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             SendMessageW(q, CB_ADDSTRING, 0, (LPARAM)L"(custom)");
             for (int i = 0; i < kPresetCount; ++i) SendMessageW(q, CB_ADDSTRING, 0, (LPARAM)PresetName(i));
             SendMessageW(q, CB_SETCURSEL, (d->profile && *d->profile) ? PresetCurrent(d->profile) + 1 : 0, 0);
+        }
+        // Tooltips: every row's label and control, and the quality preset. TTTOOLINFOW_V2_SIZE: the
+        // full struct is refused by comctl32 v5, which is what an exe without a v6 manifest gets.
+        if (HWND tt = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+                                      CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, h, nullptr, GetModuleHandleW(nullptr), nullptr))
+        {
+            SendMessageW(tt, TTM_SETMAXTIPWIDTH, 0, 420);
+            SendMessageW(tt, TTM_SETDELAYTIME, TTDT_AUTOPOP, 30000);
+            auto add = [&](int id, const wchar_t* text)
+            {
+                TTTOOLINFOW ti = {}; ti.cbSize = TTTOOLINFOW_V2_SIZE; ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+                ti.hwnd = h; ti.uId = (UINT_PTR)GetDlgItem(h, id); ti.lpszText = const_cast<wchar_t*>(text);
+                SendMessageW(tt, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+            };
+            for (int i = 0; i < kCount; ++i) if (kSettings[i].tip) { add(ID_LBL0 + i, kSettings[i].tip); add(ID_CTL0 + i, kSettings[i].tip); }
+            static const wchar_t* const kPresetTip = L"Fills in the cost settings - render scale, model every Nth frame, sharpen, motion input - "
+                L"for a speed/quality balance. Nothing is saved until Apply or OK, and no layer is switched on.";
+            add(ID_PRESET_LBL, kPresetTip); add(ID_PRESET, kPresetTip);
         }
         ShowTab(h, 0);
         SyncFgRows(h);

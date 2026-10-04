@@ -100,7 +100,8 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     const std::wstring work = S(L"nr", L"work", L"auto");
     if (swscanf_s(work.c_str(), L"%ux%u", &c.work_w, &c.work_h) != 2) { c.work_w = c.work_h = 0; }
     c.work_auto = !c.work_w || !c.work_h;
-    c.work_native = work == L"native";
+    // render scale, as NR / upscaler tools state it: 1x = the capture itself, 2x = half each way, ...
+    c.work_scale = work == L"native" ? 1.0f : (work.size() > 1 && (work.back() == L'x' || work.back() == L'X')) ? (float)_wtof(work.c_str()) : 0.0f;
     c.param_block = I(L"nr", L"param_block", c.param_block);
     c.tuning.preset = I(L"nr", L"preset", c.tuning.preset);
     c.tuning.style = I(L"nr", L"style", c.tuning.style);

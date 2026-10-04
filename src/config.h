@@ -39,7 +39,7 @@ struct Config
     bool  nr_enabled = false;              // out of the box: frame generation only (README)
     UINT  work_w = 0, work_h = 0;          // 0 = auto until the capture size is known (WorkAuto in main.cpp)
     bool  work_auto = false;               // [nr] work=auto: re-derived from the native size, never from a fixed number
-    bool  work_native = false;             // [nr] work=native: the model at the capture size, 1:1 (pair it with model_every)
+    float work_scale = 0;                  // [nr] work=Nx: the model at capture / N (1x = native, 2x = half); 0 = auto or WxH
     int   param_block = 1;                 // 1 Allocate, 2 Capability, 3 Own           [app layer]
     NrTuning tuning;
     float exposure_scale = 1.0f;
