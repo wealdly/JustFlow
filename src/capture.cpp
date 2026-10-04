@@ -10,7 +10,7 @@
 #include <unknwn.h>
 #include <inspectable.h>
 #include <d3d11_4.h>
-#include <dxgi1_2.h>
+#include <dxgi1_6.h>
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Metadata.h>
@@ -51,7 +51,9 @@ struct Capture
     wgc::GraphicsCaptureItem::Closed_revoker              closed_rev;
     wgc::Direct3D11CaptureFramePool::FrameArrived_revoker arrived_rev;
     volatile LONG closed = 0;
-    bool is_float = false, format_logged = false, masked = false;
+    bool is_float = false, format_logged = false;
+    DXGI_FORMAT fmt = DXGI_FORMAT_B8G8R8A8_UNORM;   // the shared textures: BGRA8, or FP16 for DDA of an HDR desktop
+    float sdr_white = 0;                            // HDR desktop: its SDR white level, scRGB units
     UINT pend_w = 0, pend_h = 0; ULONGLONG pend_since = 0;   // size-change deadband
     // Desktop Duplication path (delivers at the monitor refresh; WGC window capture tops out at 60 Hz)
     IDXGIOutputDuplication* dup = nullptr;
@@ -95,7 +97,7 @@ static bool CreateBridge(Gpu& g, Capture* c)
     {
         D3D11_TEXTURE2D_DESC sd = {};
         sd.Width = c->w; sd.Height = c->h; sd.MipLevels = 1; sd.ArraySize = 1;
-        sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count = 1; sd.Usage = D3D11_USAGE_DEFAULT;
+        sd.Format = c->fmt; sd.SampleDesc.Count = 1; sd.Usage = D3D11_USAGE_DEFAULT;
         sd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         sd.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
         if (FAILED(c->dev->CreateTexture2D(&sd, nullptr, &c->shared11[i]))) { Log("[cap] shared texture %d failed", i); goto done; }
@@ -105,7 +107,7 @@ static bool CreateBridge(Gpu& g, Capture* c)
         REL(r1);
         if (FAILED(hr)) { Log("[cap] CreateSharedHandle failed 0x%08X", hr); goto done; }
         hr = g.dev->OpenSharedHandle(nt, __uuidof(ID3D12Resource), (void**)&c->shared12[i]);
-        Log("[cap] shared handle %p -> D3D12 resource %d (BGRA8 %ux%u) 0x%08X", nt, i, c->w, c->h, hr);
+        Log("[cap] shared handle %p -> D3D12 resource %d (%s %ux%u) 0x%08X", nt, i, c->fmt == DXGI_FORMAT_R16G16B16A16_FLOAT ? "FP16" : "BGRA8", c->w, c->h, hr);
         CloseHandle(nt); nt = nullptr;
         if (FAILED(hr)) goto done;
         c->shared12[i]->SetName(i ? L"capture_shared1" : L"capture_shared0");
@@ -131,6 +133,26 @@ static bool WindowRegion(HWND target, const RECT& out, RECT& region)
     return region.right > region.left && region.bottom > region.top;
 }
 
+// The SDR white level Windows composes SDR content at on an HDR monitor, in scRGB units (1.0 = 80 nits).
+static float SdrWhite(HMONITOR mon)
+{
+    MONITORINFOEXW mi = {}; mi.cbSize = sizeof mi;
+    UINT32 np = 0, nm = 0;
+    if (!GetMonitorInfoW(mon, &mi) || GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &np, &nm) != ERROR_SUCCESS) return 1.0f;
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(np); std::vector<DISPLAYCONFIG_MODE_INFO> modes(nm);
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &np, paths.data(), &nm, modes.data(), nullptr) != ERROR_SUCCESS) return 1.0f;
+    for (UINT32 i = 0; i < np; ++i)
+    {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME src = {};
+        src.header = { DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, sizeof src, paths[i].sourceInfo.adapterId, paths[i].sourceInfo.id };
+        if (DisplayConfigGetDeviceInfo(&src.header) != ERROR_SUCCESS || wcscmp(src.viewGdiDeviceName, mi.szDevice)) continue;
+        DISPLAYCONFIG_SDR_WHITE_LEVEL wl = {};
+        wl.header = { DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL, sizeof wl, paths[i].targetInfo.adapterId, paths[i].targetInfo.id };
+        if (DisplayConfigGetDeviceInfo(&wl.header) == ERROR_SUCCESS && wl.SDRWhiteLevel) return wl.SDRWhiteLevel / 1000.0f;
+    }
+    return 1.0f;
+}
+
 static bool OpenDda(Gpu& g, Capture* c)
 {
     const HMONITOR mon = MonitorFromWindow(c->target, MONITOR_DEFAULTTONEAREST);
@@ -142,21 +164,34 @@ static bool OpenDda(Gpu& g, Capture* c)
         out->Release(); out = nullptr;
     }
     if (!out) { Log("[cap] DDA: the game's monitor is not on adapter %d - plug the display into that card, or change [gpu] adapter in justflow.ini (the startup log lists them)", g.adapter_index); return false; }
+    // An HDR desktop comes as FP16 scRGB, converted to 8-bit in our swizzle at the SDR white level
+    // (capture_in.hlsli). Asking Windows for BGRA8 converts it at 80 nits = white: far too bright.
+    HRESULT hr = E_NOINTERFACE;
+    IDXGIOutput5* out5 = nullptr;
+    if (SUCCEEDED(out->QueryInterface(__uuidof(IDXGIOutput5), (void**)&out5)))
+    {
+        const DXGI_FORMAT fmts[] = { DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM };
+        hr = out5->DuplicateOutput1(c->dev, 0, 2, fmts, &c->dup);
+        out5->Release();
+    }
     IDXGIOutput1* out1 = nullptr;
-    out->QueryInterface(__uuidof(IDXGIOutput1), (void**)&out1);
+    if (FAILED(hr)) out->QueryInterface(__uuidof(IDXGIOutput1), (void**)&out1);
     out->Release();
-    if (!out1) { Log("[cap] DDA: IDXGIOutput1 unavailable"); return false; }
-    const HRESULT hr = out1->DuplicateOutput(c->dev, &c->dup);
-    out1->Release();
+    if (FAILED(hr) && !out1) { Log("[cap] DDA: IDXGIOutput1 unavailable"); return false; }
+    if (out1) { hr = out1->DuplicateOutput(c->dev, &c->dup); out1->Release(); }
     if (FAILED(hr)) { Log("[cap] DDA: DuplicateOutput failed 0x%08X - falling back to window capture", (unsigned)hr); return false; }
     if (!WindowRegion(c->target, c->out_rect, c->win_rect)) { Log("[cap] DDA: window has no visible region"); c->dup->Release(); c->dup = nullptr; return false; }
     c->w = (UINT)(c->win_rect.right - c->win_rect.left); c->h = (UINT)(c->win_rect.bottom - c->win_rect.top);
     DXGI_OUTDUPL_DESC dd = {}; c->dup->GetDesc(&dd);
+    if (dd.ModeDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
+    {
+        c->fmt = DXGI_FORMAT_R16G16B16A16_FLOAT; c->is_float = true; c->sdr_white = SdrWhite(mon);
+        Log("[cap] DDA: HDR desktop - FP16, converted at SDR white %.0f nits", c->sdr_white * 80.0f);
+    }
     Log("[cap] DDA: monitor %ldx%ld @ %u/%u Hz, format %u, region %ux%u at %ld,%ld",
         c->out_rect.right - c->out_rect.left, c->out_rect.bottom - c->out_rect.top,
         dd.ModeDesc.RefreshRate.Numerator, dd.ModeDesc.RefreshRate.Denominator, (unsigned)dd.ModeDesc.Format,
         c->w, c->h, c->win_rect.left - c->out_rect.left, c->win_rect.top - c->out_rect.top);
-    c->is_float = dd.ModeDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
     c->format_logged = true;
     return true;
 }
@@ -171,7 +206,6 @@ static bool AcquireDda(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG&
     c->dup_frame_held = true;
     c->accum_last = info.AccumulatedFrames; c->accum_sum += info.AccumulatedFrames; ++c->accum_n;
     if (info.LastPresentTime.QuadPart == 0) { res->Release(); return false; }   // only the cursor / metadata moved
-    c->masked = info.ProtectedContentMaskedOut != 0;
     // Desktop Duplication reports updates of the whole OUTPUT, and LastPresentTime moves for any of
     // them - another app repainting, a notification, a video on the same monitor. Cropping to our
     // window afterwards does not make that a frame of the game: measured on a Notepad window that
@@ -225,8 +259,9 @@ static bool AcquireDda(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG&
     res->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&tex);
     res->Release();
     if (!tex) return false;
+    D3D11_TEXTURE2D_DESC fd = {}; tex->GetDesc(&fd);
     const int idx = (int)((c->fence_value + 1) % Capture::kRing);
-    if (!c->is_float)
+    if (fd.Format == c->fmt)   // an HDR switch mid-session changes it: the copy would fail, the reopen fixes it
     {
         D3D11_BOX box = { (UINT)(c->win_rect.left - c->out_rect.left), (UINT)(c->win_rect.top - c->out_rect.top), 0,
                           (UINT)(c->win_rect.right - c->out_rect.left), (UINT)(c->win_rect.bottom - c->out_rect.top), 1 };
@@ -416,6 +451,7 @@ UINT CaptureForeign(Capture* c) { return c ? (UINT)InterlockedExchange(&c->forei
 double CaptureAccumMean(Capture* c) { if (!c || !c->dup || !c->accum_n) return 0; double m = (double)c->accum_sum / (double)c->accum_n; c->accum_sum = 0; c->accum_n = 0; return m; }
 UINT            CaptureHeight(Capture* c)  { return c->h; }
 bool            CaptureIsFloat(Capture* c) { return c->is_float; }
+float           CaptureSdrWhite(Capture* c) { return c->fmt == DXGI_FORMAT_R16G16B16A16_FLOAT ? c->sdr_white : 0.0f; }
 bool            CaptureIsDda(Capture* c)   { return c && c->dup != nullptr; }
 
 bool CaptureSizeChanged(Capture* c, UINT& new_w, UINT& new_h)
@@ -424,8 +460,6 @@ bool CaptureSizeChanged(Capture* c, UINT& new_w, UINT& new_h)
     new_w = c->pend_w; new_h = c->pend_h;
     return true;
 }
-
-bool CaptureProtected(Capture* c) { return c && c->masked; }
 
 bool CaptureLost(Capture* c)
 {

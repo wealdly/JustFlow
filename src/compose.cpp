@@ -73,7 +73,7 @@ Shaders* ShadersCreate(Gpu& g)
 {
     Shaders* s = new Shaders();
     bool ok = true;
-    ok &= GpuMakeCompute(g, g_cs_swizzle,   sizeof g_cs_swizzle,   1, 1, 2,  s->swizzle,   L"cs_swizzle");
+    ok &= GpuMakeCompute(g, g_cs_swizzle,   sizeof g_cs_swizzle,   1, 1, 3,  s->swizzle,   L"cs_swizzle");
     ok &= GpuMakeCompute(g, g_cs_gray,      sizeof g_cs_gray,      1, 1, 6,  s->gray,      L"cs_gray");
     ok &= GpuMakeCompute(g, g_cs_downscale, sizeof g_cs_downscale, 1, 1, 4,  s->downscale, L"cs_downscale");
     ok &= GpuMakeCompute(g, g_cs_expand,    sizeof g_cs_expand,    1, 1,  9, s->expand,    L"cs_expand");
@@ -83,7 +83,7 @@ Shaders* ShadersCreate(Gpu& g)
     ok &= GpuMakeCompute(g, g_cs_warp, sizeof g_cs_warp, 5, 1, 8, s->warp, L"cs_warp");
     ok &= GpuMakeCompute(g, g_cs_mvgrid, sizeof g_cs_mvgrid, 1, 1, 2, s->mvgrid, L"cs_mvgrid");
     ok &= GpuMakeCompute(g, g_cs_nowarp, sizeof g_cs_nowarp, 1, 1, 6, s->nowarp, L"cs_nowarp");
-    ok &= GpuMakeCompute(g, g_cs_same, sizeof g_cs_same, 2, 1, 2, s->same, L"cs_same");
+    ok &= GpuMakeCompute(g, g_cs_same, sizeof g_cs_same, 2, 1, 3, s->same, L"cs_same");
     ok &= GpuMakeCompute(g, g_cs_text,      sizeof g_cs_text,      1, 1, 24, s->text,      L"cs_text");
     ok &= GpuMakeCompute(g, g_cs_sharpen,   sizeof g_cs_sharpen,   2, 1, 5,  s->sharpen,   L"cs_sharpen");
     s->rect_tex = GpuMakeTex(g, kRectInts, 1, DXGI_FORMAT_R32_SINT, D3D12_RESOURCE_FLAG_NONE,
@@ -116,11 +116,11 @@ void ShadersDestroy(Shaders* s)
 }
 
 // ---------------------------------------------------------------------------------------------
-void CsSwizzle(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* dst, UINT w, UINT h)
+void CsSwizzle(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* dst, UINT w, UINT h, float white)
 {
-    const UINT c[2] = { w, h };
-    const GpuView srv = { src, DXGI_FORMAT_B8G8R8A8_UNORM }, uav = { dst, DXGI_FORMAT_R8G8B8A8_UNORM };
-    GpuDispatch(g, cl, s->swizzle, &srv, &uav, c, GpuGroups(w, 8), GpuGroups(h, 8));
+    const struct { UINT w, h; float white; } c = { w, h, white };
+    const GpuView srv = { src, DXGI_FORMAT_UNKNOWN }, uav = { dst, DXGI_FORMAT_R8G8B8A8_UNORM };
+    GpuDispatch(g, cl, s->swizzle, &srv, &uav, &c, GpuGroups(w, 8), GpuGroups(h, 8));
 }
 
 void CsGray(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, UINT w, UINT h, ID3D12Resource* dst, UINT gw, UINT gh)
@@ -226,11 +226,11 @@ void CsNoWarpMask(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resou
     GpuDispatch(g, cl, s->nowarp, &srv, &uav, &c, GpuGroups(mw, 8), GpuGroups(mh, 8));
 }
 
-void CsSame(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* cap, ID3D12Resource* prev, UINT w, UINT h, ID3D12Resource* tiles)
+void CsSame(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* cap, ID3D12Resource* prev, UINT w, UINT h, float white, ID3D12Resource* tiles)
 {
-    const UINT c[2] = { w, h };
-    const GpuView srv[2] = { { cap, DXGI_FORMAT_B8G8R8A8_UNORM }, { prev, DXGI_FORMAT_R8G8B8A8_UNORM } }, uav = { tiles, DXGI_FORMAT_R8_UNORM };
-    GpuDispatch(g, cl, s->same, srv, &uav, c, GpuGroups(w, 64), GpuGroups(h, 64));
+    const struct { UINT w, h; float white; } c = { w, h, white };
+    const GpuView srv[2] = { { cap, DXGI_FORMAT_UNKNOWN }, { prev, DXGI_FORMAT_R8G8B8A8_UNORM } }, uav = { tiles, DXGI_FORMAT_R8_UNORM };
+    GpuDispatch(g, cl, s->same, srv, &uav, &c, GpuGroups(w, 64), GpuGroups(h, 64));
 }
 
 void CsMvGrid(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* grid)

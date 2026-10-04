@@ -2,6 +2,7 @@
 #include "latewarp.h"
 #include "mouse.h"
 #include "pipeline.h"
+#include <DirectXPackedVector.h>
 #include "png.h"
 #include <cmath>
 #include "log.h"
@@ -108,11 +109,27 @@ int RunBench(int argc, char** argv)
     if (!p) { GpuShutdown(g); return 1; }
     p->measure_ofa = true;
 
+    // TEST JF_BENCH_HDR=<white>: the frames arrive as an HDR desktop does under DDA - FP16 scRGB, SDR content
+    // sRGB-decoded and scaled to that white (400 nits = 5.0) - through the same swizzle conversion as live.
+    char hv[16]; const float hdr = GetEnvironmentVariableA("JF_BENCH_HDR", hv, sizeof hv) ? (float)atof(hv) : 0.0f;
+    if (hdr > 0) { p->hdr_white = hdr; Log("[bench] input as FP16 scRGB, SDR white %.2f", hdr); }
     std::vector<ID3D12Resource*> tex;
     for (size_t i = 0; i < images.size(); ++i)
     {
-        ID3D12Resource* t = GpuMakeTex(g, w, h, DXGI_FORMAT_B8G8R8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON, L"bench_capture");
-        if (!t || !GpuUploadTex(g, t, images[i].data(), w, h, 4, D3D12_RESOURCE_STATE_COMMON)) { Log("[bench] upload %zu failed", i); PipelineDestroy(p); GpuShutdown(g); return 1; }
+        std::vector<uint16_t> half;
+        if (hdr > 0)
+        {
+            half.resize((size_t)w * h * 4);
+            for (size_t k = 0; k < half.size(); ++k)
+            {
+                const size_t px = k / 4, ch = k % 4;   // images are BGRA bytes; FP16 is RGBA
+                const float v = images[i][px * 4 + (ch == 3 ? 3 : 2 - ch)] / 255.0f;
+                const float lin = ch == 3 ? 1.0f : (v <= 0.04045f ? v / 12.92f : powf((v + 0.055f) / 1.055f, 2.4f)) * hdr;
+                half[k] = DirectX::PackedVector::XMConvertFloatToHalf(lin);
+            }
+        }
+        ID3D12Resource* t = GpuMakeTex(g, w, h, hdr > 0 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON, L"bench_capture");
+        if (!t || !GpuUploadTex(g, t, hdr > 0 ? (const void*)half.data() : (const void*)images[i].data(), w, h, hdr > 0 ? 8 : 4, D3D12_RESOURCE_STATE_COMMON)) { Log("[bench] upload %zu failed", i); PipelineDestroy(p); GpuShutdown(g); return 1; }
         tex.push_back(t);
     }
     images.clear();

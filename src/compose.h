@@ -10,7 +10,8 @@ Shaders* ShadersCreate(Gpu& g);
 void     ShadersDestroy(Shaders* s);
 
 // BGRA8 capture (w x h) -> RGBA8 color (w x h).
-void CsSwizzle(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src_bgra, ID3D12Resource* dst_rgba, UINT w, UINT h);
+// white: 0 for a BGRA8 capture; for an FP16 (HDR desktop) one the SDR white level in scRGB units (CaptureSdrWhite)
+void CsSwizzle(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* dst_rgba, UINT w, UINT h, float white = 0);
 // RGBA8 (w x h) -> R8 luminance (gw x gh), exact area average (block = w/gw x h/gh, integer).
 void CsGray(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src_rgba, UINT w, UINT h, ID3D12Resource* dst_r8, UINT gw, UINT gh);
 // RGBA8 (w x h) -> RGBA8 (dw x dh), area box filter (any ratio).
@@ -62,7 +63,7 @@ constexpr UINT kMvGridW = 32, kMvGridH = 18, kMvGridPitch = kMvGridW * 8;   // r
 void CsNoWarpMask(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* mask, UINT mw, UINT mh, float gx, float gy);
 // Duplicate-frame test: cap (BGRA8) vs prev (RGBA8, color4k before this frame's swizzle) -> tiles, R8
 // (w+63)/64 x (h+63)/64 (UAV), 1 where the 64x64 tile changed at all.
-void CsSame(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* cap, ID3D12Resource* prev, UINT w, UINT h, ID3D12Resource* tiles);
+void CsSame(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* cap, ID3D12Resource* prev, UINT w, UINT h, float white, ID3D12Resource* tiles);
 void CsMvGrid(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* grid);
 // ---- on-screen text -------------------------------------------------------------------------
 // Draws `text` (ASCII 32..126, up to 64 chars, 8x8 font at `scale` px per font pixel) white with a

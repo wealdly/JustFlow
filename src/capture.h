@@ -37,5 +37,6 @@ bool CaptureSizeChanged(Capture* c, UINT& new_w, UINT& new_h);
 bool CaptureLost(Capture* c);
 // True if frames arrive as FP16 (HDR). Phase 1 refuses these with a log line.
 bool CaptureIsFloat(Capture* c);
-// DDA: the last frame had protected (DRM) content blacked out by Windows. WGC cannot tell (false).
-bool CaptureProtected(Capture* c);
+// DDA of an HDR desktop: the shared texture is FP16 scRGB, and this is the SDR white level it was composed
+// at, in scRGB units (Settings > HDR > SDR content brightness / 80 nits). 0 for a BGRA8 capture.
+float CaptureSdrWhite(Capture* c);

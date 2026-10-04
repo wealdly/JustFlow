@@ -549,7 +549,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (check_same)
     {
         GpuBarrier(cl, p->same, CSRC, UAV);
-        CsSame(g, p->sh, cl, cap, p->color4k, p->w, p->h, p->same);
+        CsSame(g, p->sh, cl, cap, p->color4k, p->w, p->h, p->hdr_white, p->same);
         GpuBarrier(cl, p->same, UAV, CSRC);
         const D3D12_RESOURCE_DESC sd = p->same->GetDesc();
         D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
@@ -559,7 +559,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     }
     GpuBarrier(cl, p->color4k, NPSR, UAV);
-    stamp(2 * PS_SWIZZLE); CsSwizzle(g, p->sh, cl, cap, p->color4k, p->w, p->h); stamp(2 * PS_SWIZZLE + 1);
+    stamp(2 * PS_SWIZZLE); CsSwizzle(g, p->sh, cl, cap, p->color4k, p->w, p->h, p->hdr_white); stamp(2 * PS_SWIZZLE + 1);
     GpuBarrier(cl, p->color4k, UAV, NPSR);
     // addon mask: the top-left strip of this frame -> this slot's readback buffer (decoded once retired)
     int strip_slot = -1;
@@ -1292,10 +1292,6 @@ static int RealMain(int argc, char** argv)
         }
 
         bool reset = true, dormant = false;
-        // Protected (DRM) video is blacked out in any capture; re-presented, it is a black hole on the
-        // screen. DDA says when it masked some: the overlay steps aside until a frame arrives without.
-        bool masked = false;
-        auto follow = [&] { if (!masked) OverlayFollow(p->ov, cfg.reassert_topmost_every); };
         LONGLONG last_sysrel = 0;
         UINT frames = 0, skips = 0, rate_drops = 0; double last_processed_ms = 0;
         double win_t0 = NowMs();
@@ -1394,7 +1390,7 @@ static int RealMain(int argc, char** argv)
                 ++skips;
                 // Every empty wait: a game that lost the foreground often stops rendering, and the
                 // overlay must hide promptly (OverlayFollow throttles its own geometry query to 50 ms).
-                follow();
+                OverlayFollow(p->ov, cfg.reassert_topmost_every);
                 // No sleep here. CaptureAcquire already blocks on its own timeout (AcquireNextFrame /
                 // the frame event), and every early return runs after that wait, so this cannot spin.
                 // The Sleep(1) that was here stalled the capture loop on every MOUSE MOVE: Desktop
@@ -1405,14 +1401,8 @@ static int RealMain(int argc, char** argv)
                 // after acq_ms and before cpu_ms, so no stat ever showed it.
                 continue;
             }
-            if (CaptureIsFloat(cap)) { Log("[main] FP16 (HDR) capture is not supported in phase 1 - exiting"); quit = true; rc = 2; break; }
-            if (CaptureProtected(cap) != masked)
-            {
-                masked = !masked;
-                Log("[main] protected video %s", masked ? "on screen - overlay steps aside" : "gone - overlay back");
-                if (masked) OverlayHide(p->ov);
-            }
-            if (masked) continue;
+            p->hdr_white = CaptureSdrWhite(cap);   // an HDR desktop duplicated as FP16: converted in the swizzle
+            if (CaptureIsFloat(cap) && p->hdr_white <= 0) { Log("[main] FP16 (HDR) window capture is not supported - exiting"); quit = true; rc = 2; break; }
             LARGE_INTEGER acq; QueryPerformanceCounter(&acq);
             const double t0 = NowMs();
             // max_fps: a GPU-bound game (Dawnwalker with 3X FG presents ~135 fps) would otherwise get a
@@ -1437,7 +1427,7 @@ static int RealMain(int argc, char** argv)
             acq_ms.add(acq_acc); hud_acq.add(acq_acc); acq_acc = 0;
             if (!PipelineFrame(p, CaptureTexture(cap), CaptureFence(cap), fv, reset)) { Log("[main] frame failed - exiting"); GpuLogDeviceRemoved(g, "frame"); quit = true; rc = 3; break; }
             reset = false;
-            follow();
+            OverlayFollow(p->ov, cfg.reassert_topmost_every);
             if (cfg.stats_every > 0) cpu_ms.push_back(NowMs() - t0);   // only the [stats] tick reads it, and only that tick clears it
             if (p->last_evaluated && dumped < dump) DumpFrame(p, dir, dumped++);
             ++hud_frames;
