@@ -117,6 +117,9 @@ struct Pipeline
     ID3D12Resource *nr_in_m = nullptr, *nr_out_m = nullptr, *mv_m = nullptr;   // work res: NPSR, UAV, NPSR
     // latewarp engine: the flow averaged on a 32x18 grid, read back a few frames later for the mouse model
     ID3D12Resource* mvgrid = nullptr; ID3D12Resource* mvgrid_rb[4] = {};
+    // duplicate frames (CsSame): per-64px-tile change flags, read back in the same frame before FG
+    ID3D12Resource* same = nullptr; ID3D12Resource* same_rb = nullptr; UINT same_pitch = 0;
+    UINT     dups = 0;   // stats: captures identical to the previous one, not handed to FG
     struct { UINT64 fence = 0; LONGLONG t0 = 0, t1 = 0; } mvgrid_q[4];
     LONGLONG lw_prev_cap = 0;
     float    lw_g[2] = {};   // the flow's median (work px, backward) from the last grid read back: the camera's motion

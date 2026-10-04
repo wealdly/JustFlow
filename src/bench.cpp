@@ -179,7 +179,7 @@ int RunBench(int argc, char** argv)
         if (p->last_evaluated && ++evaluated == std::max(0, cfg.warmup)) for (auto& s : p->st) s.v.clear();   // drop warm-up samples
     }
     const double wall = NowMs() - t0;
-    Log("[bench] last input frame %d of %zu", last_in, tex.size());   // final_*.png and mv_bench.f32 describe this one
+    Log("[bench] last input frame %d of %zu, %u duplicates not handed to FG", last_in, tex.size(), p->dups);   // final_*.png and mv_bench.f32 describe this one
     GpuWaitIdle(g);
     PipelineReadStamps(p);
     if (p->fg)

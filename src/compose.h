@@ -60,6 +60,9 @@ void CsWarp(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* s
 constexpr UINT kMvGridW = 32, kMvGridH = 18, kMvGridPitch = kMvGridW * 8;   // readback row pitch: 256, already aligned
 // Frame Warp's no-warp mask from mv (NPSR) and its median (gx, gy): R8 mw x mh (UAV), 1 = not the camera's motion.
 void CsNoWarpMask(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* mask, UINT mw, UINT mh, float gx, float gy);
+// Duplicate-frame test: cap (BGRA8) vs prev (RGBA8, color4k before this frame's swizzle) -> tiles, R8
+// (w+63)/64 x (h+63)/64 (UAV), 1 where the 64x64 tile changed at all.
+void CsSame(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* cap, ID3D12Resource* prev, UINT w, UINT h, ID3D12Resource* tiles);
 void CsMvGrid(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* grid);
 // ---- on-screen text -------------------------------------------------------------------------
 // Draws `text` (ASCII 32..126, up to 64 chars, 8x8 font at `scale` px per font pixel) white with a

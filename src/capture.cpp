@@ -348,7 +348,11 @@ bool CaptureAcquire(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG& sy
         }
         sys_rel_100ns = frame.SystemRelativeTime().count();
         const auto cs = frame.ContentSize();
-        if ((UINT)cs.Width != c->w || (UINT)cs.Height != c->h)
+        // Within 8 px is not a resize: Chrome fullscreen goes 2160 -> 2159 lines whenever it loses the
+        // foreground and back when it regains it, and each one rebuilt capture and FG (~0.5 s). The pool
+        // surface stays c->w x c->h, so the copy below is still in bounds; a missing row is one stale row.
+        const auto close_to = [](UINT a, UINT b) { return (a > b ? a - b : b - a) <= 8; };
+        if (!close_to((UINT)cs.Width, c->w) || !close_to((UINT)cs.Height, c->h))
         {
             if ((UINT)cs.Width != c->pend_w || (UINT)cs.Height != c->pend_h) { c->pend_w = cs.Width; c->pend_h = cs.Height; c->pend_since = GetTickCount64(); }
             frame.Close();
