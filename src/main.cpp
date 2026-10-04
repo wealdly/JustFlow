@@ -178,8 +178,8 @@ static bool AllocNative(Pipeline* p)
     p->sharp4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, D3D12_RESOURCE_STATE_COPY_SOURCE, L"sharp4k");
     p->shown = p->out4k;
     const UINT tw = (p->w + 63) / 64, th = (p->h + 63) / 64;
-    p->same_pitch = (tw + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
-    p->same = GpuMakeTex(g, tw, th, DXGI_FORMAT_R8_UNORM, FUAV, CSRC, L"same");
+    p->same_pitch = (tw * 2 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+    p->same = GpuMakeTex(g, tw, th, DXGI_FORMAT_R8G8_UNORM, FUAV, CSRC, L"same"); p->same_prev.clear();
     p->same_rb = GpuMakeBuffer(g, (UINT64)p->same_pitch * th, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"same_rb");
     if (p->w % p->gw || p->h % p->gh) Log("[main] warning: gray block %ux%u -> %ux%u is not integer", p->w, p->h, p->gw, p->gh);
     return p->color4k && p->gray && p->out4k && p->sharp4k && p->same && p->same_rb;
@@ -555,7 +555,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
         src.pResource = p->same; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         dst.pResource = p->same_rb; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        dst.PlacedFootprint.Footprint = { DXGI_FORMAT_R8_UNORM, (UINT)sd.Width, sd.Height, 1, p->same_pitch };
+        dst.PlacedFootprint.Footprint = { DXGI_FORMAT_R8G8_UNORM, (UINT)sd.Width, sd.Height, 1, p->same_pitch };
         cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     }
     GpuBarrier(cl, p->color4k, NPSR, UAV);
@@ -616,12 +616,6 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (!f1) return false;
     if (strip_slot >= 0) p->strip_fence[strip_slot] = f1;
     MaskUpdate(p);
-    if (handoff)
-    {
-        mf.fence = f1;
-        { std::lock_guard<std::mutex> lk(p->model_mu); p->model_frame = mf; p->model_frame_ready = true; }
-        p->model_cv.notify_one();
-    }
     PipelineReadStamps(p);
 
     // ---- optical flow (pair 0, per frame; the model track runs its own on pair 1) -----------------
@@ -644,6 +638,62 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (ov) g.queue->Wait(OfaFence(p->ofa), ov);
     if (ov2) g.queue->Wait(OfaFence(p->ofa), ov2);   // also orders the next list 1's hand-off copies after this read of the held slot
     if (wait_pub) g.queue->Wait(p->model_ctx.fence, p->cmp_fence);
+
+    // ---- duplicate / scene-cut test (CsSame in list 1), before anything below uses `reset` -------------
+    // A capture identical to the last one (a browser repainting the same video frame at the display
+    // rate) is not a frame: handed to FG it inflated "fps in" past the governor's floor and paired
+    // identical images. A scene cut (a film changing camera, a game teleporting) is a reset: the model
+    // carried the old shot's history into the new one and smeared it for several frames, and DLSS-G
+    // interpolated between two unrelated images. List 1 is tiny and the OFA submission ran after it,
+    // so the wait is normally free.
+    bool dup = false, cut = false;
+    if (!check_same) p->same_prev.clear();   // the previous frame is not comparable across a reset
+    else if (GpuWait(g, g.fence, f1, 100))
+    {
+        const D3D12_RESOURCE_DESC sd = p->same->GetDesc(); uint8_t* px = nullptr;
+        const UINT n = (UINT)sd.Width * sd.Height;
+        const D3D12_RANGE rr = { 0, (SIZE_T)p->same_pitch * sd.Height };
+        if (SUCCEEDED(p->same_rb->Map(0, &rr, (void**)&px)))
+        {
+            const UINT tw = (UINT)sd.Width, th = sd.Height;
+            std::vector<uint8_t> cur(n); UINT changed = 0;
+            for (UINT y = 0; y < th; ++y)
+                for (UINT x = 0; x < tw; ++x)
+                {
+                    const uint8_t* t = px + (size_t)y * p->same_pitch + x * 2;
+                    changed += t[0] != 0; cur[y * tw + x] = t[1];
+                }
+            const D3D12_RANGE none = { 0, 0 }; p->same_rb->Unmap(0, &none);
+            dup = changed == 0;
+            // Each tile against the closest of the previous frame's 3x3 tiles around it, so camera motion
+            // up to a tile a frame is not change. tools/scene: motion <= 0.016 (a 30 fps third-person turn
+            // included), a jump to another angle of the same scene >= 0.042. ponytail: one global
+            // threshold - a miss is a few smeared frames, a false hit one frame without history.
+            if (!dup && p->same_prev.size() == n)
+            {
+                UINT dsum = 0;
+                for (UINT y = 0; y < th; ++y)
+                    for (UINT x = 0; x < tw; ++x)
+                    {
+                        int best = 255;
+                        for (UINT yy = y ? y - 1 : 0; yy <= std::min(y + 1, th - 1); ++yy)
+                            for (UINT xx = x ? x - 1 : 0; xx <= std::min(x + 1, tw - 1); ++xx)
+                                best = std::min(best, abs((int)cur[y * tw + x] - (int)p->same_prev[yy * tw + xx]));
+                        dsum += (UINT)best;
+                    }
+                cut = dsum > 0.03 * 255.0 * n;
+            }
+            if (!dup) p->same_prev.swap(cur);
+        }
+    }
+    if (dup) ++p->dups;
+    if (cut) { reset = true; ++p->cuts; p->cut_frame = p->frame_index; }
+    if (handoff)
+    {
+        mf.fence = f1; mf.reset |= cut;
+        { std::lock_guard<std::mutex> lk(p->model_mu); p->model_frame = mf; p->model_frame_ready = true; }
+        p->model_cv.notify_one();
+    }
 
     // ---- list 2: expand, (create | evaluate), compose, hand-off to the presenter -------------------
     tw = NowMs();
@@ -746,7 +796,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         cp.strip_w = (int)kStripW; cp.strip_h = (int)kStripH;
     }
     for (int i = 0; i < c.nrects && cp.nrects < 64; ++i) cp.rects[cp.nrects++] = c.rects[i];
-    const bool native = async ? p->cmp_idx < 0 : (!evaluated || p->evals_since_create <= (UINT)std::max(0, c.warmup));
+    const bool native = async ? (p->cmp_idx < 0 || residual_frame < p->cut_frame) : (!evaluated || p->evals_since_create <= (UINT)std::max(0, c.warmup));
     if (native) cp.wipe_mode = 2;
     else if (p->wipe == 1) { cp.wipe_mode = 1; cp.wipe_x = 0.5f; }
     else if (p->wipe == 2) { cp.wipe_mode = 1; cp.wipe_x = (float)fmod((NowMs() - p->wipe_t0) / 2000.0, 1.0); }
@@ -755,24 +805,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // 33 MB written per frame, ~6 GB/s of memory traffic at 90 fps, for a copy that produced nothing
     // the previous pass had not already computed. Nobody downstream needs to know: the slot texture
     // has the same format, size and resting state (COPY_SOURCE) as the targets it replaces.
-    // A capture identical to the last one (a browser repainting the same video frame at the display
-    // rate) is not a frame: handed to FG it inflated "fps in" past the governor's floor and paired
-    // identical images. The overlay keeps showing the last one. List 1 finished long ago (the OFA
-    // and this list's recording ran after it), so the wait is normally free.
-    bool dup = false;
-    if (check_same && p->fg && GpuWait(g, g.fence, f1, 100))
-    {
-        const D3D12_RESOURCE_DESC sd = p->same->GetDesc(); uint8_t* px = nullptr;
-        const D3D12_RANGE rr = { 0, (SIZE_T)p->same_pitch * sd.Height };
-        if (SUCCEEDED(p->same_rb->Map(0, &rr, (void**)&px)))
-        {
-            dup = true;
-            for (UINT y = 0; y < sd.Height && dup; ++y)
-                for (UINT x = 0; x < (UINT)sd.Width; ++x) if (px[(size_t)y * p->same_pitch + x]) { dup = false; break; }
-            const D3D12_RANGE none = { 0, 0 }; p->same_rb->Unmap(0, &none);
-        }
-        if (dup) ++p->dups;
-    }
+    // A duplicate (above) is not handed to FG: the overlay keeps showing the last frame.
     ID3D12Resource* const fg_dst = (p->fg && !dup) ? FgAcquire(p->fg) : nullptr;
     const bool filt = FiltersLive(c);
     ID3D12Resource* const compose_dst = filt ? p->out4k : (fg_dst ? fg_dst : p->out4k);
@@ -1487,8 +1520,8 @@ static int RealMain(int argc, char** argv)
                 double pres_prev = -1, pres_call = -1, pres_total = -1;
                 if (p->ov) OverlayPresentStats(p->ov, pres_prev, pres_call, pres_total);
                 char mask[16]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "none");
-                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f acq_ms=%.2f dda_accum=%.2f dda_foreign=%u static_skips=%u rate_drops=%u dups=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u fg_gen=%u fg_nopair=%u fg_disabled=%u fg_preempt=%u fg_paused=%u fg_eval_ms=%.2f/%.2f(med/p95) pres_ms=%.2f(prev %.2f, call %.2f) vbwait_ms=%.2f recwait_ms=%.2f/%u model_fps=%.1f model_ms=%.2f residual_age_frames=%.1f mask=%s vram_mb=%.0f/%.0f",
-                    cap_fps, p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), acq_ms.med(), CaptureAccumMean(cap), CaptureForeign(cap), skips, rate_drops, p->dups, age.med(), pipe.med(),
+                Log("[stats] cap_fps=%.1f eval_ms=%.2f/%.2f(med/p95) frame_gpu_ms=%.2f cpu_ms=%.2f acq_ms=%.2f dda_accum=%.2f dda_foreign=%u static_skips=%u rate_drops=%u dups=%u cuts=%u age_ms=%.1f pipe_ms=%.1f fg_out_fps=%.1f fg_spacing_ms=%.2f/%.2f(med/p95) fg_drops=%u fg_gen=%u fg_nopair=%u fg_disabled=%u fg_preempt=%u fg_paused=%u fg_eval_ms=%.2f/%.2f(med/p95) pres_ms=%.2f(prev %.2f, call %.2f) vbwait_ms=%.2f recwait_ms=%.2f/%u model_fps=%.1f model_ms=%.2f residual_age_frames=%.1f mask=%s vram_mb=%.0f/%.0f",
+                    cap_fps, p->st[PS_EVAL].med(), p->st[PS_EVAL].p95(), gpu, cpu.med(), acq_ms.med(), CaptureAccumMean(cap), CaptureForeign(cap), skips, rate_drops, p->dups, p->cuts, age.med(), pipe.med(),
                     fg_fps, spacing.med(), spacing.p95(), fs.drops, fs.gen_shown, fs.no_pair, fs.disabled, fs.preempts, fs.paused, fg_eval, fg_eval_p95, pres_total, pres_prev, pres_call, fs.vblank_waits ? fs.vblank_wait_sum_ms / fs.vblank_waits : -1.0,
                     fs.record_waits ? fs.record_wait_sum_ms / fs.record_waits : -1.0, fs.record_waits,
                     model_evals * 1000.0 / span, mm.med(), p->residual_age.med(), mask, vram_used, vram_budget);
@@ -1500,7 +1533,7 @@ static int RealMain(int argc, char** argv)
                     p->st[PS_SWIZZLE].med(), p->st[PS_GRAYDS].med(), p->st[PS_EXPAND].med(), p->st[PS_EVAL].med(), p->st[PS_COMPOSE].med(), p->st[PS_FILTER].med(),
                     p->cpu_wait[0].med(), p->cpu_wait[1].med(), p->cpu_wait[2].med(), p->cpu_wait[3].med());
                 for (auto& s : p->cpu_wait) s.v.clear();
-                frames = 0; skips = 0; rate_drops = 0; p->dups = 0; win_t0 = NowMs(); cpu_ms.clear(); acq_ms.v.clear();
+                frames = 0; skips = 0; rate_drops = 0; p->dups = 0; p->cuts = 0; win_t0 = NowMs(); cpu_ms.clear(); acq_ms.v.clear();
                 for (auto& s : p->st) s.v.clear();
             }
         }

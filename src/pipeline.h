@@ -121,6 +121,9 @@ struct Pipeline
     ID3D12Resource* same = nullptr; ID3D12Resource* same_rb = nullptr; UINT same_pitch = 0;
     float    hdr_white = 0;   // the capture is FP16 (HDR desktop): its SDR white in scRGB units (main sets it per frame)
     UINT     dups = 0;   // stats: captures identical to the previous one, not handed to FG
+    UINT     cuts = 0;   // stats: scene cuts (the model and FG were reset)
+    UINT     cut_frame = 0;   // frame_index of the last cut: async residuals from before it are not composed
+    std::vector<uint8_t> same_prev;   // the previous frame's tile luma (CsSame G), for the cut test
     struct { UINT64 fence = 0; LONGLONG t0 = 0, t1 = 0; } mvgrid_q[4];
     LONGLONG lw_prev_cap = 0;
     float    lw_g[2] = {};   // the flow's median (work px, backward) from the last grid read back: the camera's motion

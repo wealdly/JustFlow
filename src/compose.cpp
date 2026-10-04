@@ -229,7 +229,7 @@ void CsNoWarpMask(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resou
 void CsSame(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* cap, ID3D12Resource* prev, UINT w, UINT h, float white, ID3D12Resource* tiles)
 {
     const struct { UINT w, h; float white; } c = { w, h, white };
-    const GpuView srv[2] = { { cap, DXGI_FORMAT_UNKNOWN }, { prev, DXGI_FORMAT_R8G8B8A8_UNORM } }, uav = { tiles, DXGI_FORMAT_R8_UNORM };
+    const GpuView srv[2] = { { cap, DXGI_FORMAT_UNKNOWN }, { prev, DXGI_FORMAT_R8G8B8A8_UNORM } }, uav = { tiles, DXGI_FORMAT_R8G8_UNORM };
     GpuDispatch(g, cl, s->same, srv, &uav, &c, GpuGroups(w, 64), GpuGroups(h, 64));
 }
 
