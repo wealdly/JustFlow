@@ -66,7 +66,7 @@ const wchar_t* const kFlow = L"640x360|960x540|1280x720|1920x1080";
 
 const Setting kSettings[] = {
     // ---- 0 Neural layer: the switch, what runs under it, and how the model is tuned ------------
-    { 0, L"nr", L"enabled",           L"Neural layer (F9, 4-12 ms)", Bool, nullptr, L"0" },
+    { 0, L"nr", L"enabled",           L"Neural layer (F9, all profiles)", Bool, nullptr, L"0" },
     { 0, L"nr", L"work",              L"Model resolution",   Enum,  kWork,   L"auto" },
     { 0, L"nr", L"model_every",       L"Model every Nth frame", Enum, L"1|2|3|4|6|8", L"1" },
     { 0, L"nr", L"residual_strength", L"Neural strength",    Float, nullptr, L"1.0" },
@@ -76,12 +76,12 @@ const Setting kSettings[] = {
     { 0, L"nr", L"local_structure",   L"Local structure",    Float, nullptr, L"1.0" },
 
     // ---- 1 Filters: ordinary post passes, independent of the neural layer ----------------------
-    { 1, L"filters", L"enabled",      L"Filter layer (F6)",  Bool,  nullptr, L"0" },
+    { 1, L"filters", L"enabled",      L"Filter layer (F6, all profiles)",  Bool,  nullptr, L"0" },
     { 1, L"filters", L"sharpen",      L"Sharpen",            Float, nullptr, L"0.0" },
     { 1, L"filters", L"saturation",   L"Vibrance",           Float, nullptr, L"1.0" },
 
     // ---- 2 Frame generation ---------------------------------------------------------------------
-    { 2, L"fg", L"enabled",           L"Frame generation (F8)", Bool, nullptr, L"1" },
+    { 2, L"fg", L"enabled",           L"Frame generation (F8, all profiles)", Bool, nullptr, L"1" },
     // engine first: it decides what the rows under it mean. latewarp runs at the display's refresh,
     // so the multiplier and the governor mean nothing to it: they grey out (SyncFgRows).
     { 2, L"fg", L"engine",            L"Engine",             Enum,  L"dlssg|warp|latewarp", L"dlssg" },
@@ -160,7 +160,6 @@ const PresetKey kPreset[] = {
     // Performance stays the small per-frame evaluate because it is the one that cannot hitch a game
     // sharing the GPU; a native evaluate is one ~12 ms block at 4K. The old 1440p / 1800p tiers were
     // non-integer ratios of 4K and lost to 1080p on cost AND fidelity (see WorkAuto in main.cpp).
-    { L"nr",  L"enabled", { L"1",         L"1",         L"1",         L"1" } },
     { L"nr",  L"work",    { L"auto",      L"auto",      L"native",    L"native" } },
     { L"nr",  L"model_every", { L"3",     L"1",         L"6",         L"3" } },
     { L"filters", L"sharpen", { L"0.4",   L"0.3",       L"0.2",       L"0.0" } },
@@ -525,21 +524,22 @@ INT_PTR CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         L"; fill it in if two windows share a title. Both come from the window, never the process.\n\n"
         L"[capture]\nmode=auto\nwindow_class=" + win.cls + L"\nwindow_title=" + win.title + L"\ncursor=0\nborder=0\n"
         L"; class seen when this profile was made: " + win.cls + L"\n\n"
-        L"[nr]\n; enabled = the neural layer (F9): the DLSS neural-rendering model, 4-12 ms. Off by default.\n"
+        L"; Quality dials only: the layer switches (F9 neural, F6 filters, F8 frame generation) are\n"
+        L"; app-wide, in justflow.ini.\n\n"
+        L"[nr]\n; the DLSS neural-rendering model, 4-12 ms.\n"
         L"; work=auto follows the capture (1080p on 4K); native runs the model at full size.\n"
-        L"enabled=0\nwork=auto\nchroma=0.25\n"
+        L"work=auto\nchroma=0.25\n"
         L"; model_every=N runs the model on every Nth frame off the main path. Raise it (2-4) when the\n"
         L"; game presents faster than the model can follow - e.g. a game running its own frame generation.\n"
         L"model_every=1\n\n"
         L"[filters]\n; its own layer, applied after the neural one: sharpen then vibrance.\n"
-        L"; enabled=0 bypasses the layer without losing these values (F6).\n"
-        L"enabled=0\nsharpen=0.4\nsaturation=1.10\n\n"
+        L"sharpen=0.4\nsaturation=1.10\n\n"
         L"[ofa]\n; optical flow, for the DLSS model and the warp engines (DLSS-G does its own)\ninput=960x540\n\n"
         L"[ui]\nfeather=12\n\n"
-        L"[fg]\n; on by default: turn it off (F8) when the game has its own frame generation\n"
+        L"[fg]\n"
         L"; engine = dlssg (interpolates, +half a frame of latency) | warp (extrapolates our flow, no added\n"
         L"; latency) | latewarp (NVIDIA Frame Warp to the mouse at every refresh; needs nvngx_latewarp.dll)\n"
-        L"enabled=1\nengine=dlssg\nmultiplier=2\n\n"
+        L"engine=dlssg\nmultiplier=2\n\n"
         L"[log]\nfile=justflow." + stem + L".log\n";
     FILE* f = nullptr;
     if (_wfopen_s(&f, path.c_str(), L"wt,ccs=UTF-8") == 0 && f)

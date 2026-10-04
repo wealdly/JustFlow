@@ -16,7 +16,12 @@ static const AppKey kAppKeys[] = {
     { L"log", L"stats_every" }, { L"log", L"gpu_timestamps" }, { L"log", L"selftest" },
     { L"gpu", nullptr },
     { L"ofa", L"dll_path" },
-    { L"nr", L"param_block" },
+    { L"nr", L"param_block" }, { L"nr", L"enabled" },
+    // The three layer switches (F9 / F6 / F8, the tray, Settings) are the user's, not a game's: one state
+    // for every profile. Profiles set quality dials only - a profile that switched layers on made
+    // picking it (or a preset) turn the 4-12 ms model on behind the user's back.
+    { L"filters", L"enabled" },
+    { L"fg", L"enabled" },
 };
 
 static bool IsAppKey(const wchar_t* sec, const wchar_t* key)
