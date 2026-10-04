@@ -70,6 +70,8 @@ const Setting kSettings[] = {
       L"Turns the DLSS neural-rendering model on or off, for every profile. It re-renders each frame with more detail and realistic lighting. Costs 4-12 ms of GPU per frame, which can lower the game's own frame rate." },
     { 0, L"nr", L"work",              L"Render scale",       Enum,  kWork,   L"auto",
       L"Render scale: the size the model works at, relative to the screen. 1x = full resolution (most detail, slowest - about 12 ms at 4K). 2x = half width and height (about 4 ms at 4K). 3x = a third (fastest, softest). auto = whichever is nearest 1080p. The result is always applied at full resolution." },
+    { 0, L"nr", L"passes",            L"Model passes",       Enum,  L"1|2|3", L"1",
+      L"How many times the model runs on each frame, each pass refining the last one's result: a stronger, more detailed look. Costs that many times the model's GPU time (2 = double). 1 is what the model was made for; 2 gives a richer look; 3 is the most that still adds anything." },
     { 0, L"nr", L"model_every",       L"Model every Nth frame", Enum, L"1|2|3|4|6|8", L"1",
       L"Run the model on every Nth frame and reuse its result, motion-corrected, in between. 1 = every frame. Higher costs much less and keeps most of the effect, because the model mostly changes broad tone and texture." },
     { 0, L"nr", L"residual_strength", L"Neural strength",    Float, nullptr, L"1.0",

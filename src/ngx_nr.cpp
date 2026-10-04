@@ -1,6 +1,7 @@
 #include "ngx_nr.h"
 #include "log.h"
 #include "nvsdk_ngx.h"
+#include <algorithm>
 #include <map>
 #include <string>
 #include <vector>
@@ -49,7 +50,10 @@ struct Nr
     NrParamBlock block = NrBlockAllocate;
     bool core_inited = false;
     int float_slot = -1;          // -2 = typed Set(float) works, >=0 = vtable slot, -1 = unknown
-    NVSDK_NGX_Handle* feature = nullptr;
+    static const int kMaxPasses = 3;
+    NVSDK_NGX_Handle* feature = nullptr;   // pass 1; passes 2..3 in more[] (nullptr when not configured)
+    NVSDK_NGX_Handle* more[kMaxPasses - 1] = {};
+    ID3D12Resource*   mid[2] = {};         // passes > 1: pass outputs feeding the next pass (RGBA8 work size, UAV at rest)
     bool submitted = false;
     NrConfig live;
     std::vector<Retired> retired;
@@ -156,6 +160,8 @@ void NrShutdown(Nr* n)
     if (!n) return;
     for (auto& r : n->retired) n->release(r.h);
     if (n->feature) n->release(n->feature);
+    for (auto*& h : n->more) if (h) n->release(h);
+    for (auto*& t : n->mid) if (t) t->Release();
     if (n->core_inited && n->block != NrBlockOwn) { NVSDK_NGX_D3D12_DestroyParameters(n->params); NVSDK_NGX_D3D12_Shutdown1(n->g->dev); }
     if (n->fwd) FreeLibrary(n->fwd);
     delete n;
@@ -179,29 +185,57 @@ static void SetTuning(Nr* n, const NrTuning& t)
     SetU(n, "DLSSNR.UICorrection", t.ui_correction ? 1u : 0u);
 }
 
+// Pass k's tuning: pass 1 as configured; later passes the same minus local tone, which would re-grade
+// an already re-graded image (OptiScaler: "local tone is applied only by the first layer").
+static NrTuning PassTuning(const NrTuning& t, int k) { NrTuning p = t; if (k) p.local_tone = 0.0f; return p; }
+
+static NVSDK_NGX_Handle* CreateOne(Nr* n, ID3D12GraphicsCommandList* cl, const NrConfig& cfg, const NrTuning& tuning);
+
 bool NrCreate(Nr* n, ID3D12GraphicsCommandList* cl, const NrConfig& cfg)
 {
     if (n->feature) { n->retired.push_back({ n->feature, 32 }); n->feature = nullptr; n->submitted = false; }
+    for (auto*& h : n->more) if (h) { n->retired.push_back({ h, 32 }); h = nullptr; }
+    const int passes = std::clamp(cfg.passes, 1, Nr::kMaxPasses);
+    NVSDK_NGX_Handle* first = CreateOne(n, cl, cfg, PassTuning(cfg.tuning, 0));
+    if (!first) return false;
+    for (int k = 1; k < passes; ++k)
+        if (!(n->more[k - 1] = CreateOne(n, cl, cfg, PassTuning(cfg.tuning, k)))) { Log("[ngx] pass %d not created - running %d", k + 1, k); break; }
+    for (int i = 0; i < 2; ++i)
+    {
+        const bool need = n->more[i] != nullptr;   // pass i+2 reads mid[i]
+        const D3D12_RESOURCE_DESC d = n->mid[i] ? n->mid[i]->GetDesc() : D3D12_RESOURCE_DESC{};
+        if (n->mid[i] && (!need || d.Width != cfg.work_w || d.Height != cfg.work_h)) { n->mid[i]->Release(); n->mid[i] = nullptr; }
+        if (need && !n->mid[i]) n->mid[i] = GpuMakeTex(*n->g, cfg.work_w, cfg.work_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"nr_pass");
+        if (need && !n->mid[i]) { n->release(n->more[i]); n->more[i] = nullptr; }
+    }
+    n->feature = first; n->live = cfg; n->submitted = false;
+    int live = 1; for (auto* h : n->more) live += h != nullptr;
+    Log("[ngx] feature 18 created %ux%u preset %d, %d pass%s (submit before evaluating)", cfg.work_w, cfg.work_h, cfg.tuning.preset, live, live > 1 ? "es" : "");
+    return true;
+}
+
+static NVSDK_NGX_Handle* CreateOne(Nr* n, ID3D12GraphicsCommandList* cl, const NrConfig& cfg, const NrTuning& tuning)
+{
     n->params->Reset();
     SetU(n, "CreationNodeMask", 1u); SetU(n, "VisibilityNodeMask", 1u);
     SetU(n, "DLSSNR.Enabled", 1u);
     SetU(n, "DLSSNR.Width", cfg.work_w); SetU(n, "DLSSNR.Height", cfg.work_h);
     // No Input/Output dims, no Upscaling/Scale: feature 18 ignores them. Measured - the old
     // "style A" set all six and produced byte-identical output at 1080p and 1440p.
-    SetTuning(n, cfg.tuning);
+    SetTuning(n, tuning);
     NVSDK_NGX_Handle* h = nullptr; DWORD code = 0;
     NVSDK_NGX_Result r = (NVSDK_NGX_Result)0x7FFFFFFF;
     NgxMutex().lock();   // no lock_guard: __try forbids unwindable objects in this frame
     __try { r = n->create(cl, NVSDK_NGX_Feature_Reserved18, n->params, &h); } __except (EXCEPTION_EXECUTE_HANDLER) { code = GetExceptionCode(); }
     NgxMutex().unlock();
-    if (code) { n->last_error = "CreateFeature raised an exception"; Log("[ngx] CreateFeature raised 0x%08X", code); return false; }
-    if (NVSDK_NGX_FAILED(r) || !h) { n->last_error = NgxResultName(r); Log("[ngx] CreateFeature(18) %ux%u -> 0x%08X (%s)", cfg.work_w, cfg.work_h, r, NgxResultName(r)); return false; }
-    n->feature = h; n->live = cfg; n->submitted = false;
-    Log("[ngx] feature 18 created %ux%u preset %d (submit before evaluating)", cfg.work_w, cfg.work_h, cfg.tuning.preset);
-    return true;
+    if (code) { n->last_error = "CreateFeature raised an exception"; Log("[ngx] CreateFeature raised 0x%08X", code); return nullptr; }
+    if (NVSDK_NGX_FAILED(r) || !h) { n->last_error = NgxResultName(r); Log("[ngx] CreateFeature(18) %ux%u -> 0x%08X (%s)", cfg.work_w, cfg.work_h, r, NgxResultName(r)); return nullptr; }
+    return h;
 }
 
 bool NrMatches(const Nr* n, UINT w, UINT h) { return n && n->feature && n->live.work_w == w && n->live.work_h == h; }
+
+static unsigned EvaluateOne(Nr* n, ID3D12GraphicsCommandList* cl, NVSDK_NGX_Handle* f, const NrTuning& tuning, ID3D12Resource* color, ID3D12Resource* mv, ID3D12Resource* output, bool reset, float exposure_scale);
 
 unsigned NrEvaluate(Nr* n, ID3D12GraphicsCommandList* cl, ID3D12Resource* color, ID3D12Resource* mv, ID3D12Resource* output, bool reset, float exposure_scale)
 {
@@ -221,6 +255,23 @@ unsigned NrEvaluate(Nr* n, ID3D12GraphicsCommandList* cl, ID3D12Resource* color,
             return NVSDK_NGX_Result_FAIL_InvalidParameter;
         }
     }
+    // pass k reads pass k-1's output: color -> mid[0] -> mid[1] -> output, as many as are live
+    int last = 0; while (last < 2 && n->more[last]) ++last;   // index of the last pass
+    ID3D12Resource* in = color; unsigned r = 1;
+    for (int k = 0; k <= last && r == 1; ++k)
+    {
+        ID3D12Resource* out = k == last ? output : n->mid[k];
+        r = EvaluateOne(n, cl, k ? n->more[k - 1] : n->feature, PassTuning(n->live.tuning, k), in, mv, out, reset, exposure_scale);
+        if (k < last) GpuBarrier(cl, out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        in = out;
+    }
+    for (int i = 0; i < last; ++i) GpuBarrier(cl, n->mid[i], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    return r;
+}
+
+static unsigned EvaluateOne(Nr* n, ID3D12GraphicsCommandList* cl, NVSDK_NGX_Handle* f, const NrTuning& tuning, ID3D12Resource* color, ID3D12Resource* mv, ID3D12Resource* output, bool reset, float exposure_scale)
+{
+    const UINT w = n->live.work_w, h = n->live.work_h;
     n->params->Reset();
     SetRes(n, "DLSSNR.Color", color); SetRes(n, "DLSSNR.Output", output); SetRes(n, "DLSSNR.MVec", mv);
     SetU(n, "DLSSNR.ColorSubrectBaseX", 0u); SetU(n, "DLSSNR.ColorSubrectBaseY", 0u);
@@ -232,11 +283,11 @@ unsigned NrEvaluate(Nr* n, ID3D12GraphicsCommandList* cl, ID3D12Resource* color,
     SetF(n, "DLSSNR.MVecScaleX", 1.0f); SetF(n, "DLSSNR.MVecScaleY", 1.0f);
     SetU(n, "DLSSNR.Enabled", 1u); SetU(n, "DLSSNR.Reset", reset ? 1u : 0u);
     SetU(n, "DLSSNR.Width", w); SetU(n, "DLSSNR.Height", h);
-    SetTuning(n, n->live.tuning);
+    SetTuning(n, tuning);
     SetF(n, "DLSS.Pre.Exposure", 1.0f); SetF(n, "DLSS.Exposure.Scale", exposure_scale);
     DWORD code = 0; NVSDK_NGX_Result r = (NVSDK_NGX_Result)0x7FFFFFFF;
     NgxMutex().lock();
-    __try { r = n->evaluate(cl, n->feature, n->params, nullptr); } __except (EXCEPTION_EXECUTE_HANDLER) { code = GetExceptionCode(); }
+    __try { r = n->evaluate(cl, f, n->params, nullptr); } __except (EXCEPTION_EXECUTE_HANDLER) { code = GetExceptionCode(); }
     NgxMutex().unlock();
     if (code) { n->last_error = "EvaluateFeature raised an exception"; Log("[ngx] evaluate raised 0x%08X", code); n->g->failed = true; return 0xBAD00000; }
     if (NVSDK_NGX_FAILED(r)) { n->last_error = NgxResultName(r); }

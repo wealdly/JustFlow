@@ -1,5 +1,6 @@
 #include "config.h"
 #include "capture.h"
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <cwctype>
@@ -100,6 +101,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     const std::wstring work = S(L"nr", L"work", L"auto");
     if (swscanf_s(work.c_str(), L"%ux%u", &c.work_w, &c.work_h) != 2) { c.work_w = c.work_h = 0; }
     c.work_auto = !c.work_w || !c.work_h;
+    c.nr_passes = std::clamp(I(L"nr", L"passes", c.nr_passes), 1, 3);
     // render scale, as NR / upscaler tools state it: 1x = the capture itself, 2x = half each way, ...
     c.work_scale = work == L"native" ? 1.0f : (work.size() > 1 && (work.back() == L'x' || work.back() == L'X')) ? (float)_wtof(work.c_str()) : 0.0f;
     c.param_block = I(L"nr", L"param_block", c.param_block);
@@ -186,7 +188,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
 bool ConfigNeedsRebuild(const Config& a, const Config& b)
 {
     const NrTuning &x = a.tuning, &y = b.tuning;
-    return a.work_w != b.work_w || a.work_h != b.work_h || a.param_block != b.param_block ||
+    return a.work_w != b.work_w || a.work_h != b.work_h || a.nr_passes != b.nr_passes || a.param_block != b.param_block ||
            x.preset != y.preset || x.style != y.style || x.intensity != y.intensity || x.local_tone != y.local_tone ||
            x.local_structure != y.local_structure || x.skin_structure != y.skin_structure || x.auto_mask != y.auto_mask || x.ui_correction != y.ui_correction;
 }
@@ -199,7 +201,7 @@ bool ConfigNeedsRestart(const Config& a, const Config& b)
 
 NrConfig ConfigToNr(const Config& c)
 {
-    NrConfig n; n.work_w = c.work_w; n.work_h = c.work_h;
+    NrConfig n; n.work_w = c.work_w; n.work_h = c.work_h; n.passes = c.nr_passes;
     n.block = (NrParamBlock)c.param_block;
     n.tuning = c.tuning;
     return n;
