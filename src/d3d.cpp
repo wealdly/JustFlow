@@ -354,7 +354,14 @@ void GpuUavBarrier(ID3D12GraphicsCommandList* cl, ID3D12Resource* r)
     cl->ResourceBarrier(1, &b);
 }
 
-static UINT AlignUp(UINT v, UINT a) { return (v + a - 1) & ~(a - 1); }
+void GpuCopyToReadback(ID3D12GraphicsCommandList* cl, ID3D12Resource* tex, ID3D12Resource* rb, DXGI_FORMAT fmt, UINT w, UINT h, UINT pitch, const D3D12_BOX* box)
+{
+    D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+    src.pResource = tex; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.pResource = rb; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Footprint = { fmt, w, h, 1, pitch };
+    cl->CopyTextureRegion(&dst, 0, 0, 0, &src, box);
+}
 
 bool GpuUploadTex(Gpu& g, ID3D12Resource* tex, const void* pixels, UINT w, UINT h, UINT bpp, D3D12_RESOURCE_STATES tex_state)
 {

@@ -18,12 +18,12 @@ void CSMain(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint gi : SV_G
 {
     if (gi == 0) { diff = 0; lsum = 0; cnt = 0; }
     GroupMemoryBarrierWithGroupSync();
-    const uint2 o = gid.xy * 64 + tid.xy * 8;
+    const uint2 o = gid.xy * 64 + tid.xy;   // lanes on adjacent texels; each thread steps through the tile by 8
     uint d = 0, l = 0, n = 0;
     [loop] for (uint y = 0; y < 8; ++y)
         [loop] for (uint x = 0; x < 8; ++x)
         {
-            const uint2 q = o + uint2(x, y);
+            const uint2 q = o + uint2(x, y) * 8;
             if (q.x >= w || q.y >= h) continue;
             const float4 c = round(saturate(CaptureIn(a, q, white)) * 255);   // as color4k will store it
             if (any(c != round(b[q] * 255))) d = 1;

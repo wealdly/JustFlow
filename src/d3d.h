@@ -106,6 +106,10 @@ void GpuUavBarrier(ID3D12GraphicsCommandList* cl, ID3D12Resource* r);
 // Upload CPU pixels into a texture (row pitch = w * bpp). Blocking; for spikes/bench only.
 bool GpuUploadTex(Gpu& g, ID3D12Resource* tex, const void* pixels, UINT w, UINT h, UINT bpp,
                   D3D12_RESOURCE_STATES tex_state);
+inline UINT AlignUp(UINT v, UINT a) { return (v + a - 1) & ~(a - 1); }
+// Records a copy of tex (COPY_SOURCE) into a READBACK buffer, rows `pitch` apart (256-aligned); the caller
+// maps it once the list has retired. box = nullptr: the whole texture.
+void GpuCopyToReadback(ID3D12GraphicsCommandList* cl, ID3D12Resource* tex, ID3D12Resource* rb, DXGI_FORMAT fmt, UINT w, UINT h, UINT pitch, const D3D12_BOX* box = nullptr);
 // Read a texture back to CPU (blocking). out must hold w*h*bpp bytes. For dumps/asserts only.
 bool GpuReadbackTex(Gpu& g, ID3D12Resource* tex, void* out, UINT w, UINT h, UINT bpp, D3D12_RESOURCE_STATES tex_state);
 

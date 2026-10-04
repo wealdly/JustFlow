@@ -190,7 +190,7 @@ const PresetKey kPreset[] = {
     // Four model tiers, and they are tiers of TIME, not of work size: the model's edit is low-frequency and survives being motion-
     // warped for several frames, while a smaller work size makes the model itself behave differently.
     // Measured on a moving 4K sequence (share of the every-frame native edit, average model cost):
-    //   auto (1080p) every 3rd 49% 1.3 ms | every frame 57% 3.8 ms | native every 6th 76% 2.0 ms | every 3rd 80% 4.1 ms
+    //   auto (1080p) every 3rd 49% 1.3 ms | every frame 57% 3.8 ms | 1x (native) every 6th 76% 2.0 ms | every 3rd 80% 4.1 ms
     // Performance stays the small per-frame evaluate because it is the one that cannot hitch a game
     // sharing the GPU; a native evaluate is one ~12 ms block at 4K. The old 1440p / 1800p tiers were
     // non-integer ratios of 4K and lost to 1080p on cost AND fidelity (see WorkAuto in main.cpp).
@@ -579,7 +579,7 @@ INT_PTR CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         L"; Quality dials only: the layer switches (F9 neural, F6 filters, F8 frame generation) are\n"
         L"; app-wide, in justflow.ini.\n\n"
         L"[nr]\n; the DLSS neural-rendering model, 4-12 ms.\n"
-        L"; work=auto follows the capture (1080p on 4K); native runs the model at full size.\n"
+        L"; work = render scale: 1x (the capture), 1.5x, 2x, 3x smaller; auto = nearest 1080p (2x on 4K).\n"
         L"work=auto\nchroma=0.25\n"
         L"; model_every=N runs the model on every Nth frame off the main path. Raise it (2-4) when the\n"
         L"; game presents faster than the model can follow - e.g. a game running its own frame generation.\n"

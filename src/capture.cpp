@@ -153,6 +153,14 @@ static float SdrWhite(HMONITOR mon)
     return 1.0f;
 }
 
+// A real resize, not a few pixels: Chrome fullscreen goes 2160 -> 2159 lines whenever it loses the
+// foreground and back when it regains it, and each one rebuilt capture and FG (~0.5 s).
+static bool Resized(UINT w, UINT h, const Capture* c)
+{
+    const auto off = [](UINT a, UINT b) { return (a > b ? a - b : b - a) > 8; };
+    return off(w, c->w) || off(h, c->h);
+}
+
 static bool OpenDda(Gpu& g, Capture* c)
 {
     const HMONITOR mon = MonitorFromWindow(c->target, MONITOR_DEFAULTTONEAREST);
@@ -167,18 +175,15 @@ static bool OpenDda(Gpu& g, Capture* c)
     // An HDR desktop comes as FP16 scRGB, converted to 8-bit in our swizzle at the SDR white level
     // (capture_in.hlsli). Asking Windows for BGRA8 converts it at 80 nits = white: far too bright.
     HRESULT hr = E_NOINTERFACE;
-    IDXGIOutput5* out5 = nullptr;
+    IDXGIOutput5* out5 = nullptr; IDXGIOutput1* out1 = nullptr;
     if (SUCCEEDED(out->QueryInterface(__uuidof(IDXGIOutput5), (void**)&out5)))
     {
         const DXGI_FORMAT fmts[] = { DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM };
         hr = out5->DuplicateOutput1(c->dev, 0, 2, fmts, &c->dup);
         out5->Release();
     }
-    IDXGIOutput1* out1 = nullptr;
-    if (FAILED(hr)) out->QueryInterface(__uuidof(IDXGIOutput1), (void**)&out1);
+    if (FAILED(hr) && SUCCEEDED(out->QueryInterface(__uuidof(IDXGIOutput1), (void**)&out1))) { hr = out1->DuplicateOutput(c->dev, &c->dup); out1->Release(); }
     out->Release();
-    if (FAILED(hr) && !out1) { Log("[cap] DDA: IDXGIOutput1 unavailable"); return false; }
-    if (out1) { hr = out1->DuplicateOutput(c->dev, &c->dup); out1->Release(); }
     if (FAILED(hr)) { Log("[cap] DDA: DuplicateOutput failed 0x%08X - falling back to window capture", (unsigned)hr); return false; }
     if (!WindowRegion(c->target, c->out_rect, c->win_rect)) { Log("[cap] DDA: window has no visible region"); c->dup->Release(); c->dup = nullptr; return false; }
     c->w = (UINT)(c->win_rect.right - c->win_rect.left); c->h = (UINT)(c->win_rect.bottom - c->win_rect.top);
@@ -246,7 +251,7 @@ static bool AcquireDda(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG&
         if (WindowRegion(c->target, c->out_rect, region))
         {
             const UINT nw = (UINT)(region.right - region.left), nh = (UINT)(region.bottom - region.top);
-            if (nw != c->w || nh != c->h)
+            if (Resized(nw, nh, c))
             {
                 if (nw != c->pend_w || nh != c->pend_h) { c->pend_w = nw; c->pend_h = nh; c->pend_since = GetTickCount64(); }
                 res->Release(); return false;
@@ -263,8 +268,9 @@ static bool AcquireDda(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG&
     const int idx = (int)((c->fence_value + 1) % Capture::kRing);
     if (fd.Format == c->fmt)   // an HDR switch mid-session changes it: the copy would fail, the reopen fixes it
     {
-        D3D11_BOX box = { (UINT)(c->win_rect.left - c->out_rect.left), (UINT)(c->win_rect.top - c->out_rect.top), 0,
-                          (UINT)(c->win_rect.right - c->out_rect.left), (UINT)(c->win_rect.bottom - c->out_rect.top), 1 };
+        // clamped to the shared texture: within the resize tolerance the region may be a few pixels larger
+        const UINT x0 = (UINT)(c->win_rect.left - c->out_rect.left), y0 = (UINT)(c->win_rect.top - c->out_rect.top);
+        D3D11_BOX box = { x0, y0, 0, x0 + std::min(c->w, (UINT)(c->win_rect.right - c->win_rect.left)), y0 + std::min(c->h, (UINT)(c->win_rect.bottom - c->win_rect.top)), 1 };
         c->ctx->CopySubresourceRegion(c->shared11[idx], 0, 0, 0, 0, tex, 0, &box);
     }
     tex->Release();
@@ -287,6 +293,9 @@ Capture* CaptureOpen(Gpu& g, HWND target, bool show_cursor, bool show_border, bo
         apartment = true;
     }
     if (!IsWindow(target)) { Log("[cap] %p is not a window", (void*)target); return nullptr; }
+    // A minimised window captures as its 219x30 caption, which the pipeline cannot use: wait (silently,
+    // the caller retries every second) - FindTarget keeps it as the target so alt-tab does not lose it.
+    if (IsIconic(target)) return nullptr;
     Capture* c = new Capture();
     c->target = target;
     c->frame_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -387,11 +396,8 @@ bool CaptureAcquire(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG& sy
         }
         sys_rel_100ns = frame.SystemRelativeTime().count();
         const auto cs = frame.ContentSize();
-        // Within 8 px is not a resize: Chrome fullscreen goes 2160 -> 2159 lines whenever it loses the
-        // foreground and back when it regains it, and each one rebuilt capture and FG (~0.5 s). The pool
-        // surface stays c->w x c->h, so the copy below is still in bounds; a missing row is one stale row.
-        const auto close_to = [](UINT a, UINT b) { return (a > b ? a - b : b - a) <= 8; };
-        if (!close_to((UINT)cs.Width, c->w) || !close_to((UINT)cs.Height, c->h))
+        // The pool surface stays c->w x c->h inside the tolerance, so the copy below is still in bounds.
+        if (Resized((UINT)cs.Width, (UINT)cs.Height, c))
         {
             if ((UINT)cs.Width != c->pend_w || (UINT)cs.Height != c->pend_h) { c->pend_w = cs.Width; c->pend_h = cs.Height; c->pend_since = GetTickCount64(); }
             frame.Close();
@@ -451,7 +457,8 @@ UINT CaptureForeign(Capture* c) { return c ? (UINT)InterlockedExchange(&c->forei
 double CaptureAccumMean(Capture* c) { if (!c || !c->dup || !c->accum_n) return 0; double m = (double)c->accum_sum / (double)c->accum_n; c->accum_sum = 0; c->accum_n = 0; return m; }
 UINT            CaptureHeight(Capture* c)  { return c->h; }
 bool            CaptureIsFloat(Capture* c) { return c->is_float; }
-float           CaptureSdrWhite(Capture* c) { return c->fmt == DXGI_FORMAT_R16G16B16A16_FLOAT ? c->sdr_white : 0.0f; }
+bool            CaptureSeesOverlay(Capture* c) { return c->dup || c->target == GetDesktopWindow(); }
+float           CaptureSdrWhite(Capture* c) { return c->sdr_white; }
 bool            CaptureIsDda(Capture* c)   { return c && c->dup != nullptr; }
 
 bool CaptureSizeChanged(Capture* c, UINT& new_w, UINT& new_h)

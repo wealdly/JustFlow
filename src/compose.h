@@ -9,7 +9,7 @@ struct Shaders;
 Shaders* ShadersCreate(Gpu& g);
 void     ShadersDestroy(Shaders* s);
 
-// BGRA8 capture (w x h) -> RGBA8 color (w x h).
+// The capture (w x h, BGRA8 or FP16) -> RGBA8 color (w x h).
 // white: 0 for a BGRA8 capture; for an FP16 (HDR desktop) one the SDR white level in scRGB units (CaptureSdrWhite)
 void CsSwizzle(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* dst_rgba, UINT w, UINT h, float white = 0);
 // RGBA8 (w x h) -> R8 luminance (gw x gh), exact area average (block = w/gw x h/gh, integer).
@@ -61,8 +61,8 @@ void CsWarp(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* s
 constexpr UINT kMvGridW = 32, kMvGridH = 18, kMvGridPitch = kMvGridW * 8;   // readback row pitch: 256, already aligned
 // Frame Warp's no-warp mask from mv (NPSR) and its median (gx, gy): R8 mw x mh (UAV), 1 = not the camera's motion.
 void CsNoWarpMask(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* mask, UINT mw, UINT mh, float gx, float gy);
-// Duplicate-frame test: cap (BGRA8) vs prev (RGBA8, color4k before this frame's swizzle) -> tiles, R8
-// (w+63)/64 x (h+63)/64 R8G8 (UAV): R = 1 where the 64x64 tile changed at all, G = its mean luma.
+// Duplicate / scene-cut test: cap (converted as CsSwizzle does) vs prev (color4k before this frame's swizzle)
+// -> tiles, (w+63)/64 x (h+63)/64 R8G8 (UAV): R = 1 where the 64x64 tile changed at all, G = its mean luma.
 void CsSame(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* cap, ID3D12Resource* prev, UINT w, UINT h, float white, ID3D12Resource* tiles);
 void CsMvGrid(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* grid);
 // ---- on-screen text -------------------------------------------------------------------------

@@ -11,6 +11,8 @@ struct Capture;
 // must be excluded from capture), falling back to Windows.Graphics.Capture (60 Hz ceiling).
 Capture* CaptureOpen(Gpu& g, HWND target, bool show_cursor, bool show_border, bool prefer_dda);
 bool     CaptureIsDda(Capture* c);
+// The capture sees the whole monitor - our overlay too, unless it is excluded (DDA, or the full-desktop monitor item).
+bool CaptureSeesOverlay(Capture* c);
 void     CaptureClose(Capture* c);
 
 // Drains the pool to the newest frame (max 8). If one arrived: copies it into the shared texture,
@@ -35,7 +37,7 @@ UINT            CaptureHeight(Capture* c);
 bool CaptureSizeChanged(Capture* c, UINT& new_w, UINT& new_h);
 // True if the target window is gone or the capture session was closed by the system.
 bool CaptureLost(Capture* c);
-// True if frames arrive as FP16 (HDR). Phase 1 refuses these with a log line.
+// True if frames arrive as FP16 (HDR): DDA of an HDR desktop (converted, see CaptureSdrWhite); WGC never.
 bool CaptureIsFloat(Capture* c);
 // DDA of an HDR desktop: the shared texture is FP16 scRGB, and this is the SDR white level it was composed
 // at, in scRGB units (Settings > HDR > SDR content brightness / 80 nits). 0 for a BGRA8 capture.

@@ -47,8 +47,8 @@ std::wstring ExeDir()
 // 1080p beat 1440p on BOTH axes on those two frames. A third (tools/scene) reversed the fidelity order
 // (1440p 62%, 1080p 53% of the native edit), and replacing our downscale AND upscale with offline Lanczos /
 // bicubic moved no size by more than 2 points: the resampling is innocent, the model is scale-sensitive,
-// non-monotonically and by content. Cost still decides for 1080p; only native is reliably faithful. So auto is the integer divisor of the native size
-// nearest 1080 lines (ties go to the larger): 4K -> 1920x1080, 1440p -> 2560x1440 (1:1, exact),
+// non-monotonically and by content. Cost still decides for 1080p; only native is reliably faithful. So auto is the divisor 1..4 of the native size
+// nearest 1080 lines, rounded (ties go to the larger): 4K -> 1920x1080, 1440p -> 2560x1440 (1:1, exact),
 // 1080p -> 1920x1080. It used to come from justflow.spike.ini, where the spike had picked 2560x1440
 // on evaluate time alone - and the capture size was not even known when it was read.
 //
@@ -64,17 +64,16 @@ std::wstring ExeDir()
 static void WorkAuto(Config& c, UINT w, UINT h)
 {
     if (!c.work_auto || !w || !h) return;
-    if (c.work_scale >= 1.0f) { c.work_w = std::max(64u, (UINT)(w / c.work_scale + 0.5f)); c.work_h = std::max(64u, (UINT)(h / c.work_scale + 0.5f)); return; }
-    UINT best = 1; long best_d = 1L << 30;
+    float s = c.work_scale;   // render scale; auto picks one: the divisor 1..4 nearest 1080 lines
     // Any divisor, rounded: CsDownscale is an exact area filter over fractional footprints. Exact
     // divisors only gave a 3840x2159 window (Chrome unfocused) no candidate but 1 - the model at 4K.
-    for (UINT d = 1; d <= 4; ++d)
+    for (UINT d = 1, best_d = ~0u; s < 1.0f && d <= 4; ++d)
     {
-        if ((h + d / 2) / d < 360) continue;
-        const long dist = labs((long)((h + d / 2) / d) - 1080);
-        if (dist < best_d) { best_d = dist; best = d; }   // strict <: on a tie the smaller divisor (larger size) stays
+        const UINT lines = (h + d / 2) / d, dist = lines > 1080 ? lines - 1080 : 1080 - lines;
+        if (lines >= 360 && dist < best_d) { best_d = dist; s = (float)d; }   // strict <: on a tie the larger size stays
     }
-    c.work_w = (w + best / 2) / best; c.work_h = (h + best / 2) / best;
+    if (s < 1.0f) s = 1.0f;
+    c.work_w = std::max(64u, (UINT)(w / s + 0.5f)); c.work_h = std::max(64u, (UINT)(h / s + 0.5f));
 }
 
 void ResolveWork(Config& c, const std::wstring& dir)
@@ -114,7 +113,7 @@ static const D3D12_RESOURCE_FLAGS FUAV = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACC
 
 // ---- addon UI mask strip (addon\JustFlow\JustFlow.lua): 130 cells of 4x4 px at the top-left ----------
 static const UINT kStripCells = 2 * 64 + 2, kStripW = kStripCells * 4, kStripH = 4;   // 520 x 4 px
-static const UINT kStripPitch = (kStripW * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+static const UINT kStripPitch = AlignUp(kStripW * 4, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
 
 // RGBA8 strip rows (pitch bytes apart) -> rects. Each 4x4 cell is read at its pixel (2, 2) only: one
 // pixel inside the cell, clear of a one-pixel bleed from either neighbour. Returns the rect count,
@@ -177,10 +176,9 @@ static bool AllocNative(Pipeline* p)
     p->out4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, D3D12_RESOURCE_STATE_COPY_SOURCE, L"out4k");
     p->sharp4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, D3D12_RESOURCE_STATE_COPY_SOURCE, L"sharp4k");
     p->shown = p->out4k;
-    const UINT tw = (p->w + 63) / 64, th = (p->h + 63) / 64;
-    p->same_pitch = (tw * 2 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
-    p->same = GpuMakeTex(g, tw, th, DXGI_FORMAT_R8G8_UNORM, FUAV, CSRC, L"same"); p->same_prev.clear();
-    p->same_rb = GpuMakeBuffer(g, (UINT64)p->same_pitch * th, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"same_rb");
+    p->same_w = (p->w + 63) / 64; p->same_h = (p->h + 63) / 64; p->same_pitch = AlignUp(p->same_w * 2, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+    p->same = GpuMakeTex(g, p->same_w, p->same_h, DXGI_FORMAT_R8G8_UNORM, FUAV, CSRC, L"same");
+    p->same_rb = GpuMakeBuffer(g, (UINT64)p->same_pitch * p->same_h, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"same_rb");
     if (p->w % p->gw || p->h % p->gh) Log("[main] warning: gray block %ux%u -> %ux%u is not integer", p->w, p->h, p->gw, p->gh);
     return p->color4k && p->gray && p->out4k && p->sharp4k && p->same && p->same_rb;
 }
@@ -342,7 +340,7 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
     Pipeline* p = new Pipeline();
     p->g = &g; p->cfg = cfg; p->w = w; p->h = h; p->target = target;
     WorkAuto(p->cfg, w, h);
-    if (p->cfg.work_auto) Log("[nr] work auto -> %ux%u (render scale of the %ux%u capture)", p->cfg.work_w, p->cfg.work_h, w, h);
+    if (p->cfg.work_auto) Log("[nr] model %ux%u (render scale of the %ux%u capture)", p->cfg.work_w, p->cfg.work_h, w, h);
     // CsGray needs an integer block: round the block, derive the gray size from it.
     const UINT bx = std::max(1u, (UINT)std::lround((double)w / cfg.ofa_w)), by = std::max(1u, (UINT)std::lround((double)h / cfg.ofa_h));
     p->gw = w / bx; p->gh = h / by;
@@ -448,6 +446,39 @@ void PipelineReadStamps(Pipeline* p)
     }
 }
 
+// CsSame's tiles, recorded in list 1 (`f1`): dup = nothing changed at all; cut = the picture jumped. Each tile
+// is compared with the closest of the previous frame's 3x3 tiles around it, so camera motion up to a tile a
+// frame is not change. tools/scene: motion <= 0.016 (a 30 fps third-person turn included), a jump to another
+// angle of the same scene >= 0.042. ponytail: one global threshold - a miss is a few smeared frames, a false
+// hit one frame without history.
+static void SameTest(Pipeline* p, UINT64 f1, bool& dup, bool& cut)
+{
+    const UINT tw = p->same_w, th = p->same_h, n = tw * th;
+    uint8_t* px = nullptr; const D3D12_RANGE rr = { 0, (SIZE_T)p->same_pitch * th }, none = { 0, 0 };
+    if (!GpuWait(*p->g, p->g->fence, f1, 100) || FAILED(p->same_rb->Map(0, &rr, (void**)&px))) return;
+    std::vector<uint8_t>& cur = p->same_cur; cur.resize(n);
+    UINT changed = 0;
+    for (UINT y = 0; y < th; ++y)
+        for (UINT x = 0; x < tw; ++x) { const uint8_t* t = px + (size_t)y * p->same_pitch + x * 2; changed += t[0] != 0; cur[y * tw + x] = t[1]; }
+    p->same_rb->Unmap(0, &none);
+    if ((dup = changed == 0)) return;
+    if (p->same_prev.size() == n)
+    {
+        UINT dsum = 0;
+        for (UINT y = 0; y < th; ++y)
+            for (UINT x = 0; x < tw; ++x)
+            {
+                int best = 255;
+                for (UINT yy = y ? y - 1 : 0; yy <= std::min(y + 1, th - 1); ++yy)
+                    for (UINT xx = x ? x - 1 : 0; xx <= std::min(x + 1, tw - 1); ++xx)
+                        best = std::min(best, abs((int)cur[y * tw + x] - (int)p->same_prev[yy * tw + xx]));
+                dsum += (UINT)best;
+            }
+        cut = dsum > 0.03 * 255.0 * n;
+    }
+    p->same_prev.swap(cur);
+}
+
 bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UINT64 wait_value, bool reset)
 {
     Gpu& g = *p->g; const Config& c = p->cfg; ID3D12GraphicsCommandList* cl = g.list;
@@ -551,12 +582,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         GpuBarrier(cl, p->same, CSRC, UAV);
         CsSame(g, p->sh, cl, cap, p->color4k, p->w, p->h, p->hdr_white, p->same);
         GpuBarrier(cl, p->same, UAV, CSRC);
-        const D3D12_RESOURCE_DESC sd = p->same->GetDesc();
-        D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
-        src.pResource = p->same; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        dst.pResource = p->same_rb; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        dst.PlacedFootprint.Footprint = { DXGI_FORMAT_R8G8_UNORM, (UINT)sd.Width, sd.Height, 1, p->same_pitch };
-        cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        GpuCopyToReadback(cl, p->same, p->same_rb, DXGI_FORMAT_R8G8_UNORM, p->same_w, p->same_h, p->same_pitch);
     }
     GpuBarrier(cl, p->color4k, NPSR, UAV);
     stamp(2 * PS_SWIZZLE); CsSwizzle(g, p->sh, cl, cap, p->color4k, p->w, p->h, p->hdr_white); stamp(2 * PS_SWIZZLE + 1);
@@ -567,12 +593,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     {
         strip_slot = g.slot;
         GpuBarrier(cl, p->color4k, NPSR, CSRC);
-        D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
-        src.pResource = p->color4k; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        dst.pResource = p->strip_rb[strip_slot]; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        dst.PlacedFootprint.Footprint = { DXGI_FORMAT_R8G8B8A8_UNORM, kStripW, kStripH, 1, kStripPitch };
         const D3D12_BOX box = { 0, 0, 0, kStripW, kStripH, 1 };
-        cl->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+        GpuCopyToReadback(cl, p->color4k, p->strip_rb[strip_slot], DXGI_FORMAT_R8G8B8A8_UNORM, kStripW, kStripH, kStripPitch, &box);
         GpuBarrier(cl, p->color4k, CSRC, NPSR);
     }
     GpuBarrier(cl, p->nr_in, NPSR, UAV);
@@ -618,6 +640,33 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     MaskUpdate(p);
     PipelineReadStamps(p);
 
+    // ---- duplicate / scene-cut test (CsSame in list 1) ----------------------------------------------
+    // A capture identical to the last one (a browser repainting the same video frame at the display
+    // rate) is not a frame: it returns here, before flow, model and compose - handed on, it inflated
+    // "fps in" past the FG governor's floor and paid the whole pipeline for nothing. A scene cut (a film
+    // changing camera, a game teleporting) is a reset: the model carried the old shot's history into the
+    // new one and smeared it, and DLSS-G interpolated between two unrelated images.
+    // ponytail: the CPU waits for list 1 here, behind whatever the queue still holds from the last frame
+    // (a sync model evaluate). A one-frame-late readback would avoid it at the cost of one late cut.
+    bool dup = false, cut = false;
+    if (!check_same) p->same_prev.clear();   // the previous frame is not comparable across a reset
+    else SameTest(p, f1, dup, cut);
+    // Only while the picture on screen is final: a model still warming up (or without a residual yet), or
+    // one that has just published a newer residual, needs the frame - a paused video kept the plain image.
+    // The model is not handed a duplicate it has already seen (a published residual feeding the next
+    // duplicate back to it kept it evaluating one still picture forever).
+    if (dup && handoff && !p->shown_native) { p->model_reset_pending |= mf.reset; p->model_wants_frame = true; handoff = false; }
+    if (dup && (wait_pub || p->shown_native)) dup = false;
+    if (dup) { ++p->dups; return true; }
+    if (cut) { reset = true; ++p->cuts; }
+    if (reset) p->reset_frame = p->frame_index;
+    if (handoff)
+    {
+        mf.fence = f1; mf.reset |= cut;
+        { std::lock_guard<std::mutex> lk(p->model_mu); p->model_frame = mf; p->model_frame_ready = true; }
+        p->model_cv.notify_one();
+    }
+
     // ---- optical flow (pair 0, per frame; the model track runs its own on pair 1) -----------------
     // async + a residual to compose: a second flow, this frame -> the residual's model frame (its gray
     // is still held in slot cmp_held), pair 2 -> mv_res: the warp then spans the residual's age.
@@ -638,62 +687,6 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (ov) g.queue->Wait(OfaFence(p->ofa), ov);
     if (ov2) g.queue->Wait(OfaFence(p->ofa), ov2);   // also orders the next list 1's hand-off copies after this read of the held slot
     if (wait_pub) g.queue->Wait(p->model_ctx.fence, p->cmp_fence);
-
-    // ---- duplicate / scene-cut test (CsSame in list 1), before anything below uses `reset` -------------
-    // A capture identical to the last one (a browser repainting the same video frame at the display
-    // rate) is not a frame: handed to FG it inflated "fps in" past the governor's floor and paired
-    // identical images. A scene cut (a film changing camera, a game teleporting) is a reset: the model
-    // carried the old shot's history into the new one and smeared it for several frames, and DLSS-G
-    // interpolated between two unrelated images. List 1 is tiny and the OFA submission ran after it,
-    // so the wait is normally free.
-    bool dup = false, cut = false;
-    if (!check_same) p->same_prev.clear();   // the previous frame is not comparable across a reset
-    else if (GpuWait(g, g.fence, f1, 100))
-    {
-        const D3D12_RESOURCE_DESC sd = p->same->GetDesc(); uint8_t* px = nullptr;
-        const UINT n = (UINT)sd.Width * sd.Height;
-        const D3D12_RANGE rr = { 0, (SIZE_T)p->same_pitch * sd.Height };
-        if (SUCCEEDED(p->same_rb->Map(0, &rr, (void**)&px)))
-        {
-            const UINT tw = (UINT)sd.Width, th = sd.Height;
-            std::vector<uint8_t> cur(n); UINT changed = 0;
-            for (UINT y = 0; y < th; ++y)
-                for (UINT x = 0; x < tw; ++x)
-                {
-                    const uint8_t* t = px + (size_t)y * p->same_pitch + x * 2;
-                    changed += t[0] != 0; cur[y * tw + x] = t[1];
-                }
-            const D3D12_RANGE none = { 0, 0 }; p->same_rb->Unmap(0, &none);
-            dup = changed == 0;
-            // Each tile against the closest of the previous frame's 3x3 tiles around it, so camera motion
-            // up to a tile a frame is not change. tools/scene: motion <= 0.016 (a 30 fps third-person turn
-            // included), a jump to another angle of the same scene >= 0.042. ponytail: one global
-            // threshold - a miss is a few smeared frames, a false hit one frame without history.
-            if (!dup && p->same_prev.size() == n)
-            {
-                UINT dsum = 0;
-                for (UINT y = 0; y < th; ++y)
-                    for (UINT x = 0; x < tw; ++x)
-                    {
-                        int best = 255;
-                        for (UINT yy = y ? y - 1 : 0; yy <= std::min(y + 1, th - 1); ++yy)
-                            for (UINT xx = x ? x - 1 : 0; xx <= std::min(x + 1, tw - 1); ++xx)
-                                best = std::min(best, abs((int)cur[y * tw + x] - (int)p->same_prev[yy * tw + xx]));
-                        dsum += (UINT)best;
-                    }
-                cut = dsum > 0.03 * 255.0 * n;
-            }
-            if (!dup) p->same_prev.swap(cur);
-        }
-    }
-    if (dup) ++p->dups;
-    if (cut) { reset = true; ++p->cuts; p->cut_frame = p->frame_index; }
-    if (handoff)
-    {
-        mf.fence = f1; mf.reset |= cut;
-        { std::lock_guard<std::mutex> lk(p->model_mu); p->model_frame = mf; p->model_frame_ready = true; }
-        p->model_cv.notify_one();
-    }
 
     // ---- list 2: expand, (create | evaluate), compose, hand-off to the presenter -------------------
     tw = NowMs();
@@ -726,11 +719,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
             GpuBarrier(cl, p->mvgrid, CSRC, UAV);
             CsMvGrid(g, p->sh, cl, p->mv, p->ww, p->wh, p->mvgrid);
             GpuBarrier(cl, p->mvgrid, UAV, CSRC);
-            D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
-            src.pResource = p->mvgrid; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            dst.pResource = p->mvgrid_rb[grid_q]; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-            dst.PlacedFootprint.Footprint = { DXGI_FORMAT_R32G32_FLOAT, kMvGridW, kMvGridH, 1, kMvGridPitch };
-            cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            GpuCopyToReadback(cl, p->mvgrid, p->mvgrid_rb[grid_q], DXGI_FORMAT_R32G32_FLOAT, kMvGridW, kMvGridH, kMvGridPitch);
             p->mvgrid_q[grid_q].t0 = p->lw_prev_cap; p->mvgrid_q[grid_q].t1 = p->cap_qpc;
         }
         else grid_q = -1;
@@ -796,7 +785,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         cp.strip_w = (int)kStripW; cp.strip_h = (int)kStripH;
     }
     for (int i = 0; i < c.nrects && cp.nrects < 64; ++i) cp.rects[cp.nrects++] = c.rects[i];
-    const bool native = async ? (p->cmp_idx < 0 || residual_frame < p->cut_frame) : (!evaluated || p->evals_since_create <= (UINT)std::max(0, c.warmup));
+    const bool native = async ? (p->cmp_idx < 0 || residual_frame < p->reset_frame) : (!evaluated || p->evals_since_create <= (UINT)std::max(0, c.warmup));
+    p->shown_native = model_on && native;
     if (native) cp.wipe_mode = 2;
     else if (p->wipe == 1) { cp.wipe_mode = 1; cp.wipe_x = 0.5f; }
     else if (p->wipe == 2) { cp.wipe_mode = 1; cp.wipe_x = (float)fmod((NowMs() - p->wipe_t0) / 2000.0, 1.0); }
@@ -1299,19 +1289,11 @@ static int RealMain(int argc, char** argv)
             for (int t = 0; t < 10 && !quit && !go_idle && pending_profile < 0; ++t) { Sleep(100); handle_tray(); }
         }
         if (!target) continue;
-        // FindTarget accepts a minimised window (judged by its restored size, so alt-tab keeps the
-        // target), but its capture is the 219x30 caption: the pipeline refused it and the app exited.
-        if (IsIconic(target))
-        {
-            _snwprintf_s(status, _TRUNCATE, L"%ls  window minimised", profile_name().c_str()); tray_state();
-            for (int t = 0; t < 5 && !quit && !go_idle && pending_profile < 0; ++t) { Sleep(100); handle_tray(); }
-            continue;
-        }
         Log("[main] target window %p", (void*)target);
         Capture* cap = CaptureOpen(g, target, cfg.cursor, cfg.border, cfg.dda);
         // Desktop Duplication and monitor capture see the whole monitor, our overlay included:
         // exclusion is mandatory there, or it captures and re-presents itself.
-        if (cap && (CaptureIsDda(cap) || cfg.desktop)) cfg.exclude_from_capture = true;
+        if (cap && CaptureSeesOverlay(cap)) cfg.exclude_from_capture = true;
         if (!cap) { Sleep(1000); continue; }
         p = PipelineCreate(g, cfg, CaptureWidth(cap), CaptureHeight(cap), true, target);
         if (p) Log("[gpu] reserved %.0f MB of video memory (residency priority high)", GpuReserveCurrentUsage(g));
