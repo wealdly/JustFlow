@@ -1263,6 +1263,14 @@ static int RealMain(int argc, char** argv)
             for (int t = 0; t < 10 && !quit && !go_idle && pending_profile < 0; ++t) { Sleep(100); handle_tray(); }
         }
         if (!target) continue;
+        // FindTarget accepts a minimised window (judged by its restored size, so alt-tab keeps the
+        // target), but its capture is the 219x30 caption: the pipeline refused it and the app exited.
+        if (IsIconic(target))
+        {
+            _snwprintf_s(status, _TRUNCATE, L"%ls  window minimised", profile_name().c_str()); tray_state();
+            for (int t = 0; t < 5 && !quit && !go_idle && pending_profile < 0; ++t) { Sleep(100); handle_tray(); }
+            continue;
+        }
         Log("[main] target window %p", (void*)target);
         Capture* cap = CaptureOpen(g, target, cfg.cursor, cfg.border, cfg.dda);
         // Desktop Duplication sees the whole monitor, our overlay included: exclusion is mandatory there.
