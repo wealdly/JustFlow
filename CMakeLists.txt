@@ -65,7 +65,7 @@ add_custom_command(TARGET justflow_spike POST_BUILD
 # ---- the app ------------------------------------------------------------------------------------
 add_executable(justflow
     src/main.cpp src/d3d.cpp src/capture.cpp src/present.cpp src/ngx_nr.cpp
-    src/nvofa.cpp src/compose.cpp src/bench.cpp src/png.cpp src/config.cpp src/fg.cpp src/tray.cpp src/settings.cpp src/latewarp.cpp src/mouse.cpp
+    src/nvofa.cpp src/compose.cpp src/bench.cpp src/png.cpp src/config.cpp src/fg.cpp src/tray.cpp src/tray_host.cpp src/settings.cpp src/latewarp.cpp src/mouse.cpp
     src/justflow.rc)
 add_dependencies(justflow shaders nvngx_dll_justflow)
 target_include_directories(justflow PRIVATE src art ${CMAKE_BINARY_DIR}/gen third_party/ngx/include third_party/nvofa "${CPPWINRT_INC}")
@@ -90,7 +90,7 @@ endif()
 # No NGX, no NVOFA, no NVIDIA runtimes: motion comes from xe_flow's compute shaders.
 # justflow_xe.exe is the tray app (windowed subsystem); justflow_xe_cli.exe is the same program as a
 # console exe for --bench / --interp / --live, which shells wait for and whose output can be piped.
-set(XE_SOURCES src/justflow_xe.rc src/xe_main.cpp src/xe_app.cpp src/xe_tray.cpp src/xe_flow.cpp src/xe_interp.cpp src/xe_fg.cpp
+set(XE_SOURCES src/justflow_xe.rc src/xe_main.cpp src/xe_app.cpp src/xe_tray.cpp src/tray_host.cpp src/xe_flow.cpp src/xe_interp.cpp src/xe_fg.cpp
     src/d3d.cpp src/png.cpp src/capture.cpp src/present.cpp)
 foreach(t justflow_xe justflow_xe_cli)
     add_executable(${t} ${XE_SOURCES})

@@ -1,39 +1,29 @@
-// System tray: own thread owns a hidden top-level window (needs to be top-level to receive the
-// TaskbarCreated broadcast), the notify icon and the popup menu. Everything crossing threads goes
-// through Tray::mu; the menu is rebuilt from the snapshot each time it pops, so there is no
-// check-mark state to keep in sync.
+// justflow's system tray: the menu, dialogs and tooltip on tray_host's thread and topmost top-level window.
+// State crossing threads goes through Tray::mu; the menu is rebuilt from the snapshot each time it pops,
+// so there is no check-mark state to keep in sync.
 #include "tray.h"
+#include "tray_host.h"
 #include "config.h"   // FgEngine
 #include <algorithm>
 #include "settings.h"
-#include <shellapi.h>
-#include <deque>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace
 {
-const UINT WM_TRAY_ICON  = WM_APP + 1;   // Shell_NotifyIcon callback
-const UINT WM_TRAY_STATE = WM_APP + 2;   // TraySetState -> refresh tooltip on the tray thread
 const UINT WM_TRAY_SETTINGS = WM_APP + 3;   // double-click: open Settings once the menu loop has unwound
-const UINT ICON_ID = 1;
 
 enum { IDM_STATUS = 1, IDM_NR, IDM_FILTERS, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM_MULT3, IDM_MULT4, IDM_ENG0, IDM_ENG1, IDM_ENG2, IDM_ENG3, IDM_WIPE, IDM_RELOAD,
        IDM_SETTINGS, IDM_NEWPROFILE, IDM_PROFILE_RESET, IDM_PROFILE_REMOVE, IDM_CONFIG, IDM_APPCONFIG, IDM_LOG, IDM_QUIT,
        IDM_PRESET0 = 60, IDM_PROFILE0 = 100 };
 }
 
-struct Tray
+struct Tray : TrayHost
 {
     std::wstring app;
-    std::thread  thread;
-    HANDLE ready = nullptr;
-    HWND   hwnd = nullptr;
     bool   in_menu = false, in_dialog = false;   // tray thread only: both run modal loops that pump messages
     HICON  icon = nullptr;
-    UINT   taskbar_created = 0;
+    TrayQueue<std::pair<TrayEvent, int>> events;
 
     std::wstring app_ini, profile_ini;   // guarded by mu; the dialog copies them before it blocks
 
@@ -43,25 +33,12 @@ struct Tray
     HWND game = nullptr;
     std::wstring status;
     std::vector<std::wstring> profiles;
-    std::deque<std::pair<TrayEvent, int>> events;
+
+    void AddIcon() override;
+    bool OnMessage(UINT msg, WPARAM wp, LPARAM lp) override;
 };
 
-static void Push(Tray* t, TrayEvent ev, int arg = 0)
-{
-    std::lock_guard<std::mutex> lk(t->mu);
-    t->events.emplace_back(ev, arg);
-}
-
-// ---- icon --------------------------------------------------------------------------------------
-
-// The exe's icon (src/justflow.rc, art/justflow.ico) at the small-icon size for the system DPI; the .ico
-// carries 16-256 px, so Windows picks a real size instead of scaling.
-static HICON LoadAppIcon()
-{
-    const UINT dpi = GetDpiForSystem();
-    return (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1), IMAGE_ICON,
-                             GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CYSMICON, dpi), LR_DEFAULTCOLOR);
-}
+static void Push(Tray* t, TrayEvent ev, int arg = 0) { t->events.Push({ ev, arg }); }
 
 // ---- settings dialog ---------------------------------------------------------------------------
 
@@ -200,20 +177,9 @@ static HMENU BuildMenu(Tray* t)
 
 static void ShowMenu(Tray* t)
 {
-    POINT p; GetCursorPos(&p);
-    HMENU m = BuildMenu(t);
-    SetForegroundWindow(t->hwnd);   // so the menu closes when the user clicks elsewhere
-    // Keep the menu clear of the taskbar itself: TrackPopupMenuEx flips it to the other side of
-    // rcExclude rather than letting it open underneath.
-    TPMPARAMS tp = { sizeof tp };
-    APPBARDATA ab = { sizeof ab };
-    const bool have_bar = SHAppBarMessage(ABM_GETTASKBARPOS, &ab) != 0;
-    if (have_bar) tp.rcExclude = ab.rc;
-    t->in_menu = true;    // TrackPopupMenuEx pumps messages: a second click must not nest another menu inside this one
-    const int cmd = TrackPopupMenuEx(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, t->hwnd, have_bar ? &tp : nullptr);
+    t->in_menu = true;    // the menu loop pumps messages: a second click must not nest another menu inside this one
+    const int cmd = t->TrackMenu(BuildMenu(t), true);
     t->in_menu = false;
-    PostMessageW(t->hwnd, WM_NULL, 0, 0);
-    DestroyMenu(m);   // destroys submenus too
     switch (cmd)
     {
     case IDM_NR:      Push(t, TrayToggleNr); break;
@@ -244,13 +210,6 @@ static void ShowMenu(Tray* t)
 
 // ---- notify icon / window ----------------------------------------------------------------------
 
-static NOTIFYICONDATAW Nid(Tray* t)
-{
-    NOTIFYICONDATAW n = { sizeof n };
-    n.hWnd = t->hwnd; n.uID = ICON_ID;
-    return n;
-}
-
 static void SetTip(Tray* t, NOTIFYICONDATAW& n)   // caller holds mu
 {
     n.uFlags |= NIF_TIP | NIF_SHOWTIP;
@@ -259,23 +218,20 @@ static void SetTip(Tray* t, NOTIFYICONDATAW& n)   // caller holds mu
     wcsncpy_s(n.szTip, tip.c_str(), _TRUNCATE);
 }
 
-static void AddIcon(Tray* t)
+void Tray::AddIcon()
 {
-    NOTIFYICONDATAW n = Nid(t);
+    NOTIFYICONDATAW n = Nid();
     n.uFlags = NIF_ICON | NIF_MESSAGE;
     n.uCallbackMessage = WM_TRAY_ICON;
-    n.hIcon = t->icon;
-    { std::lock_guard<std::mutex> lk(t->mu); SetTip(t, n); }
+    n.hIcon = icon;
+    { std::lock_guard<std::mutex> lk(mu); SetTip(this, n); }
     Shell_NotifyIconW(NIM_ADD, &n);
     n.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &n);
 }
 
-static LRESULT CALLBACK TrayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+bool Tray::OnMessage(UINT msg, WPARAM, LPARAM lp)
 {
-    Tray* t = (Tray*)GetWindowLongPtrW(h, GWLP_USERDATA);
-    if (msg == WM_NCCREATE) { SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTW*)lp)->lpCreateParams); return TRUE; }
-    if (!t) return DefWindowProcW(h, msg, wp, lp);
     if (msg == WM_TRAY_ICON)
     {
         switch (LOWORD(lp))
@@ -283,46 +239,20 @@ static LRESULT CALLBACK TrayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         // The first click of a double-click has already opened the menu and is sitting in its modal
         // loop, so this arrives nested inside it: close the menu and open Settings from a posted
         // message, after that loop has unwound, rather than stacking a dialog on top of it.
-        case WM_LBUTTONDBLCLK: EndMenu(); PostMessageW(h, WM_TRAY_SETTINGS, 0, 0); break;
-        case WM_CONTEXTMENU: case NIN_SELECT: case NIN_KEYSELECT: if (!t->in_menu && !t->in_dialog) ShowMenu(t); break;
+        case WM_LBUTTONDBLCLK: EndMenu(); PostMessageW(hwnd, WM_TRAY_SETTINGS, 0, 0); break;
+        case WM_CONTEXTMENU: case NIN_SELECT: case NIN_KEYSELECT: if (!in_menu && !in_dialog) ShowMenu(this); break;
         }
-        return 0;
+        return true;
     }
-    if (msg == WM_TRAY_SETTINGS) { if (!t->in_dialog) ShowSettingsDialog(t); return 0; }
-    if (msg == WM_TRAY_STATE)
+    if (msg == WM_TRAY_SETTINGS) { if (!in_dialog) ShowSettingsDialog(this); return true; }
+    if (msg == WM_TRAY_STATE)   // tooltip only: the menu is rebuilt from the state each time it pops
     {
-        NOTIFYICONDATAW n = Nid(t);
-        { std::lock_guard<std::mutex> lk(t->mu); SetTip(t, n); }
+        NOTIFYICONDATAW n = Nid();
+        { std::lock_guard<std::mutex> lk(mu); SetTip(this, n); }
         Shell_NotifyIconW(NIM_MODIFY, &n);
-        return 0;
+        return true;
     }
-    if (msg == t->taskbar_created) { AddIcon(t); return 0; }   // Explorer restarted
-    switch (msg)
-    {
-    case WM_CLOSE:   { NOTIFYICONDATAW n = Nid(t); Shell_NotifyIconW(NIM_DELETE, &n); DestroyWindow(h); return 0; }
-    case WM_DESTROY: PostQuitMessage(0); return 0;
-    }
-    return DefWindowProcW(h, msg, wp, lp);
-}
-
-static void TrayThread(Tray* t)
-{
-    const HINSTANCE inst = GetModuleHandleW(nullptr);
-    WNDCLASSW wc = {};
-    wc.lpfnWndProc = TrayWndProc; wc.hInstance = inst; wc.lpszClassName = L"JustFlowTray";
-    RegisterClassW(&wc);   // second registration in-process just fails; CreateWindow still works
-    t->taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
-    t->icon = LoadAppIcon();
-    t->hwnd = CreateWindowExW(0, wc.lpszClassName, t->app.c_str(), WS_OVERLAPPED, 0, 0, 0, 0, nullptr, nullptr, inst, t);
-    // A popup menu is drawn above its OWNER. The taskbar is topmost, so a menu owned by an ordinary
-    // hidden window comes up behind it and the bottom entries (Quit) cannot be clicked. Topmost owner,
-    // topmost menu.
-    if (t->hwnd) SetWindowPos(t->hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    if (t->hwnd) AddIcon(t);
-    SetEvent(t->ready);
-    if (!t->hwnd) return;
-    MSG m;
-    while (GetMessageW(&m, nullptr, 0, 0) > 0) { TranslateMessage(&m); DispatchMessageW(&m); }
+    return false;
 }
 
 // ---- public API --------------------------------------------------------------------------------
@@ -331,19 +261,15 @@ Tray* TrayCreate(const wchar_t* app_name)
 {
     Tray* t = new Tray;
     t->app = app_name;
-    t->ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    t->thread = std::thread(TrayThread, t);
-    WaitForSingleObject(t->ready, INFINITE);
-    CloseHandle(t->ready); t->ready = nullptr;
-    if (!t->hwnd) { t->thread.join(); if (t->icon) DestroyIcon(t->icon); delete t; return nullptr; }
+    t->icon = TrayLoadIcon(1);   // the exe's icon (src/justflow.rc, art/justflow.ico)
+    if (!t->Start(L"JustFlowTray", false)) { if (t->icon) DestroyIcon(t->icon); delete t; return nullptr; }
     return t;
 }
 
 void TrayDestroy(Tray* t)
 {
     if (!t) return;
-    PostMessageW(t->hwnd, WM_CLOSE, 0, 0);
-    t->thread.join();
+    t->Stop();
     if (t->icon) DestroyIcon(t->icon);
     delete t;
 }
@@ -374,17 +300,16 @@ void TraySetState(Tray* t, const TrayState& s)
 
 bool TrayPoll(Tray* t, TrayEvent& ev, int& arg)
 {
-    std::lock_guard<std::mutex> lk(t->mu);
-    if (t->events.empty()) return false;
-    ev = t->events.front().first; arg = t->events.front().second;
-    t->events.pop_front();
+    std::pair<TrayEvent, int> e;
+    if (!t->events.Pop(e)) return false;
+    ev = e.first; arg = e.second;
     return true;
 }
 
 void TrayNotify(Tray* t, const wchar_t* title, const wchar_t* text)
 {
     // Shell_NotifyIcon is thread-agnostic; the shell serialises it against the tray thread's modifies.
-    NOTIFYICONDATAW n = Nid(t);
+    NOTIFYICONDATAW n = t->Nid();
     n.uFlags = NIF_INFO;
     n.dwInfoFlags = NIIF_INFO;
     wcsncpy_s(n.szInfoTitle, title ? title : L"", _TRUNCATE);
