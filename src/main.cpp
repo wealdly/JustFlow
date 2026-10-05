@@ -37,39 +37,22 @@ std::wstring ExeDir()
     return p;
 }
 
-// [nr] work=auto. The model runs on a downscaled copy and its edit is composed back up, so the
-// RATIO to the native size matters more than the pixel count. Measured against the model's own edit
-// at native 4K, on two unrelated test frames:
+// [nr] work=auto: the divisor 1..4 of the capture nearest 1080 lines, rounded (ties go to the larger): 4K ->
+// 1920x1080, 1440p -> 2560x1440, 1080p -> 1920x1080. The model is scale-sensitive (by content, not monotonically;
+// the resampling is innocent). Against its own edit at native 4K, on two test frames:
 //     work        cost     fidelity (r)    strength
 //   2560x1440   5.65 ms    0.80 / 0.49    144% / 70%     <- 1.5x: a non-integer resample both ways
 //   1920x1080   3.79 ms    0.88 / 0.67    106% / 103%    <- 2x: exact
 //   1280x720    2.58 ms    0.73 / 0.55
 //    960x540    2.30 ms    0.44 / 0.53    (cost has a ~1.8 ms floor; below 720p it buys almost nothing)
-// 1080p beat 1440p on BOTH axes on those two frames. A third (tools/scene) reversed the fidelity order
-// (1440p 62%, 1080p 53% of the native edit), and replacing our downscale AND upscale with offline Lanczos /
-// bicubic moved no size by more than 2 points: the resampling is innocent, the model is scale-sensitive,
-// non-monotonically and by content. Cost still decides for 1080p; only native is reliably faithful. So auto is the divisor 1..4 of the native size
-// nearest 1080 lines, rounded (ties go to the larger): 4K -> 1920x1080, 1440p -> 2560x1440 (1:1, exact),
-// 1080p -> 1920x1080. It used to come from justflow.spike.ini, where the spike had picked 2560x1440
-// on evaluate time alone - and the capture size was not even known when it was read.
-//
-// The loss at a small work size is the model behaving differently at the wrong scale, not missing input:
-// a 640x360 edit could carry 77-90% of the native-4K edit, a 1080p one 87-99%, and we get 53-89%. What does
-// recover it is spending the same budget in TIME instead: on a moving tools/scene sequence, share of the
-// every-frame 4K edit reproduced -
-//   1920x1080 every frame   57%   (3.8 ms/frame)       3840x2160 model_every=4   81%   (12.2 ms / 4 = 3.0)
-//   1920x1080 model_every=3 49%                        3840x2160 model_every=6   76%
-// The edit is low-frequency, so it survives being motion-warped for several frames. NOT the default: the
-// bench cannot see what a 12 ms evaluate does to a game sharing the GPU. It is work=native + model_every,
-// which the Balanced and Quality presets select (settings.cpp).
+// The same budget spent in time does better (4K with model_every=4: 81% of the every-frame 4K edit; 1080p every
+// frame: 57%), but a 12 ms evaluate shares the game's GPU: that is the Balanced/Quality presets' call (settings.cpp).
 static void WorkAuto(Config& c, UINT w, UINT h)
 {
     if (!c.work_auto || !w || !h) return;
     float s = c.work_scale;   // divisor of the capture (work=50% -> 2); auto picks one: 1..4, nearest 1080 lines
-    // Any divisor, rounded: CsDownscale is an exact area filter over fractional footprints. Exact
-    // divisors only gave a 3840x2159 window (Chrome unfocused) no candidate but 1 - the model at 4K.
-    // (the search must not test `s` itself: setting it on the first candidate ended the loop at 100% -
-    // auto ran the model at native 4K, 12 ms instead of 4, from 10a3c24 until this)
+    // Any divisor, rounded: CsDownscale is an exact area filter over fractional footprints (exact divisors left
+    // a 3840x2159 window only 1). The search must not test `s` itself (WorkSelfTest).
     if (s < 1.0f)
     {
         UINT best = 1, best_d = ~0u;
@@ -80,11 +63,10 @@ static void WorkAuto(Config& c, UINT w, UINT h)
         }
         s = (float)best;
     }
-    if (s < 1.0f) s = 1.0f;
     c.work_w = std::max(64u, (UINT)(w / s + 0.5f)); c.work_h = std::max(64u, (UINT)(h / s + 0.5f));
 }
 
-// The work-size rule, checked ([log] selftest=1, bench): auto lost its search once and ran 4K at 100%.
+// The work-size rule against known answers ([log] selftest=1, bench).
 bool WorkSelfTest()
 {
     struct { const char* work; float scale; UINT w, h, ew, eh; } k[] = {
@@ -102,8 +84,7 @@ bool WorkSelfTest()
 
 void ResolveWork(Config& c, const std::wstring& dir)
 {
-    // The spike file still supplies the machine-level parameter block; the work SIZE is no longer its
-    // business (see WorkAuto). An explicit work=WxH in the profile is left exactly as written.
+    // The spike file supplies only the machine-level parameter block; the work size is WorkAuto's.
     const std::wstring ini = dir + L"\\justflow.spike.ini";
     if (c.work_auto) c.param_block = (int)GetPrivateProfileIntW(L"spike", L"param_block", c.param_block, ini.c_str());
 }
@@ -123,7 +104,7 @@ void PipelineToast(Pipeline* p, const char* fmt, ...)
     va_list ap; va_start(ap, fmt);
     vsnprintf(p->toast, sizeof p->toast, fmt, ap);
     va_end(ap);
-    p->toast_t0 = NowMs(); p->toast_until_ms = p->toast_t0 + 2000.0;
+    p->toast_until_ms = NowMs() + 2000.0;
     Log("[ui] toast: %s", p->toast);
 }
 
@@ -197,8 +178,8 @@ static bool AllocNative(Pipeline* p)
     Gpu& g = *p->g;
     p->color4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, NPSR, L"color4k");
     p->gray = GpuMakeTex(g, p->gw, p->gh, DXGI_FORMAT_R8_UNORM, FUAV, UAV, L"gray");
-    p->out4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, D3D12_RESOURCE_STATE_COPY_SOURCE, L"out4k");
-    p->sharp4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, D3D12_RESOURCE_STATE_COPY_SOURCE, L"sharp4k");
+    p->out4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, CSRC, L"out4k");
+    p->sharp4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, CSRC, L"sharp4k");
     p->deb4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, NPSR, L"deb4k");
     p->shown = p->out4k;
     p->same_w = (p->w + 63) / 64; p->same_h = (p->h + 63) / 64; p->same_pitch = AlignUp(p->same_w * 2, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
@@ -233,7 +214,13 @@ static bool AllocModel(Pipeline* p)
     }
     return p->model_src && p->nr_in_m && p->nr_out_m && p->mv_m && p->mv_res && p->residual[0] && p->residual[1];
 }
-static void ReleaseModelWork(Pipeline* p) { REL(p->nr_in_m); REL(p->nr_out_m); REL(p->mv_m); REL(p->mv_res); REL(p->residual[0]); REL(p->residual[1]); }
+static void ReleaseNative(Pipeline* p) { REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->deb4k); REL(p->model_src); REL(p->same); REL(p->same_rb); }
+static void ReleaseWork(Pipeline* p)
+{
+    REL(p->nr_in); REL(p->nr_out); REL(p->mv);
+    REL(p->nr_in_m); REL(p->nr_out_m); REL(p->mv_m); REL(p->mv_res); REL(p->residual[0]); REL(p->residual[1]);
+}
+static void DropFg(Pipeline* p) { if (p->fg) { FgDestroy(p->fg); p->fg = nullptr; } }
 
 static void SetModelParams(Pipeline* p, const Config& c)
 {
@@ -360,9 +347,17 @@ static void StopModel(Pipeline* p)
     Log("[model] thread stopped");
 }
 
+// The model object, loaded once (the first time the neural layer is on); its feature is created next frame.
+static bool LoadNr(Pipeline* p, int param_block)
+{
+    if (!p->nr && (p->nr = NrInit(*p->g, ExeDir().c_str(), (NrParamBlock)param_block))) p->create_pending = true;
+    return p->nr != nullptr;
+}
+
 Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_overlay, HWND target)
 {
     Pipeline* p = new Pipeline();
+    auto fail = [&]() -> Pipeline* { PipelineDestroy(p); return nullptr; };
     p->g = &g; p->cfg = cfg; p->w = w; p->h = h; p->target = target;
     WorkAuto(p->cfg, w, h);
     if (p->cfg.work_auto) Log("[nr] model %ux%u (model resolution, of the %ux%u capture)", p->cfg.work_w, p->cfg.work_h, w, h);
@@ -375,26 +370,18 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
     {
         HotkeyDef keys[kHotkeys]; HotkeyDefs(cfg, keys);
         p->ov = OverlayCreate(g, target, w, h, keys, kHotkeys, cfg.exclude_from_capture, cfg.overlay_mode);
-        if (!p->ov) { PipelineDestroy(p); return nullptr; }
+        if (!p->ov) return fail();
     }
     p->sh = ShadersCreate(g);
-    if (!p->sh) { PipelineDestroy(p); return nullptr; }
+    if (!p->sh) return fail();
     // The model loads when the neural layer is ON, not at startup regardless: with the layer off (the
     // default) it would hold its feature - hundreds of MB of VRAM - for nothing. F9 brings it up.
-    if (cfg.nr_enabled)
-    {
-        p->nr = NrInit(g, ExeDir().c_str(), (NrParamBlock)cfg.param_block);
-        if (!p->nr) { PipelineDestroy(p); return nullptr; }
-        p->create_pending = true;
-    }
+    if (cfg.nr_enabled && !LoadNr(p, cfg.param_block)) return fail();
     p->ofa = OfaCreate(g, p->gw, p->gh, cfg.ofa_grid, cfg.ofa_dll.empty() ? nullptr : cfg.ofa_dll.c_str(), cfg.ofa_perf);
-    if (!p->ofa) { PipelineDestroy(p); return nullptr; }
-    if (!AllocNative(p) || !AllocWork(p)) { PipelineDestroy(p); return nullptr; }
+    if (!p->ofa) return fail();
+    if (!AllocNative(p) || !AllocWork(p)) return fail();
     for (auto& r : p->strip_rb)   // 9 KB each, always there so [ui] mask can be switched on by a reload
-    {
-        r = GpuMakeBuffer(g, (UINT64)kStripPitch * kStripH, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE, L"ui_strip_readback");
-        if (!r) { PipelineDestroy(p); return nullptr; }
-    }
+        if (!(r = GpuMakeBuffer(g, (UINT64)kStripPitch * kStripH, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"ui_strip_readback"))) return fail();
     return p;
 }
 
@@ -403,11 +390,9 @@ void PipelineDestroy(Pipeline* p)
     if (!p) return;
     StopModel(p);
     GpuWaitIdle(*p->g);
-    if (p->fg) FgDestroy(p->fg);
-    REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->deb4k); REL(p->nr_in); REL(p->nr_out); REL(p->mv);
-    REL(p->model_src); ReleaseModelWork(p);
+    DropFg(p); ReleaseNative(p); ReleaseWork(p);
     for (auto& r : p->strip_rb) REL(r);
-    REL(p->mvgrid); for (auto& r : p->mvgrid_rb) REL(r); REL(p->same); REL(p->same_rb);
+    REL(p->mvgrid); for (auto& r : p->mvgrid_rb) REL(r);
     MouseStop();
     if (p->model_ctx.queue) GpuCtxShutdown(*p->g, p->model_ctx);   // its queue may hold a Wait on the OFA fence: before OfaDestroy
     if (p->ofa) OfaDestroy(p->ofa);
@@ -417,14 +402,12 @@ void PipelineDestroy(Pipeline* p)
     delete p;
 }
 
-static void DropFg(Pipeline* p) { if (p->fg) { FgDestroy(p->fg); p->fg = nullptr; } }
-
 bool PipelineResize(Pipeline* p, UINT w, UINT h)
 {
     StopModel(p);   // restarted lazily by the next frame (model_src is native-sized)
     GpuWaitIdle(*p->g);
     DropFg(p);   // sized to the output; recreated on the next frame
-    REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->deb4k); REL(p->model_src); REL(p->same); REL(p->same_rb);
+    ReleaseNative(p);
     p->w = w; p->h = h;
     p->force_reset = true;
     {   // a new native size can change what auto means; the ordinary rebuild reallocates and recreates in step
@@ -442,11 +425,7 @@ void PipelineReload(Pipeline* p, const Config& c_in)
     // recreated next frame (a multiplier change is caught there: the presenter is rebuilt only when it differs)
     if (c.fg_pacing_vblank != p->cfg.fg_pacing_vblank || c.fg_engine != p->cfg.fg_engine || c.fg_lw_vfov != p->cfg.fg_lw_vfov) DropFg(p);
     if (c.nr_enabled && !p->cfg.nr_enabled) p->force_reset = true;
-    if (c.nr_enabled && !p->nr)
-    {
-        p->nr = NrInit(*p->g, ExeDir().c_str(), (NrParamBlock)c.param_block);
-        if (p->nr) p->create_pending = true; else Log("[nr] init failed on reload");
-    }
+    if (c.nr_enabled && !LoadNr(p, c.param_block)) Log("[nr] init failed on reload");
     if (c.nr_async != p->cfg.nr_async) { StopModel(p); p->model_failed = false; p->force_reset = true; Log("[nr] mode=%s", c.nr_async ? "async" : "sync"); }
     p->cfg = c;
     SetModelParams(p, c);   // live keys for the model thread (zero_below, exposure, model_max_fps, warmup)
@@ -515,39 +494,50 @@ static void SameTest(Pipeline* p, UINT64 f1, bool& dup, bool& cut)
     p->same_prev.swap(cur);
 }
 
+// The toast (top-centre, fading over its last 0.4 s) and the HUD lines: whether each is on, and the toast's alpha.
+static float TextOn(const Pipeline* p, bool& toast_on, bool& hud_on)
+{
+    const double now = NowMs();
+    toast_on = p->cfg.toast && p->toast[0] && now < p->toast_until_ms; hud_on = p->hud && p->hud_line[0][0];
+    return toast_on ? (float)std::min(1.0, (p->toast_until_ms - now) / 400.0) : 0.0f;
+}
+
+// Draws them into dst (a UAV): the overlay's UI layer (as_layer), or the frame itself. Returns the box count.
+static int DrawText(Pipeline* p, ID3D12GraphicsCommandList* cl, ID3D12Resource* dst, bool toast_on, bool hud_on, float toast_a, bool as_layer, RECT* box)
+{
+    Gpu& g = *p->g; const Config& c = p->cfg; int nb = 0;
+    if (toast_on) { GpuUavBarrier(cl, dst); CsText(g, p->sh, cl, dst, p->w, p->h, p->toast, -1, -1, c.toast_scale, toast_a, 2 * c.toast_scale, as_layer, &box[nb++]); }
+    if (!hud_on) return nb;
+    const int sc = std::max(1, c.hud_scale), pad = 2 * sc, margin = 24, gap = sc, bh = TextBoxH(sc, pad);
+    const bool right = c.hud_corner & 1, bottom = c.hud_corner & 2;
+    const int nlines = (int)(sizeof p->hud_line / sizeof p->hud_line[0]);
+    int y = bottom ? (int)p->h - margin - nlines * bh - (nlines - 1) * gap : margin;
+    for (const char* line : p->hud_line)
+    {
+        if (*line) { GpuUavBarrier(cl, dst); CsText(g, p->sh, cl, dst, p->w, p->h, line, right ? (int)p->w - margin - TextBoxW(strlen(line), sc, pad) : margin, y, sc, 1.0f, pad, as_layer, &box[nb++]); }
+        y += bh + gap;
+    }
+    return nb;
+}
+
 void PipelineUi(Pipeline* p)
 {
     if (!p || !p->ov || p->cfg.selftest) return;
-    Gpu& g = *p->g; const Config& c = p->cfg; const double now = NowMs();
-    const bool toast_on = c.toast && p->toast[0] && now < p->toast_until_ms, hud_on = p->hud && p->hud_line[0][0];
-    const float toast_a = toast_on ? (float)std::min(1.0, (p->toast_until_ms - now) / 400.0) : 0.0f;
+    Gpu& g = *p->g; const Config& c = p->cfg;
+    bool toast_on, hud_on; const float toast_a = TextOn(p, toast_on, hud_on);
     std::string key;
     if (toast_on) { key = p->toast; key += '\x01'; key += (char)(1 + (int)(toast_a * 32)); key += (char)c.toast_scale; }
     if (hud_on) { key += '\x02'; key += (char)c.hud_corner; key += (char)c.hud_scale; for (const char* line : p->hud_line) { key += line; key += '\x03'; } }
     if (key == p->ui_key) return;
     ID3D12Resource* layer = OverlayUiLayer(p->ov);
     if (!layer) return;   // the last drawing is not on screen yet: next pass
-    RECT box[8]; int nb = 0;
+    RECT box[4];
     if (!toast_on && !hud_on) { OverlayUiCommit(p->ov, box, 0, g.fence, 0); p->ui_key = key; return; }
     if (!GpuBegin(g)) return;
-    ID3D12GraphicsCommandList* cl = g.list;
     OverlayGuard(p->ov, g.queue);   // no present still reading this layer (it was shown before the last switch)
-    GpuBarrier(cl, layer, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, UAV);
-    if (toast_on) CsText(g, p->sh, cl, layer, p->w, p->h, p->toast, -1, -1, c.toast_scale, toast_a, 2 * c.toast_scale, true, &box[nb++]);
-    if (hud_on)
-    {
-        const int sc = std::max(1, c.hud_scale), pad = 2 * sc, margin = 24, gap = sc, bh = TextBoxH(sc, pad);
-        const bool right = c.hud_corner & 1, bottom = c.hud_corner & 2;
-        const int nlines = (int)(sizeof p->hud_line / sizeof p->hud_line[0]);
-        int y = bottom ? (int)p->h - margin - nlines * bh - (nlines - 1) * gap : margin;
-        for (const char* line : p->hud_line)
-        {
-            const int bw = TextBoxW(strlen(line), sc, pad);
-            if (*line) { GpuUavBarrier(cl, layer); CsText(g, p->sh, cl, layer, p->w, p->h, line, right ? (int)p->w - margin - bw : margin, y, sc, 1.0f, pad, true, &box[nb++]); }
-            y += bh + gap;
-        }
-    }
-    GpuBarrier(cl, layer, UAV, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+    GpuBarrier(g.list, layer, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, UAV);
+    const int nb = DrawText(p, g.list, layer, toast_on, hud_on, toast_a, true, box);
+    GpuBarrier(g.list, layer, UAV, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
     const UINT64 v = GpuEnd(g);
     if (!v) return;
     OverlayUiCommit(p->ov, box, nb, g.fence, v);
@@ -580,32 +570,27 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (p->rebuild_countdown > 0 && --p->rebuild_countdown == 0)
     {
         StopModel(p); p->model_failed = false;   // async: the restart below creates the new feature on the model thread
-        if (p->ww != c.work_w || p->wh != c.work_h) { GpuWaitIdle(g); DropFg(p); REL(p->nr_in); REL(p->nr_out); REL(p->mv); ReleaseModelWork(p); if (!AllocWork(p)) return false; }
+        if (p->ww != c.work_w || p->wh != c.work_h) { GpuWaitIdle(g); DropFg(p); ReleaseWork(p); if (!AllocWork(p)) return false; }
         p->create_pending = true; reset = true;
         PipelineToast(p, "Rebuilding model %ux%u...", p->ww, p->wh); p->model_toast_pending = true;
     }
-    // model_on, not p->nr: the object outlives the setting. Once the model had been on, turning it
-    // off left p->nr alive, so every gate below still fired - measured live as ~5000 failing
-    // EvaluateFeature calls with model=0, each one taking the NgxMutex that DLSS-G also needs.
-    // The layer switch is part of it: with the layer off (F9, Settings, tray) the model does not run at
-    // all - it used to keep evaluating on the async thread, unseen, while the compose showed native.
+    // model_on, not p->nr: the object outlives the setting, and a stray evaluate takes the NgxMutex DLSS-G
+    // also needs. With the layer off (F9, Settings, tray) the model does not run at all, async thread included.
     const bool model_on = c.nr_enabled && p->nr && !p->model_dead;
     const bool async = c.nr_async && model_on && !p->model_failed;
-    // Motion vectors have two consumers: the model (its temporal reprojection) and the warp engine
-    // (it extrapolates along them). DLSS-G is not one - it measures motion itself and ignores the
-    // values it is handed (fg.cpp, Evaluate: our flow, zeros and a field 50 px wrong score
-    // identically). Without either, the gray pass, the OFA execute, the queue wait on it and the
-    // expand ran for nobody, and they were 82-93% of an FG-only frame.
+    // Motion vectors feed the model and the warp/latewarp/video engines. Not DLSS-G: it measures motion
+    // itself (our flow, zeros and a field 50 px wrong score identically), so DLSS-G alone skips the flow.
     const bool warp_fg = c.fg_enabled && c.fg_engine == FG_WARP, lw_fg = c.fg_enabled && c.fg_engine == FG_LATEWARP;   // lw: the mouse model learns from the flow
     const bool vid_fg = c.fg_enabled && c.fg_engine == FG_VIDEO;   // video: interpolates along the flow
+    const bool fg_flow = warp_fg || lw_fg || vid_fg;
     if (lw_fg) MouseStart(); else MouseStop();
-    const bool need_mv = model_on || warp_fg || lw_fg || vid_fg;
+    const bool need_mv = model_on || fg_flow;
     if (need_mv && !p->had_mv) reset = true;   // the previous gray is stale: no flow across the gap
     p->had_mv = need_mv;
     // The per-frame flow (pair 0, current -> previous -> p->mv) has two readers: the SYNC evaluate and
     // the warp engine. The async track warps its residual with a different flow (pair 2, current ->
     // the residual's own frame), so it needs no pair 0 for itself.
-    const bool need_pair0 = (model_on && !async) || warp_fg || lw_fg || vid_fg;
+    const bool need_pair0 = (model_on && !async) || fg_flow;
     if (!async && p->model_thread.joinable()) StopModel(p);   // layer off or mode changed: the thread stops paying
     if (async && !p->model_thread.joinable() && !StartModel(p)) return false;
     // The presenter is always on while an overlay exists: passthrough (multiplier 1) with FG off,
@@ -641,43 +626,36 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
 
     // ---- list 1: swizzle, gray, downscale, gray -> OFA input --------------------------------------
     if (wait_fence) g.queue->Wait(wait_fence, wait_value);
-    // Timestamps live in the ring slot GpuBegin is about to reset. Under GPU load nothing has retired
-    // by the time the after-submit read runs, so every slot was being wiped unread: all stages came
-    // back -1 and the HUD showed "NR 0.0 ms" exactly when the numbers mattered. GpuBegin waits for
-    // this slot to retire anyway - wait here first, read it, and nothing is lost or added.
+    // Before every GpuBegin: it resets the ring slot that holds unread timestamps (under GPU load nothing has
+    // retired by the after-submit read). GpuBegin waits for the slot anyway - wait here, read it, nothing is lost.
     auto harvest = [&] { if (!c.gpu_timestamps) return; const UINT64 v = g.alloc_fence[g.slot]; if (v) GpuWait(g, g.fence, v, 2000); PipelineReadStamps(p); };
     double tw = NowMs();
 
     // ---- duplicate / scene-cut test, a list of its own ----------------------------------------------
-    // A capture identical to the last one (a browser repainting the same video frame at the display
-    // rate) is not a frame: it returns here, before list 1, flow, model and compose - handed on, it inflated
-    // "fps in" past the FG governor's floor and paid the whole pipeline for nothing. It used to share list 1,
-    // so a repeat still paid the swizzle, deband, gray and downscale (24 fps video in a 240 Hz browser: ~216
-    // times a second). A scene cut (a film changing camera, a game teleporting) is a reset: the model carried
-    // the old shot's history into the new one and smeared it, and DLSS-G interpolated between two unrelated images.
-    // ponytail: the CPU waits for this list here, behind whatever the queue still holds from the last frame
-    // (a sync model evaluate). A one-frame-late readback would avoid it at the cost of one late cut.
+    // A capture identical to the last one (a browser repainting the same video frame at the display rate) is
+    // not a frame: it returns here, before list 1 - handed on, it inflated "fps in" past the FG governor's floor.
+    // A scene cut is a reset: the model would smear the old shot's history into the new one, DLSS-G interpolate
+    // between unrelated images. ponytail: the CPU waits for this list here, behind whatever the queue still holds
+    // (a sync evaluate); a one-frame-late readback would avoid it at the cost of one late cut.
     bool dup = false, cut = false;
-    const bool check_same = !reset;   // after a reset color4k is not the previous frame
-    if (check_same)
+    if (!reset)   // after a reset color4k is not the previous frame
     {
         harvest();
         if (!GpuBegin(g)) return false;
-        GpuBarrier(cl, cap, D3D12_RESOURCE_STATE_COMMON, NPSR);
+        GpuBarrier(cl, cap, COMMON, NPSR);
         GpuBarrier(cl, p->same, CSRC, UAV);
         CsSame(g, p->sh, cl, cap, p->color4k, p->w, p->h, p->hdr_white, p->same);
         GpuBarrier(cl, p->same, UAV, CSRC);
         GpuCopyToReadback(cl, p->same, p->same_rb, DXGI_FORMAT_R8G8_UNORM, p->same_w, p->same_h, p->same_pitch);
-        GpuBarrier(cl, cap, NPSR, D3D12_RESOURCE_STATE_COMMON);
+        GpuBarrier(cl, cap, NPSR, COMMON);
         const UINT64 f0 = GpuEnd(g);
         if (!f0) return false;
         SameTest(p, f0, dup, cut);
     }
     else p->same_prev.clear();   // the previous frame is not comparable across a reset
-    // Only while the picture on screen is final: a model still warming up (or without a residual yet), or
-    // one that has just published a newer residual, needs the frame - a paused video kept the plain image.
-    // The model is not handed a repeat it has already seen (a published residual feeding the next repeat
-    // back to it kept it evaluating one still picture forever).
+    // A repeat is dropped only while the picture on screen is final: a model still warming up (or without a
+    // residual yet), or one that has just published a newer one, needs the frame. But the model is not handed a
+    // repeat it has already seen, or it would evaluate one still picture forever.
     const bool no_handoff = dup && !p->shown_native;
     if (dup && (wait_pub || p->shown_native || c.selftest)) dup = false;   // selftest: the toast test composes one still frame twice
     if (dup) { ++p->dups; return true; }
@@ -688,12 +666,12 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (!GpuBegin(g)) return false;
     p->cpu_wait[0].add(NowMs() - tw);
     stamp(2 * PS_LIST1);   // spans the whole submission, barriers and copies included
-    GpuBarrier(cl, cap, D3D12_RESOURCE_STATE_COMMON, NPSR);
+    GpuBarrier(cl, cap, COMMON, NPSR);
     GpuBarrier(cl, p->color4k, NPSR, UAV);
     stamp(2 * PS_SWIZZLE); CsSwizzle(g, p->sh, cl, cap, p->color4k, p->w, p->h, p->hdr_white); stamp(2 * PS_SWIZZLE + 1);
     GpuBarrier(cl, p->color4k, UAV, NPSR);
-    // Deband the capture itself, before the model: compressed video's steps were fed to the model, which
-    // sharpened them into detail, and debanded after it. color4k stays the raw capture (CsSame compares it).
+    // Deband the capture itself, before the model (which sharpens compression steps into detail). color4k
+    // stays the raw capture (CsSame compares it).
     // ponytail: the UI rects are the last compose's (rect_tex is uploaded in list 2) - one frame behind.
     ID3D12Resource* src4k = p->color4k;
     if (c.filters_enabled && c.deband > 0)
@@ -716,9 +694,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     GpuBarrier(cl, p->nr_in, NPSR, UAV);
     stamp(2 * PS_GRAYDS);
     if (need_mv) CsGray(g, p->sh, cl, p->color4k, p->w, p->h, p->gray, p->gw, p->gh);
-    // Only the model reads nr_in. Without it (FG-only, the default), the compose takes the native
-    // path and never samples it, so this area filter would be dead work - and none of it while the
-    // layer is switched off (F9), when the compose shows native.
+    // Only the sync model reads nr_in: the native compose never samples it.
     if (!async && model_on) CsDownscale(g, p->sh, cl, src4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
     stamp(2 * PS_GRAYDS + 1);
     GpuBarrier(cl, p->nr_in, UAV, NPSR);
@@ -758,7 +734,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
 
     if (handoff)
     {
-        mf.fence = f1; mf.reset |= cut;
+        mf.fence = f1;   // a cut is already in mf.reset (via reset -> model_reset_pending)
         { std::lock_guard<std::mutex> lk(p->model_mu); p->model_frame = mf; p->model_frame_ready = true; }
         p->model_cv.notify_one();
     }
@@ -793,21 +769,21 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (need_pair0)
     {
         ID3D12Resource* flow = OfaFlow(p->ofa);
-        GpuBarrier(cl, flow, D3D12_RESOURCE_STATE_COMMON, NPSR);
+        GpuBarrier(cl, flow, COMMON, NPSR);
         GpuBarrier(cl, p->mv, NPSR, UAV);
         stamp(2 * PS_EXPAND);
         CsExpand(g, p->sh, cl, flow, OfaFlowWidth(p->ofa), OfaFlowHeight(p->ofa), p->gw, p->gh, p->mv, p->ww, p->wh, c.zero_below, reset);
         stamp(2 * PS_EXPAND + 1);
         GpuBarrier(cl, p->mv, UAV, NPSR);
-        GpuBarrier(cl, flow, NPSR, D3D12_RESOURCE_STATE_COMMON);
+        GpuBarrier(cl, flow, NPSR, COMMON);
     }
     int grid_q = -1;   // latewarp: this frame's flow, averaged and queued for the mouse model
     if (lw_fg && need_pair0 && !reset)   // timestamps only matter to the mouse model (checked on read-back)
     {
         if (!p->mvgrid)
         {
-            p->mvgrid = GpuMakeTex(g, kMvGridW, kMvGridH, DXGI_FORMAT_R32G32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"mvgrid");
-            for (auto& r : p->mvgrid_rb) r = GpuMakeBuffer(g, kMvGridPitch * kMvGridH, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE, L"mvgrid_rb");
+            p->mvgrid = GpuMakeTex(g, kMvGridW, kMvGridH, DXGI_FORMAT_R32G32_FLOAT, FUAV, CSRC, L"mvgrid");
+            for (auto& r : p->mvgrid_rb) r = GpuMakeBuffer(g, kMvGridPitch * kMvGridH, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"mvgrid_rb");
         }
         for (int i = 0; i < 4 && grid_q < 0; ++i) if (!p->mvgrid_q[i].fence && p->mvgrid_rb[i]) grid_q = i;
         if (p->mvgrid && grid_q >= 0)
@@ -831,20 +807,14 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         GpuBarrier(cl, flow3, NPSR, COMMON);
     }
 
-    // Self-heal: a ready feature at the wrong size (NrEvaluate refuses it) schedules the ordinary
-    // rebuild, which reallocates and recreates in step. Without this a mismatch would sit on native
-    // forever, because nothing else would notice.
-    // Not while a create is already pending - that create IS the heal, and re-arming the countdown
-    // here starved it forever (the create waits for countdown == 0). --rework in bench caught that.
+    // Self-heal: a ready feature at the wrong size (NrEvaluate refuses it) schedules the ordinary rebuild,
+    // which reallocates and recreates in step. Not while a create is pending: that create IS the heal, and
+    // re-arming the countdown would starve it (the create waits for countdown == 0; bench --rework).
     if (!async && model_on && NrReady(p->nr) && !NrMatches(p->nr, p->ww, p->wh) && p->rebuild_countdown == 0 && !p->create_pending)
     { Log("[nr] feature size does not match the %ux%u work textures - rebuilding", p->ww, p->wh); p->rebuild_countdown = 1; }
-    // Not while a rebuild is counting down: that rebuild reallocates the work textures and then
-    // sets create_pending itself. Creating here used the NEW config size against the OLD textures.
-    // NOT gated on !NrReady: a rebuild leaves the old feature ready, and that gate meant the rebuild
-    // set create_pending, toasted "Rebuilding model" and then never recreated anything - every live
-    // change to a create-latched key (work size, style, local tone/structure) was silently ignored
-    // in sync mode. NrCreate retires the old feature itself, and this branch returns before any
-    // evaluate, so create and evaluate still never share a list.
+    // Not while a rebuild counts down (it reallocates the work textures, then sets create_pending). Not gated
+    // on !NrReady: a rebuild leaves the old feature ready, and NrCreate retires it. The create list returns
+    // before any evaluate: create and evaluate never share a list.
     if (!async && model_on && p->create_pending && p->rebuild_countdown == 0)
     {
         p->create_pending = false;
@@ -866,8 +836,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         else
         {
             if ((p->eval_fails++ % 120) == 0) Log("[nr] evaluate -> 0x%08X (%s) %s", r, NgxResultName(r), NrLastError(p->nr));
-            // Paying for a model that never answers is worse than none: after 30 in a row, off until the
-            // next create (reload, resize, rebuild), and say so.
+            // after 30 in a row, off until the next create (reload, resize, rebuild)
             if (p->eval_fails == 30) { p->model_dead = true; PipelineToast(p, "DLSS model failing (0x%08X) - off until reload", r); }
         }
     }
@@ -887,15 +856,11 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     if (native) cp.wipe_mode = 2;
     else if (p->wipe == 1) { cp.wipe_mode = 1; cp.wipe_x = 0.5f; }
     else if (p->wipe == 2) { cp.wipe_mode = 1; cp.wipe_x = (float)fmod((NowMs() - p->wipe_t0) / 2000.0, 1.0); }
-    // Take the FG slot now, so the LAST 4K pass of this frame writes straight into it. The frame
-    // used to be composed into out4k/sharp4k and then CopyResource'd into the slot: 33 MB read plus
-    // 33 MB written per frame, ~6 GB/s of memory traffic at 90 fps, for a copy that produced nothing
-    // the previous pass had not already computed. Nobody downstream needs to know: the slot texture
+    // Take the FG slot now, so the LAST 4K pass of this frame writes straight into it (no 4K copy). The slot
     // has the same format, size and resting state (COPY_SOURCE) as the targets it replaces.
-    // A duplicate (above) is not handed to FG: the overlay keeps showing the last frame.
-    ID3D12Resource* const fg_dst = (p->fg && !dup) ? FgAcquire(p->fg) : nullptr;
+    ID3D12Resource* const fg_dst = p->fg ? FgAcquire(p->fg) : nullptr;
     const bool filt = c.filters_enabled && (c.sharpen > 0 || c.saturation != 1.0f);   // deband ran in list 1
-    ID3D12Resource* const compose_dst = filt ? p->out4k : (fg_dst ? fg_dst : p->out4k);
+    ID3D12Resource* const compose_dst = !filt && fg_dst ? fg_dst : p->out4k;
     GpuBarrier(cl, compose_dst, CSRC, UAV);
     if (async)
     {
@@ -919,19 +884,17 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // Three layers, three independent switches, and none of them reaches into another:
     //
     //   capture -> deband ([filters] deband, F6)   compression steps, before the model sees them.
-//           -> NEURAL ([nr] enabled, F9)      the DLSS model, at work resolution,
+    //           -> NEURAL ([nr] enabled, F9)      the DLSS model, at work resolution,
     //                                             composed back as a residual at native resolution.
     //           -> FILTERS ([filters] enabled, F6) sharpen then vibrance, at native resolution.
-    //           -> UI rects + text                the addon mask and the HUD/toasts.
+    //           -> UI rects                       the addon mask (kept out of every layer).
     //           -> FRAME GEN ([fg] enabled, F8)   interpolates the finished frame; the UI is copied
-    //                                             back onto the generated ones.
+    //                                             back onto the generated ones. The HUD/toasts go over
+    //                                             every presented frame (PipelineUi).
     //
-    // The order is not arbitrary. Sharpening has to see what the model produced or it sharpens the
-    // wrong image, vibrance grades after the sharpen rather than feeding it exaggerated contrast,
-    // text goes on after both so it stays crisp, and FG runs last because it interpolates the frame
-    // as the viewer sees it. Every combination is valid: any layer off just passes its input through.
-    // Vibrance used to live inside the neural compose, which meant it silently died with the neural
-    // layer while sharpen carried on - that is the bug this layout exists to prevent.
+    // Sharpening has to see what the model produced, vibrance grades after the sharpen rather than feeding
+    // it exaggerated contrast, and FG interpolates the frame as the viewer sees it. Any layer off passes its
+    // input through; none reaches into another (vibrance in the neural compose died with that layer).
     ID3D12Resource* shown = compose_dst;
     if (filt)
     {
@@ -943,36 +906,14 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         GpuBarrier(cl, p->out4k, NPSR, CSRC);
         shown = filt_dst;
     }
-    // toast (2 s, the last 0.4 s fade) top-centre; status HUD in its corner (also in bypass)
-    const double now = NowMs();
-    const bool toast_on = c.toast && p->toast[0] && now < p->toast_until_ms, hud_on = p->hud && p->hud_line[0][0];
-    // With an overlay the HUD and toast are drawn over every PRESENTED frame instead (PipelineUi): baked in
-    // here, frame generation interpolated our text and the HUD froze while frames were skipped.
-    if ((toast_on || hud_on) && (!p->ov || c.selftest))
-    {
-        GpuUavBarrier(cl, shown);
-        if (toast_on)
-            CsText(g, p->sh, cl, shown, p->w, p->h, p->toast, -1, -1, c.toast_scale, (float)std::min(1.0, (p->toast_until_ms - now) / 400.0), 2 * c.toast_scale);
-        if (hud_on)
-        {
-            if (toast_on) GpuUavBarrier(cl, shown);   // a wide toast can reach a wide HUD line
-            const int sc = std::max(1, c.hud_scale), pad = 2 * sc, margin = 24, gap = sc, bh = TextBoxH(sc, pad);
-            const bool right = c.hud_corner & 1, bottom = c.hud_corner & 2;
-            const int nlines = (int)(sizeof p->hud_line / sizeof p->hud_line[0]);
-            int y = bottom ? (int)p->h - margin - nlines * bh - (nlines - 1) * gap : margin;
-            for (const char* line : p->hud_line)
-            {
-                const int bw = TextBoxW(strlen(line), sc, pad);
-                if (*line) CsText(g, p->sh, cl, shown, p->w, p->h, line, right ? (int)p->w - margin - bw : margin, y, sc, 1.0f, pad);
-                y += bh + gap;
-            }
-        }
-    }
+    // With an overlay PipelineUi draws the toast and HUD over every presented frame (FG would interpolate them
+    // baked in); without one (bench) and in the self-test they go into the frame.
+    if (!p->ov || c.selftest) { bool toast_on, hud_on; const float toast_a = TextOn(p, toast_on, hud_on); RECT box[4]; DrawText(p, cl, shown, toast_on, hud_on, toast_a, false, box); }
     GpuBarrier(cl, shown, UAV, CSRC);
     p->shown = shown;
     // the presenter thread presents (passthrough or generation); --no-present has no Fg
-    // engine=latewarp: Frame Warp holds still what does not move with the camera (a third-person
-    // character, anything moving on its own) - warping it by the camera's rotation smudged its edges.
+    // engine=latewarp: Frame Warp holds still what does not move with the camera (a third-person character),
+    // or the camera's rotation smudges it.
     if (fg_dst && lw_fg && need_pair0 && !reset)
         if (ID3D12Resource* m = FgMaskTarget(p->fg))
         {
@@ -1000,7 +941,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         ID3D12Resource* gcur = OfaInput(p->ofa, 1 - p->ofa_cur);
         ID3D12Resource* gprev = OfaInput(p->ofa, p->ofa_cur);
         GpuBarrier(cl, shown, CSRC, NPSR);
-        GpuBarrier(cl, gcur, D3D12_RESOURCE_STATE_COMMON, NPSR); GpuBarrier(cl, gprev, D3D12_RESOURCE_STATE_COMMON, NPSR);
+        GpuBarrier(cl, gcur, COMMON, NPSR); GpuBarrier(cl, gprev, COMMON, NPSR);
         for (int i = 0; ID3D12Resource* gen = FgWarpTarget(p->fg, i); ++i)
         {
             GpuBarrier(cl, gen, CSRC, UAV);
@@ -1008,7 +949,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
                    gcur, gprev, p->gw, p->gh);
             GpuBarrier(cl, gen, UAV, CSRC);
         }
-        GpuBarrier(cl, gcur, NPSR, D3D12_RESOURCE_STATE_COMMON); GpuBarrier(cl, gprev, NPSR, D3D12_RESOURCE_STATE_COMMON);
+        GpuBarrier(cl, gcur, NPSR, COMMON); GpuBarrier(cl, gprev, NPSR, COMMON);
         GpuBarrier(cl, shown, NPSR, CSRC);
     }
     const bool fg_recorded = fg_dst && FgRecord(p->fg, cp.rects, (int)cp.nrects);
@@ -1029,19 +970,13 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
 // ---- live mode ----------------------------------------------------------------------------------------
 static HWND FindTarget(const Config& c)
 {
-    // Both empty matches the FIRST window on the desktop, which is how a profile-less start would
-    // attach itself to something arbitrary. A profile that names nothing targets nothing.
     // Full desktop: the desktop window stands for the primary monitor - DDA duplicates its output, WGC
     // captures the monitor, the overlay covers it and never hides for a foreground change.
     if (c.desktop) return GetDesktopWindow();
-    if (c.window_class.empty() && c.window_title.empty()) return nullptr;
-    // The LARGEST plausible match, not the first. A title like "World of Warcraft" is also carried by
-    // launcher pages, taskbar thumbnails, tooltips and browser tabs, and first-in-Z-order once
-    // attached the overlay to a 318x157 popup on the wrong monitor. A game window is a real,
-    // visible, uncloaked top-level window and it is bigger than any of those; a minimised one is
-    // judged by the size it restores to, so alt-tabbing out does not lose the target.
-    HWND best = nullptr; LONGLONG best_area = 0;
-    HWND h = nullptr;
+    if (c.window_class.empty() && c.window_title.empty()) return nullptr;   // would match the first window on the desktop
+    // The LARGEST plausible match: the title is also carried by launcher pages, thumbnails, tooltips and browser
+    // tabs. A game window is visible, uncloaked and bigger; a minimised one is judged by its restored size.
+    HWND best = nullptr, h = nullptr; LONGLONG best_area = 0;
     while ((h = FindWindowExW(nullptr, h, c.window_class.empty() ? nullptr : c.window_class.c_str(), nullptr)) != nullptr)
     {
         if (!c.window_title.empty())
@@ -1066,7 +1001,7 @@ static void DumpFrame(Pipeline* p, const std::wstring& dir, int i)
 {
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%ls\\dump_%03d_native.png", dir.c_str(), i); SaveTexPng(*p->g, p->color4k, p->w, p->h, NPSR, path);
-    _snwprintf_s(path, _TRUNCATE, L"%ls\\dump_%03d_out.png", dir.c_str(), i); SaveTexPng(*p->g, p->shown, p->w, p->h, D3D12_RESOURCE_STATE_COPY_SOURCE, path);
+    _snwprintf_s(path, _TRUNCATE, L"%ls\\dump_%03d_out.png", dir.c_str(), i); SaveTexPng(*p->g, p->shown, p->w, p->h, CSRC, path);
     Log("[main] dumped frame %d", i);
 }
 
@@ -1090,13 +1025,11 @@ std::wstring PickProfile(const std::wstring& dir, const std::wstring& ini, std::
     if (h != INVALID_HANDLE_VALUE) { do names.push_back(Stem(fd.cFileName)); while (FindNextFileW(h, &fd)); FindClose(h); }
     std::sort(names.begin(), names.end());
     auto find = [&](const std::wstring& n) { for (size_t i = 0; i < names.size(); ++i) if (!_wcsicmp(names[i].c_str(), n.c_str())) return (int)i; return -1; };
-    // A path with either slash is a path: "C:/x/y.ini" used to be read as a name in dir, missed, and
-    // silently gave defaults.
+    // a path with either slash is a path ("C:/x/y.ini"), anything else a name in dir
     if (!ini.empty()) { index = find(Stem(ini)); return ini.find_first_of(L"\\/") != std::wstring::npos ? ini : dir + L"\\" + ini; }
     if (names.empty()) return L"";
     Config a; ConfigLoad((dir + L"\\justflow.ini").c_str(), nullptr, a);   // [app] profile=<name> pins the startup profile
-    // none = start attached to nothing. The tray picks one, or "New profile from window..."
-    // generates one. JustFlow should not grab a game the user did not ask it to.
+    // none = start attached to nothing (the tray picks or generates one): no grabbing an unasked-for game
     if (_wcsicmp(a.profile.c_str(), L"none") == 0) { index = -1; return L""; }
     if (!a.profile.empty() && _wcsicmp(a.profile.c_str(), L"auto") != 0)
     {
@@ -1141,14 +1074,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 static int RealMain(int argc, char** argv)
 {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    // 1 ms timer resolution. Windows' default is 15.6 ms, and a Sleep(1) that waited a whole 15.6 ms
-    // in the capture loop was the single worst bug of this project - it stalled a frame every time
-    // the cursor moved. The same granularity applies to condition_variable timed waits, which is how
-    // the presenter paces when vblank pacing is unavailable: a 4.17 ms deadline would become 15.6 ms
-    // and the fallback would be worse than no pacing at all. Per-process since Win10 2004, so this
-    // does not change the timer for the rest of the system.
-    // Fail-safe: if it fails we are exactly where we were, and the vblank path does not need it.
-    // Reported after LogInit, not here - a silent failure is what made the Sleep(1) bug take a day.
+    // 1 ms timer resolution (per-process since Win10 2004): the default 15.6 ms granularity also applies to the
+    // condition_variable waits the presenter paces with when vblank pacing is unavailable. A failure is
+    // harmless but logged (after LogInit).
     const bool timer_1ms = timeBeginPeriod(1) == TIMERR_NOERROR;
     int dump = 0, preset = -1; bool settings_only = false;
     std::wstring ini_arg;   // --ini <file>: an explicit profile (next to the exe, or a path); else PickProfile
@@ -1174,10 +1102,8 @@ static int RealMain(int argc, char** argv)
     const int have = ConfigLoad(app_path.c_str(), ini_path.c_str(), cfg);
     // Standalone settings: dodge the game's monitor too, in case it is already running.
     if (settings_only) return SettingsDialog(nullptr, app_path.c_str(), ini_path.c_str(), L"JustFlow", FindTarget(cfg)) ? 0 : 1;
-    // One LIVE instance only. Two of them both open Desktop Duplication, both put a topmost overlay
-    // on the same window and both present to the same display - they fight, and every number in the
-    // log becomes meaningless. Held for the life of the process; --settings / --preset / --bench are
-    // short-lived tools and are deliberately not covered (they return above this).
+    // One LIVE instance only (two would fight over the capture, the overlay and the display). Held for the life
+    // of the process; --settings / --preset / --bench are short-lived tools and return above this.
     HANDLE only_one = CreateMutexW(nullptr, TRUE, L"Local\\JustFlow.SingleInstance");
     if (!only_one || GetLastError() == ERROR_ALREADY_EXISTS)
     {
@@ -1203,9 +1129,8 @@ static int RealMain(int argc, char** argv)
     SetConsoleTitleW(L"JustFlow");
     Tray* tray = TrayCreate(L"JustFlow");
     if (!tray) Log("[tray] not available (no icon; hotkeys still work)");
-    std::vector<const wchar_t*> pnames; for (auto& n : profiles) pnames.push_back(n.c_str());
-    if (tray) TraySetProfiles(tray, pnames.data(), (int)pnames.size());
-    if (tray) TraySetPaths(tray, app_path.c_str(), ini_path.c_str());
+    auto tray_profiles = [&] { std::vector<const wchar_t*> pn; for (auto& n : profiles) pn.push_back(n.c_str()); TraySetProfiles(tray, pn.data(), (int)pn.size()); };
+    if (tray) { tray_profiles(); TraySetPaths(tray, app_path.c_str(), ini_path.c_str()); }
 
     Pipeline* p = nullptr;   // the live pipeline, null while waiting for the window
     bool quit = false; int pending_profile = -1, dumped = 0, rc = 0;
@@ -1247,12 +1172,7 @@ static int RealMain(int argc, char** argv)
         if (flip(p->cfg.nr_enabled, cfg.nr_enabled, L"nr", L"enabled"))
         {
             p->force_reset = true;
-            // First time on this session: the model loads now (see PipelineCreate).
-            if (!p->nr)
-            {
-                p->nr = NrInit(g, ExeDir().c_str(), (NrParamBlock)p->cfg.param_block);
-                if (p->nr) p->create_pending = true; else Log("[nr] init failed while enabling");
-            }
+            if (!LoadNr(p, p->cfg.param_block)) Log("[nr] init failed while enabling");
         }
         if (!p->cfg.nr_enabled) PipelineToast(p, "Neural layer OFF");
         else if (p->nr) PipelineToast(p, "Neural layer ON");
@@ -1317,7 +1237,7 @@ static int RealMain(int argc, char** argv)
         LogConfigFiles(app_path, ini_path, have);
         Log("[main] config reloaded%s", ok ? "" : " (profile missing - defaults)");
         if (!ok) PipelineToast(p, "Reload failed");
-        else if (cap_changed) { if (cfg.max_fps > 0 || cfg.model_max_fps > 0) PipelineToast(p, "Cap: %s", caps(cfg).c_str()); else PipelineToast(p, "Cap: none"); }
+        else if (cap_changed) PipelineToast(p, "Cap: %s", cfg.max_fps > 0 || cfg.model_max_fps > 0 ? caps(cfg).c_str() : "none");
         else PipelineToast(p, "Profile reloaded: %ls", profile_name().c_str());
         tray_state();
     };
@@ -1349,11 +1269,9 @@ static int RealMain(int argc, char** argv)
         case TrayRescanProfiles:
         {
             // PickProfile honours [app] profile, which the picker just pointed at the new file.
-            std::vector<std::wstring> names; int idx = -1;
-            PickProfile(dir, L"", names, idx);
-            profiles = names;
-            std::vector<const wchar_t*> pn; for (auto& n : profiles) pn.push_back(n.c_str());
-            TraySetProfiles(tray, pn.data(), (int)pn.size());
+            int idx = -1;
+            PickProfile(dir, L"", profiles, idx);
+            tray_profiles();
             if (idx >= 0 && idx != profile) pending_profile = idx;
             else if (idx < 0 && profile >= 0) go_idle = true;   // [app] profile=none now (the active one was removed)
             Log("[main] profiles rescanned (%zu), selected %d", profiles.size(), idx);
@@ -1402,14 +1320,15 @@ static int RealMain(int argc, char** argv)
         }
         if (!target) continue;
         Log("[main] target window %p", (void*)target);
-        Capture* cap = CaptureOpen(g, target, cfg.cursor, cfg.border, cfg.dda);
+        auto open_cap = [&] { return CaptureOpen(g, target, cfg.cursor, cfg.border, cfg.dda); };
+        Capture* cap = open_cap();
         // Desktop Duplication and monitor capture see the whole monitor, our overlay included:
         // exclusion is mandatory there, or it captures and re-presents itself.
         if (cap && CaptureSeesOverlay(cap)) cfg.exclude_from_capture = true;
         if (!cap) { Sleep(1000); continue; }
         p = PipelineCreate(g, cfg, CaptureWidth(cap), CaptureHeight(cap), true, target);
-        if (p) Log("[gpu] reserved %.0f MB of video memory (residency priority high)", GpuReserveCurrentUsage(g));
         if (!p) { CaptureClose(cap); rc = 1; break; }
+        Log("[gpu] reserved %.0f MB of video memory (residency priority high)", GpuReserveCurrentUsage(g));
         _snwprintf_s(status, _TRUNCATE, L"%ls", profile_name().c_str()); tray_state();
         if (switched) { switched = false; PipelineToast(p, "Profile: %ls", profile_name().c_str()); }
         else
@@ -1428,20 +1347,20 @@ static int RealMain(int argc, char** argv)
         StageStats acq_ms, hud_acq; double acq_acc = 0;
         // FG / model counters are handed over on read: the HUD tick (250 ms) and the [stats] line share one drain
         FgStatsOut fs_agg; UINT model_evals_acc = 0;
-        double hud_t = NowMs(); UINT hud_frames = 0, hud_presented = 0, hud_model = 0;
-        UINT hud_gen = 0, hud_nopair = 0, hud_disabled = 0, hud_preempt = 0;   // FG gates, live on the HUD
+        double hud_t = NowMs(); UINT hud_frames = 0, hud_model = 0;
+        FgStatsOut hud_fs;   // FG counters since the last HUD tick (its vectors stay empty)
         auto drain = [&]
         {
             if (p->fg)
             {
                 FgStatsOut fs; FgStats(p->fg, fs);
-                fs_agg.presented += fs.presented; fs_agg.drops += fs.drops; hud_presented += fs.presented;
-                fs_agg.gen_shown += fs.gen_shown; fs_agg.no_pair += fs.no_pair;
-                fs_agg.disabled += fs.disabled; fs_agg.preempts += fs.preempts; fs_agg.paused += fs.paused;
-                hud_gen += fs.gen_shown; hud_nopair += fs.no_pair;
-                hud_disabled += fs.disabled; hud_preempt += fs.preempts;
-                fs_agg.vblank_wait_sum_ms += fs.vblank_wait_sum_ms; fs_agg.vblank_waits += fs.vblank_waits;
-                fs_agg.record_wait_sum_ms += fs.record_wait_sum_ms; fs_agg.record_waits += fs.record_waits;
+                for (FgStatsOut* a : { &fs_agg, &hud_fs })
+                {
+                    a->presented += fs.presented; a->drops += fs.drops; a->gen_shown += fs.gen_shown; a->no_pair += fs.no_pair;
+                    a->disabled += fs.disabled; a->preempts += fs.preempts; a->paused += fs.paused;
+                    a->vblank_wait_sum_ms += fs.vblank_wait_sum_ms; a->vblank_waits += fs.vblank_waits;
+                    a->record_wait_sum_ms += fs.record_wait_sum_ms; a->record_waits += fs.record_waits;
+                }
                 if (cfg.stats_every <= 0) { fs_agg.spacing_ms.clear(); fs_agg.age_ms.clear(); fs_agg.pipe_ms.clear(); }   // no [stats] tick to clear them: the HUD reads this drain's only
                 fs_agg.spacing_ms.insert(fs_agg.spacing_ms.end(), fs.spacing_ms.begin(), fs.spacing_ms.end());
                 fs_agg.age_ms.insert(fs_agg.age_ms.end(), fs.age_ms.begin(), fs.age_ms.end());
@@ -1467,47 +1386,37 @@ static int RealMain(int argc, char** argv)
                 Log("[main] window settled at %ux%u - recreating capture", nw, nh);
                 GpuWaitIdle(g);
                 CaptureClose(cap);
-                cap = CaptureOpen(g, target, cfg.cursor, cfg.border, cfg.dda);
+                cap = open_cap();
                 if (!cap || !PipelineResize(p, CaptureWidth(cap), CaptureHeight(cap))) { Log("[main] recreate failed"); break; }
                 PipelineToast(p, "Capture %ux%u", CaptureWidth(cap), CaptureHeight(cap));
                 reset = true; last_sysrel = 0;
                 continue;
             }
             // ---- dormant -------------------------------------------------------------------------
-            // With no layer doing anything the overlay is a strictly worse copy of the game: an opaque
-            // topmost window re-presenting the capture at the CAPTURE rate, on top of a game that may
-            // be running faster underneath (Dawnwalker's own frame generation), and a full-screen
-            // composed window also costs the game independent flip and VRR. So get out of the way
-            // completely: hide the overlay and RELEASE the desktop duplication, then idle on the
-            // hotkeys and the tray. Any toggle that enables a layer wakes it within 50 ms.
+            // With no layer doing anything the overlay is a worse copy of the game (re-presented at the capture
+            // rate, costing it independent flip and VRR): hide it, RELEASE the capture, idle on hotkeys and tray.
+            if (!(p->cfg.nr_enabled || FiltersLive(p->cfg) || p->cfg.fg_enabled || p->wipe != 0 || dump > dumped))
             {
-                const Config& lc = p->cfg;
-                const bool neural = lc.nr_enabled;
-                const bool filters = FiltersLive(lc);
-                const bool active = neural || filters || lc.fg_enabled || p->wipe != 0 || dump > dumped;
-                if (!active)
+                if (!dormant)
                 {
-                    if (!dormant)
-                    {
-                        dormant = true; GpuWaitIdle(g); OverlayHide(p->ov);
-                        if (cap) { CaptureClose(cap); cap = nullptr; }
-                        Log("[main] dormant: no layer is enabled - overlay hidden, capture released");
-                        _snwprintf_s(status, _TRUNCATE, L"%ls  dormant (all layers off)", profile_name().c_str()); tray_state();
-                    }
-                    if (!IsWindow(target)) { Log("[main] target window gone"); break; }
-                    Sleep(50);
-                    continue;
+                    dormant = true; GpuWaitIdle(g); OverlayHide(p->ov);
+                    if (cap) { CaptureClose(cap); cap = nullptr; }
+                    Log("[main] dormant: no layer is enabled - overlay hidden, capture released");
+                    _snwprintf_s(status, _TRUNCATE, L"%ls  dormant (all layers off)", profile_name().c_str()); tray_state();
                 }
-                if (dormant)
-                {
-                    dormant = false;
-                    cap = CaptureOpen(g, target, cfg.cursor, cfg.border, cfg.dda);
-                    if (!cap) { Log("[main] wake: capture did not reopen"); break; }
-                    if (CaptureWidth(cap) != p->w || CaptureHeight(cap) != p->h) { if (!PipelineResize(p, CaptureWidth(cap), CaptureHeight(cap))) break; }
-                    reset = true; last_sysrel = 0;
-                    Log("[main] awake: a layer was enabled - capture reopened");
-                    _snwprintf_s(status, _TRUNCATE, L"%ls", profile_name().c_str()); tray_state();
-                }
+                if (!IsWindow(target)) { Log("[main] target window gone"); break; }
+                Sleep(50);
+                continue;
+            }
+            if (dormant)
+            {
+                dormant = false;
+                cap = open_cap();
+                if (!cap) { Log("[main] wake: capture did not reopen"); break; }
+                if (CaptureWidth(cap) != p->w || CaptureHeight(cap) != p->h) { if (!PipelineResize(p, CaptureWidth(cap), CaptureHeight(cap))) break; }
+                reset = true; last_sysrel = 0;
+                Log("[main] awake: a layer was enabled - capture reopened");
+                _snwprintf_s(status, _TRUNCATE, L"%ls", profile_name().c_str()); tray_state();
             }
             UINT64 fv = 0; LONGLONG sysrel = 0;
             const double acq_t0 = NowMs();
@@ -1520,25 +1429,16 @@ static int RealMain(int argc, char** argv)
                 // overlay must hide promptly (OverlayFollow throttles its own geometry query to 50 ms).
                 OverlayFollow(p->ov, cfg.reassert_topmost_every);
                 PipelineUi(p);   // the HUD and toasts keep updating with no new frame (a paused video)
-                // No sleep here. CaptureAcquire already blocks on its own timeout (AcquireNextFrame /
-                // the frame event), and every early return runs after that wait, so this cannot spin.
-                // The Sleep(1) that was here stalled the capture loop on every MOUSE MOVE: Desktop
-                // Duplication reports a cursor-only update (LastPresentTime == 0), we skip it, and without
-                // timeBeginPeriod a Sleep(1) waits for the next 15.6 ms scheduler tick - so the real game
-                // frame behind it sat waiting. Moving the mouse is exactly when FG matters, and it turned
-                // into irregular capture, a jittery content interval, drops and warping. The stall was
-                // after acq_ms and before cpu_ms, so no stat ever showed it.
+                // No sleep: CaptureAcquire blocks on its own timeout, so this cannot spin, and a Sleep here
+                // delays the real frame behind every cursor-only update.
                 continue;
             }
             p->hdr_white = CaptureSdrWhite(cap);   // an HDR desktop duplicated as FP16: converted in the swizzle
             if (CaptureIsFloat(cap) && p->hdr_white <= 0) { Log("[main] FP16 (HDR) window capture is not supported - exiting"); quit = true; rc = 2; break; }
             LARGE_INTEGER acq; QueryPerformanceCounter(&acq);
             const double t0 = NowMs();
-            // max_fps: a GPU-bound game (Dawnwalker with 3X FG presents ~135 fps) would otherwise get a
-            // full pipeline pass per presented frame and lose the GPU time. Drop frames above the cap.
-            // Tolerant limiter: a frame that arrives a little early on capture jitter is still taken, and the
-            // schedule advances by whole periods so 90 fps in stays 90 fps through (a strict "< period"
-            // test rejected every early frame and turned a 90 fps capture into ~60).
+            // max_fps: drop frames above the cap, so a GPU-bound game keeps its GPU time. Tolerant: a frame a little
+            // early on capture jitter is still taken, and the schedule advances by whole periods (90 in stays 90).
             if (cfg.max_fps > 0)
             {
                 const double period = 1000.0 / cfg.max_fps;
@@ -1561,19 +1461,17 @@ static int RealMain(int argc, char** argv)
             if (cfg.stats_every > 0) cpu_ms.push_back(NowMs() - t0);   // only the [stats] tick reads it, and only that tick clears it
             if (p->last_evaluated && dumped < dump) DumpFrame(p, dir, dumped++);
             ++hud_frames;
-            if (p->hud && NowMs() - hud_t >= 250.0)   // status HUD: two lines from the live counters
+            if (p->hud && NowMs() - hud_t >= 250.0)   // status HUD from the live counters
             {
                 drain();
-                const double dt = NowMs() - hud_t, cap_fps = hud_frames * 1000.0 / dt, out_fps = hud_presented * 1000.0 / dt;
+                const double dt = NowMs() - hud_t, cap_fps = hud_frames * 1000.0 / dt, out_fps = hud_fs.presented * 1000.0 / dt;
                 const double age = StageStats{ fs_agg.age_ms }.med();
                 char capstr[12]; if (cfg.max_fps > 0) sprintf_s(capstr, "%d", cfg.max_fps); else strcpy_s(capstr, "none");
                 snprintf(p->hud_line[0], sizeof p->hud_line[0], "in %.0f  out %.0f  age %.0f ms  acq %.1f ms  cap %s", cap_fps, out_fps, std::max(0.0, age), std::max(0.0, hud_acq.med()), capstr);
                 hud_acq.v.clear();
-                // snprintf, not sprintf_s: an overflow here must clip the HUD, not fast-fail the
-                // process (sprintf_s calls the invalid-parameter handler, which is a hard kill).
+                // snprintf, not sprintf_s: an overflow must clip the HUD, not fast-fail the process.
+                // The line shows which LAYERS are live, not which settings are set.
                 char nr[48];
-                // Which LAYERS are live, not which settings are set: the three switches are
-                // independent, so the HUD has to be able to say "neural off, filters on, FG on".
                 if (!p->cfg.nr_enabled) strcpy_s(nr, "neural off");
                 else if (!p->nr) strcpy_s(nr, "neural: no model");
                 else if (cfg.nr_async)
@@ -1586,34 +1484,28 @@ static int RealMain(int argc, char** argv)
                 else snprintf(nr, sizeof nr, "NR %.1f ms %up", p->st[PS_EVAL].med(), p->wh);
                 char mask[8]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "-");
                 const char* filt_s = !cfg.filters_enabled ? "off" : FiltersLive(cfg) ? "on" : "-";
-                if (p->fg && FgMultiplier(p->fg) > 1 && FgPaused(p->fg)) snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG auto-paused  mask %s", nr, filt_s, mask);
                 // video and latewarp make a frame per refresh, not a fixed multiple: their name, not "2X"
-                else if (p->fg && FgMultiplier(p->fg) > 1)
-                {
-                    const bool per_refresh = cfg.fg_engine == FG_VIDEO || cfg.fg_engine == FG_LATEWARP;
-                    char fgs[24]; if (per_refresh) snprintf(fgs, sizeof fgs, "%ls", FgEngineName(cfg.fg_engine)); else snprintf(fgs, sizeof fgs, "%dX", FgMultiplier(p->fg));
-                    snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG %s %.1fms  mask %s", nr, filt_s, fgs, std::max(0.0, FgEvalMs(p->fg, nullptr)), mask);
-                }
-                else snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG off  mask %s", nr, filt_s, mask);
+                const bool fg_gen = p->fg && FgMultiplier(p->fg) > 1, per_refresh = cfg.fg_engine == FG_VIDEO || cfg.fg_engine == FG_LATEWARP;
+                char fgs[32];
+                if (!fg_gen) strcpy_s(fgs, "off");
+                else if (FgPaused(p->fg)) strcpy_s(fgs, "auto-paused");
+                else if (per_refresh) snprintf(fgs, sizeof fgs, "%ls %.1fms", FgEngineName(cfg.fg_engine), std::max(0.0, FgEvalMs(p->fg, nullptr)));
+                else snprintf(fgs, sizeof fgs, "%dX %.1fms", FgMultiplier(p->fg), std::max(0.0, FgEvalMs(p->fg, nullptr)));
+                snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG %s  mask %s", nr, filt_s, fgs, mask);
                 // Why FG is or is not paying off: shown generated frames, then the gate that ate the rest.
-                if (p->fg && FgMultiplier(p->fg) > 1 && hud_frames && (cfg.fg_engine == FG_VIDEO || cfg.fg_engine == FG_LATEWARP))
-                    snprintf(p->hud_line[2], sizeof p->hud_line[2], "out/in %.1fx  generated %.1f per frame", hud_frames ? out_fps / std::max(1e-3, cap_fps) : 0.0, (double)hud_gen / hud_frames);
-                else if (p->fg && FgMultiplier(p->fg) > 1 && hud_frames)
-                    snprintf(p->hud_line[2], sizeof p->hud_line[2], "gen %.0f%%  nopair %u  off %u  late %u", hud_gen * 100.0 / hud_frames, hud_nopair, hud_disabled, hud_preempt);
+                if (fg_gen && per_refresh)
+                    snprintf(p->hud_line[2], sizeof p->hud_line[2], "out/in %.1fx  generated %.1f per frame", out_fps / std::max(1e-3, cap_fps), (double)hud_fs.gen_shown / hud_frames);
+                else if (fg_gen)
+                    snprintf(p->hud_line[2], sizeof p->hud_line[2], "gen %.0f%%  nopair %u  off %u  late %u", hud_fs.gen_shown * 100.0 / hud_frames, hud_fs.no_pair, hud_fs.disabled, hud_fs.preempts);
                 else p->hud_line[2][0] = 0;
-                hud_t = NowMs(); hud_frames = 0; hud_presented = 0; hud_model = 0;
-                hud_gen = 0; hud_nopair = 0; hud_disabled = 0; hud_preempt = 0;
+                hud_t = NowMs(); hud_frames = 0; hud_model = 0; hud_fs = {};
             }
-            // stats_every <= 0 means OFF. It used to clamp to 1, so the one value a user would pick
-            // to silence the log instead ran the most expensive block in the loop - GpuVram, three
-            // vector sorts and a thirty-argument Log - on every single frame.
+            // stats_every <= 0 means OFF (not every frame: this is the loop's most expensive block)
             if (cfg.stats_every > 0 && ++frames % (UINT)cfg.stats_every == 0)
             {
                 StageStats cpu{ cpu_ms }, spacing, age, pipe;
-                double gpu = 0;
-                // The real cost: both whole submissions plus the flow they wait on, not a sum of
-                // the stages someone remembered to wrap in stamps.
-                gpu = std::max(0.0, p->st[PS_LIST1].med()) + std::max(0.0, p->st[PS_LIST2].med()) + std::max(0.0, p->st[PS_OFA].med());
+                // the real cost: both whole submissions plus the flow they wait on
+                const double gpu = std::max(0.0, p->st[PS_LIST1].med()) + std::max(0.0, p->st[PS_LIST2].med()) + std::max(0.0, p->st[PS_OFA].med());
                 drain();
                 FgStatsOut fs; std::swap(fs, fs_agg);
                 spacing.v.swap(fs.spacing_ms); age.v.swap(fs.age_ms); pipe.v.swap(fs.pipe_ms);
