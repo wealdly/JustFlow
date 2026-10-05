@@ -1,9 +1,6 @@
-// Our own UI (HUD, toasts) over the frame being presented: the premultiplied layer the text shader drew
-// (text.hlsl, layer mode) blended onto the backbuffer as a render target (ONE, INV_SRC_ALPHA), one
-// scissored full-screen triangle per text box. Drawn at present time on every presented frame - real,
-// generated or re-projected - so frame generation never interpolates our text and the HUD keeps
-// updating while the frames do not. A draw, not a compute pass: swapchains cannot be UAVs on every
-// driver (Arc), and copying would lose the boxes' translucency.
+// Our UI (HUD, toasts): the premultiplied layer text.hlsl drew (layer mode), blended onto the backbuffer
+// (ONE, INV_SRC_ALPHA) as one scissored full-screen triangle per text box, on every presented frame - so FG
+// never interpolates our text. A draw, not compute: swapchains cannot be UAVs on every driver (Arc).
 Texture2D<float4> layer : register(t0);
 
 float4 VSMain(uint id : SV_VertexID) : SV_Position

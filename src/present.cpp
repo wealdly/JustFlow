@@ -1,4 +1,4 @@
-// Click-through overlay window on its own thread + flip-model swapchain on the Gpu queue.
+// Click-through overlay window on its own thread + flip-model swapchain on its own present queue (or the caller's).
 #include "present.h"
 #include "log.h"
 #include <algorithm>
@@ -18,15 +18,13 @@
 static const int kMaxHot = 16;
 static const UINT WM_SET_HOTKEYS = WM_APP + 1;   // wp = const HotkeyDef*, lp = count; returns the number of RegisterHotKey failures
 
-// 2 buffers, paced on the monitor's vblank. The frame-latency waitable was tried and reverted:
-// it is a semaphore fed by retiring presents, not a free-running tick, and pacing a generator
-// on it starved and then wrecked the cadence.
+// 2 buffers, paced on the monitor's vblank. Not on the frame-latency waitable: it is fed by retiring
+// presents, not a free-running tick, and a generator paced on it starves.
 static const int kBuffers = 2;
 
 struct Overlay
 {
-    bool external = false;          // swapchain on the caller's queue (OverlayCreateOnQueue)
-    bool vsync = false;             // OverlayPresentRecorded: sync interval 1, no tearing (OverlaySetVsync)
+    bool   vsync = false;           // OverlayPresentRecorded: sync interval 1, no tearing (OverlaySetVsync)
     HANDLE latency_wait = nullptr;  // caller's-queue swapchains: frame latency waitable, max latency 1
     Gpu*   g = nullptr;
     HWND   target = nullptr;
@@ -70,6 +68,24 @@ struct Overlay
     int    ui_active = -1, ui_pending = -1, ui_writing = -1;
     ID3D12Fence* ui_fence = nullptr; UINT64 ui_value = 0;
 };
+
+#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
+
+static D3D12_CPU_DESCRIPTOR_HANDLE Slot(Overlay* o, ID3D12DescriptorHeap* heap, D3D12_DESCRIPTOR_HEAP_TYPE type, UINT i)
+{
+    D3D12_CPU_DESCRIPTOR_HANDLE h = heap->GetCPUDescriptorHandleForHeapStart();
+    h.ptr += (SIZE_T)i * o->g->dev->GetDescriptorHandleIncrementSize(type);
+    return h;
+}
+
+static void ReleaseUi(Overlay* o) { for (auto*& t : o->ui_tex) REL(t); }
+
+static void Hide(Overlay* o, const char* why)
+{
+    if (!o->shown) return;
+    ShowWindow(o->hwnd, SW_HIDE); o->shown = false;
+    if (why) Log("[present] %s - overlay hidden", why);
+}
 
 static bool WaitPq(Overlay* o, UINT64 v, DWORD ms)
 {
@@ -177,18 +193,18 @@ static DWORD WINAPI WindowThread(LPVOID p)
         if (mw != o->w || mh != o->h) { Log("[present] direct mode needs the capture to cover the monitor (%ux%u vs monitor %ux%u) - composed", o->w, o->h, mw, mh); o->direct = false; }
     }
     o->hwnd = MakeWindow(o, wc.hInstance, o->direct);
-    if (o->hwnd && o->direct)
+    // WDA_EXCLUDEFROMCAPTURE on a NOREDIRECTIONBITMAP window: verified here, not assumed. Refused
+    // while exclusion is required (DDA would capture the overlay) -> composed window instead.
+    if (o->hwnd && o->direct && o->exclude)
     {
-        // WDA_EXCLUDEFROMCAPTURE on a NOREDIRECTIONBITMAP window: verified here, not assumed. Refused
-        // while exclusion is required (DDA would capture the overlay) -> composed window instead.
-        if (o->exclude && !SetWindowDisplayAffinity(o->hwnd, WDA_EXCLUDEFROMCAPTURE))
+        if (!SetWindowDisplayAffinity(o->hwnd, WDA_EXCLUDEFROMCAPTURE))
         {
             Log("[present] WDA_EXCLUDEFROMCAPTURE refused on the direct-mode window, err=%lu - falling back to composed", GetLastError());
             HWND dead = o->hwnd; o->hwnd = nullptr; DestroyWindow(dead);
             o->direct = false;
             o->hwnd = MakeWindow(o, wc.hInstance, false);
         }
-        else if (o->exclude) Log("[present] WDA_EXCLUDEFROMCAPTURE accepted on the direct-mode window");
+        else Log("[present] WDA_EXCLUDEFROMCAPTURE accepted on the direct-mode window");
     }
     if (o->hwnd && o->direct)
     {
@@ -221,22 +237,12 @@ static bool GetBuffers(Overlay* o)
         if (FAILED(o->swap->GetBuffer(i, __uuidof(ID3D12Resource), (void**)&o->bb[i]))) { Log("[present] GetBuffer %d failed", i); return false; }
         wchar_t name[16]; swprintf_s(name, L"backbuffer%d", i);
         o->bb[i]->SetName(name);
-        if (o->ui_rtv)
-        {
-            D3D12_CPU_DESCRIPTOR_HANDLE h = o->ui_rtv->GetCPUDescriptorHandleForHeapStart();
-            h.ptr += (SIZE_T)i * o->g->dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-            o->g->dev->CreateRenderTargetView(o->bb[i], nullptr, h);
-        }
+        if (o->ui_rtv) o->g->dev->CreateRenderTargetView(o->bb[i], nullptr, Slot(o, o->ui_rtv, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, i));
     }
     return true;
 }
 
-static void ReleaseBuffers(Overlay* o)
-{
-    for (int i = 0; i < kBuffers; ++i) if (o->bb[i]) { o->bb[i]->Release(); o->bb[i] = nullptr; }
-}
-
-static Overlay* Create(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, int mode, ID3D12CommandQueue* queue);
+static void ReleaseBuffers(Overlay* o) { for (auto*& b : o->bb) REL(b); }
 
 // uiblend.hlsl: a pixel shader reading the layer (t0, one table), premultiplied "over" into the backbuffer.
 static bool UiInit(Overlay* o)
@@ -278,9 +284,7 @@ ID3D12Resource* OverlayUiLayer(Overlay* o)
     if (!o->ui_tex[k])
     {
         if (!(o->ui_tex[k] = GpuMakeTex(*o->g, o->w, o->h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, L"ui_layer"))) return nullptr;
-        D3D12_CPU_DESCRIPTOR_HANDLE h = o->ui_srv->GetCPUDescriptorHandleForHeapStart();
-        h.ptr += (SIZE_T)k * o->g->dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        o->g->dev->CreateShaderResourceView(o->ui_tex[k], nullptr, h);
+        o->g->dev->CreateShaderResourceView(o->ui_tex[k], nullptr, Slot(o, o->ui_srv, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, k));
     }
     o->ui_writing = k;
     return o->ui_tex[k];
@@ -294,16 +298,6 @@ void OverlayUiCommit(Overlay* o, const RECT* boxes, int n, ID3D12Fence* f, UINT6
     o->ui_n[k] = std::clamp(n, 0, 8);
     for (int i = 0; i < o->ui_n[k]; ++i) o->ui_box[k][i] = boxes[i];
     o->ui_pending = k; o->ui_fence = f; o->ui_value = v; o->ui_writing = -1;
-}
-
-Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, int mode)
-{
-    return Create(g, target, w, h, keys, nkeys, exclude_from_capture, mode, nullptr);
-}
-
-Overlay* OverlayCreateOnQueue(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, ID3D12CommandQueue* queue)
-{
-    return queue ? Create(g, target, w, h, keys, nkeys, false, 0, queue) : nullptr;
 }
 
 static Overlay* Create(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, int mode, ID3D12CommandQueue* queue)
@@ -331,14 +325,13 @@ static Overlay* Create(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
     }
     o->flags = tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
     // On the caller's queue: a frame-latency waitable with max latency 1. Vsync presents queue behind each
-    // other, and without a bound one missed vblank put every later frame a refresh behind for good
-    // (measured: 18.7 ms present -> screen); with it, a miss costs one refresh once.
+    // other: unbounded, one missed vblank puts every later frame a refresh behind for good.
     if (queue) o->flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     o->present_flags = tearing ? DXGI_PRESENT_ALLOW_TEARING : 0;
 
     D3D12_COMMAND_QUEUE_DESC qd = {}; qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     o->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (queue) { o->pq = queue; queue->AddRef(); o->external = true; }   // the caller records into the backbuffers on it
+    if (queue) { o->pq = queue; queue->AddRef(); }   // the caller records into the backbuffers on it
     if ((!queue && FAILED(g.dev->CreateCommandQueue(&qd, __uuidof(ID3D12CommandQueue), (void**)&o->pq))) ||
         FAILED(g.dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, __uuidof(ID3D12CommandAllocator), (void**)&o->alloc)) ||
         FAILED(g.dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, o->alloc, nullptr, __uuidof(ID3D12GraphicsCommandList), (void**)&o->list)) ||
@@ -359,7 +352,7 @@ static Overlay* Create(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
     g.factory->MakeWindowAssociation(o->hwnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
     hr = sc1->QueryInterface(__uuidof(IDXGISwapChain3), (void**)&o->swap);
     sc1->Release();
-    if (SUCCEEDED(hr) && queue && (o->flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT))
+    if (SUCCEEDED(hr) && queue)
     {
         o->swap->SetMaximumFrameLatency(1);
         o->latency_wait = o->swap->GetFrameLatencyWaitableObject();
@@ -384,21 +377,25 @@ static Overlay* Create(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
     return o;
 }
 
+Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, int mode)
+{
+    return Create(g, target, w, h, keys, nkeys, exclude_from_capture, mode, nullptr);
+}
+
+Overlay* OverlayCreateOnQueue(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, ID3D12CommandQueue* queue)
+{
+    return queue ? Create(g, target, w, h, keys, nkeys, false, 0, queue) : nullptr;
+}
+
 void OverlayDestroy(Overlay* o)
 {
     if (!o) return;
     Drain(o);
     ReleaseBuffers(o);
-    for (auto*& t : o->ui_tex) if (t) { t->Release(); t = nullptr; }
-    if (o->ui_pso) o->ui_pso->Release(); if (o->ui_root) o->ui_root->Release();
-    if (o->ui_srv) o->ui_srv->Release(); if (o->ui_rtv) o->ui_rtv->Release();
+    ReleaseUi(o);
+    REL(o->ui_pso); REL(o->ui_root); REL(o->ui_srv); REL(o->ui_rtv);
     if (o->latency_wait) { CloseHandle(o->latency_wait); o->latency_wait = nullptr; }
-    if (o->swap) { o->swap->Release(); o->swap = nullptr; }
-    if (o->output) { o->output->Release(); o->output = nullptr; }
-    if (o->list) { o->list->Release(); o->list = nullptr; }
-    if (o->alloc) { o->alloc->Release(); o->alloc = nullptr; }
-    if (o->fence) { o->fence->Release(); o->fence = nullptr; }
-    if (o->pq) { o->pq->Release(); o->pq = nullptr; }
+    REL(o->swap); REL(o->output); REL(o->list); REL(o->alloc); REL(o->fence); REL(o->pq);
     if (o->event) { CloseHandle(o->event); o->event = nullptr; }
     if (o->hwnd) PostMessageW(o->hwnd, WM_CLOSE, 0, 0);
     if (o->thread)
@@ -426,12 +423,11 @@ ID3D12Resource* OverlayBackbuffer(Overlay* o) { return o->bb[o->swap->GetCurrent
 void OverlaySetVsync(Overlay* o, bool on) { o->vsync = on; }
 bool OverlayWaitFrameLatency(Overlay* o, DWORD ms) { return o->latency_wait && WaitForSingleObjectEx(o->latency_wait, ms, TRUE) == WAIT_OBJECT_0; }
 
-bool OverlayPresentRecorded(Overlay* o)
+// Present, its timing (t0 = start of the whole present), and reveal on the first one.
+static bool Flip(Overlay* o, UINT sync, UINT flags, LARGE_INTEGER t0)
 {
     LARGE_INTEGER q; QueryPerformanceCounter(&q);
-    // Immediate (tearing allowed): the flip happens as soon as the frame is ready - the lowest latency,
-    // with the tear line wherever in the scan that lands. Vsync: the flip waits for the next vblank.
-    const HRESULT hr = o->vsync ? o->swap->Present(1, 0) : o->swap->Present(0, o->present_flags);
+    const HRESULT hr = o->swap->Present(sync, flags);
     o->pres_call_us += (UINT64)UsSince(q);
     if (FAILED(hr)) { Log("[present] Present failed 0x%08X", (unsigned)hr); return false; }
     o->present_qpc = q.QuadPart;
@@ -442,9 +438,17 @@ bool OverlayPresentRecorded(Overlay* o)
         o->revealed = o->shown = true;
         Log("[present] window revealed on the first Present");
     }
-    o->pres_total_us += (UINT64)UsSince(q);
+    o->pres_total_us += (UINT64)UsSince(t0);
     ++o->pres_n;
     return true;
+}
+
+bool OverlayPresentRecorded(Overlay* o)
+{
+    LARGE_INTEGER t0; QueryPerformanceCounter(&t0);
+    // Immediate (tearing allowed): the flip happens as soon as the frame is ready - the lowest latency,
+    // with the tear line wherever in the scan that lands. Vsync: the flip waits for the next vblank.
+    return o->vsync ? Flip(o, 1, 0, t0) : Flip(o, 0, o->present_flags, t0);
 }
 
 bool OverlayPresent(Overlay* o, ID3D12Resource* src, ID3D12Fence* after, UINT64 after_value)
@@ -473,8 +477,7 @@ bool OverlayPresent(Overlay* o, ID3D12Resource* src, ID3D12Fence* after, UINT64 
         D3D12_GPU_DESCRIPTOR_HANDLE table = o->ui_srv->GetGPUDescriptorHandleForHeapStart();
         table.ptr += (UINT64)L * o->g->dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         o->list->SetGraphicsRootDescriptorTable(0, table);
-        D3D12_CPU_DESCRIPTOR_HANDLE rtv = o->ui_rtv->GetCPUDescriptorHandleForHeapStart();
-        rtv.ptr += (SIZE_T)bi * o->g->dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        const D3D12_CPU_DESCRIPTOR_HANDLE rtv = Slot(o, o->ui_rtv, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, bi);
         o->list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         const D3D12_VIEWPORT vp = { 0, 0, (float)o->w, (float)o->h, 0, 1 }; o->list->RSSetViewports(1, &vp);
         o->list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -493,37 +496,19 @@ bool OverlayPresent(Overlay* o, ID3D12Resource* src, ID3D12Fence* after, UINT64 
     ID3D12CommandList* ls[] = { o->list };
     o->pq->ExecuteCommandLists(1, ls);
     o->pq->Signal(o->fence, ++o->fence_value);
-    LARGE_INTEGER q; QueryPerformanceCounter(&q);
-    const HRESULT hr = o->swap->Present(0, o->present_flags);
-    o->pres_call_us += (UINT64)UsSince(q);
-    if (FAILED(hr)) { Log("[present] Present failed 0x%08X", (unsigned)hr); return false; }
-    o->present_qpc = q.QuadPart;
-    if (!o->revealed)
-    {
-        ShowWindow(o->hwnd, SW_SHOWNOACTIVATE);
-        SetWindowPos(o->hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        o->revealed = o->shown = true;
-        Log("[present] window revealed on the first Present");
-    }
-    o->pres_total_us += (UINT64)UsSince(t0);
-    ++o->pres_n;
-    return true;
+    return Flip(o, 0, o->present_flags, t0);
 }
 
 void OverlayPresentStats(Overlay* o, double& prev_ms, double& call_ms, double& total_ms)
 {
-    const UINT64 n = o->pres_n.exchange(0);
-    const double d = n ? 1000.0 * (double)n : 0.0;   // us -> ms, divided by n
-    prev_ms  = n ? (double)o->pres_prev_us.exchange(0) / d : -1.0;
-    call_ms  = n ? (double)o->pres_call_us.exchange(0) / d : -1.0;
-    total_ms = n ? (double)o->pres_total_us.exchange(0) / d : -1.0;
-    if (!n) { o->pres_prev_us = 0; o->pres_call_us = 0; o->pres_total_us = 0; }
+    const UINT64 n = o->pres_n.exchange(0), prev = o->pres_prev_us.exchange(0), call = o->pres_call_us.exchange(0), total = o->pres_total_us.exchange(0);
+    const double d = 1000.0 * (double)n;   // us -> ms, divided by n
+    prev_ms  = n ? (double)prev / d : -1.0;
+    call_ms  = n ? (double)call / d : -1.0;
+    total_ms = n ? (double)total / d : -1.0;
 }
 
-LONGLONG OverlayPresentQpc(Overlay* o)
-{
-    return o->present_qpc;
-}
+LONGLONG OverlayPresentQpc(Overlay* o) { return o->present_qpc; }
 
 void OverlayGuard(Overlay* o, ID3D12CommandQueue* q) { if (const UINT64 v = o->fence_value) q->Wait(o->fence, v); }
 void OverlayDrain(Overlay* o) { Drain(o); }
@@ -553,23 +538,18 @@ static IDXGIOutput* Output(Overlay* o)
     return nullptr;
 }
 
-// A wait that returns at once is as broken as one that fails, and quieter: on the Intel eDP panel of
-// the laptop justflow_xe was written on, IDXGIOutput::WaitForVBlank returns immediately (panel
-// self-refresh / dynamic refresh leave nothing to wait on) - a presenter pacing on it spun a core and
-// presented 0.9 ms apart. So every wait is checked against the refresh: 30 in a row shorter than a
-// quarter of it demote WaitForVBlank to DwmFlush (the next desktop composition, which is what shows a
-// composed overlay), and if that does not wait either this returns false - every caller already
-// falls back to its CPU timer on false.
+// WaitForVBlank can return at once (Intel eDP panel self-refresh: a presenter pacing on it spun a core).
+// 30 wake-ups in a row closer than half a refresh demote it to DwmFlush (the next desktop composition,
+// which is what shows a composed overlay); if that does not wait either, return false - every caller
+// falls back to its CPU timer.
 bool OverlayWaitVBlank(Overlay* o)
 {
     IDXGIOutput* out = Output(o);
     OverlayVBlankIsDwm(o);   // the 5 s re-try
     const bool ok = o->vblank_dwm ? SUCCEEDED(DwmFlush()) : (out && SUCCEEDED(out->WaitForVBlank()));
     if (!ok) return false;
-    // Judged by the spacing of consecutive wake-ups, not by how long this wait took: a busy caller (DLSS-G
-    // and a 4K model sharing the GPU) reaches each wait just before the refresh, so its waits are short
-    // while the clock is fine - that tripped the fallback in a live session. A working vblank never wakes
-    // us twice within a refresh, however late we arrive.
+    // Judged by the spacing of wake-ups, not by this wait's length: a busy caller reaches each wait just
+    // before the refresh, so its waits are short while the clock is fine.
     const double now = NowMs(), dt = now - o->last_wake;
     o->last_wake = now;
     if (dt >= o->vblank_ms * 0.5) { o->short_waits = 0; return true; }
@@ -585,9 +565,8 @@ bool OverlayWaitVBlank(Overlay* o)
     return false;
 }
 double OverlayVBlankMs(Overlay* o) { Output(o); return o->vblank_ms; }
-// A fallback is not forever: WaitForVBlank is tried again every 5 s. One trip (it happened right after the
-// overlay was hidden and shown for a focus change) used to cost the rest of the session. The re-try lives
-// here, not in the wait: the video engine stops calling the wait while this says DwmFlush.
+// The DwmFlush fallback re-tries WaitForVBlank every 5 s (a trip on a focus change must not cost the session).
+// Here, not in the wait: the video engine stops calling the wait while this says DwmFlush.
 bool OverlayVBlankIsDwm(Overlay* o)
 {
     if (o->vblank_dwm && Output(o) && NowMs() - o->dwm_since > 5000.0) { o->vblank_dwm = false; o->short_waits = 0; }
@@ -596,38 +575,26 @@ bool OverlayVBlankIsDwm(Overlay* o)
 
 void OverlayHide(Overlay* o)
 {
-    if (o && o->shown) { ShowWindow(o->hwnd, SW_HIDE); o->shown = false; }
-    if (o) o->follow_at = 0;   // so the wake-up is not held back by the follow throttle
+    if (!o) return;
+    Hide(o, nullptr);
+    o->follow_at = 0;   // so the wake-up is not held back by the follow throttle
 }
 
 void OverlayFollow(Overlay* o, int reassert_every)
 {
     if (!o->target || !IsWindow(o->target)) return;
-    if (IsIconic(o->target))
-    {
-        if (o->shown) { ShowWindow(o->hwnd, SW_HIDE); o->shown = false; Log("[present] target minimised - overlay hidden"); }
-        return;
-    }
-    // Alt-Tab away from a borderless game does not minimise it, so a topmost overlay kept covering
-    // whatever the user switched to - Alt-Tab looked broken. Only show while a window of the game's
+    if (IsIconic(o->target)) { Hide(o, "target minimised"); return; }
+    // Alt-Tab away from a borderless game does not minimise it: only show while a window of the game's
     // own process has the foreground (its launcher/dialogs count; ours never takes it, WS_EX_NOACTIVATE).
-    // No foreground window at all (mid-switch) changes nothing.
-    // Full desktop (the target is the desktop window): every app is ours, nothing to step aside for.
+    // No foreground window at all (mid-switch) changes nothing. Full desktop: nothing to step aside for.
     if (const HWND fg = o->target != GetDesktopWindow() ? GetForegroundWindow() : nullptr)
     {
         DWORD fg_pid = 0, target_pid = 0;
         GetWindowThreadProcessId(fg, &fg_pid); GetWindowThreadProcessId(o->target, &target_pid);
-        if (fg != o->hwnd && fg_pid != target_pid)
-        {
-            if (o->shown) { ShowWindow(o->hwnd, SW_HIDE); o->shown = false; Log("[present] target lost the foreground - overlay hidden"); }
-            return;
-        }
+        if (fg != o->hwnd && fg_pid != target_pid) { Hide(o, "target lost the foreground"); return; }
     }
-    // The geometry query is a cross-process round trip to DWM - ~20 us typical, and unbounded when
-    // DWM is busy compositing, which is exactly when we are presenting. It ran once per captured
-    // frame and once per ten skipped ones, so cursor movement (which skips hard) made it worse. A
-    // window that has moved is followed within 50 ms, which no one can see on a click-through
-    // overlay; the same throttle is on the capture side's region query.
+    // The geometry query is a round trip to DWM, unbounded while DWM composes (exactly when we present):
+    // throttled to 50 ms, invisible on a click-through overlay.
     const ULONGLONG now_ms = GetTickCount64();
     if (now_ms - o->follow_at < 50) return;
     o->follow_at = now_ms;
@@ -661,7 +628,7 @@ bool OverlayResize(Overlay* o, UINT w, UINT h)
     const HRESULT hr = o->swap->ResizeBuffers(kBuffers, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, o->flags);
     if (FAILED(hr)) { Log("[present] ResizeBuffers %ux%u failed 0x%08X", w, h, (unsigned)hr); return false; }
     o->w = w; o->h = h; o->last = RECT{};
-    { std::lock_guard<std::mutex> lk(o->ui_mu); for (auto*& t : o->ui_tex) if (t) { t->Release(); t = nullptr; } o->ui_active = o->ui_pending = o->ui_writing = -1; }
+    { std::lock_guard<std::mutex> lk(o->ui_mu); ReleaseUi(o); o->ui_active = o->ui_pending = o->ui_writing = -1; }
     if (!GetBuffers(o)) return false;
     Log("[present] overlay resized to %ux%u", w, h);
     if (o->direct && ((int)w != o->mon.right - o->mon.left || (int)h != o->mon.bottom - o->mon.top))
