@@ -6,6 +6,12 @@
 
 struct Capture;
 
+// The LARGEST visible, uncloaked, non-tool top-level window of class `cls` whose title contains `title`
+// (either "" = any), at least 320x240, never `skip`: the title is also carried by launcher pages,
+// thumbnails, tooltips and browser tabs, and the game window is bigger. A minimised one is judged by
+// its restored size. nullptr when none matches.
+HWND FindLargestWindow(const wchar_t* title, const wchar_t* cls, HWND skip);
+
 // Fails if the window is not capturable. Logs sizes and formats.
 // prefer_dda: DXGI Desktop Duplication on the window's monitor first (monitor refresh rate; the overlay
 // must be excluded from capture), falling back to Windows.Graphics.Capture.
@@ -20,6 +26,9 @@ void     CaptureClose(Capture* c);
 // `sys_rel_100ns` = frame.SystemRelativeTime (QPC-based, 100 ns units). Blocks up to wait_ms for
 // the first frame. Returns false when nothing new arrived (static skip) or capture is lost.
 bool CaptureAcquire(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG& sys_rel_100ns);
+// The acquired frame's capture time in QPC ticks. Sets `reset` when more than 250 ms passed since
+// `last_sysrel` (the previous acquire's sys_rel_100ns, 0 = none), and stores `sys_rel_100ns` there.
+LONGLONG CaptureQpc(Capture* c, LONGLONG sys_rel_100ns, LONGLONG& last_sysrel, bool& reset);
 
 // The D3D12 view of the shared texture (DXGI_FORMAT_B8G8R8A8_UNORM). Resting state is COMMON;
 // transition to NON_PIXEL_SHADER_RESOURCE to read and back to COMMON after.

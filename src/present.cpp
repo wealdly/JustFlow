@@ -520,22 +520,14 @@ static IDXGIOutput* Output(Overlay* o)
     if (o->output_looked_up) return o->output;
     o->output_looked_up = true;
     const HMONITOR mon = MonitorFromWindow(o->hwnd, MONITOR_DEFAULTTONEAREST);
-    IDXGIOutput* out = nullptr;
-    for (UINT i = 0; o->g->adapter->EnumOutputs(i, &out) != DXGI_ERROR_NOT_FOUND; ++i)
-    {
-        DXGI_OUTPUT_DESC d = {};
-        if (SUCCEEDED(out->GetDesc(&d)) && d.Monitor == mon)
-        {
-            DEVMODEW dm = {}; dm.dmSize = sizeof dm;
-            if (EnumDisplaySettingsW(d.DeviceName, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1) o->vblank_ms = 1000.0 / dm.dmDisplayFrequency;
-            Log("[present] pacing on %ls (%lu Hz, vblank %.2f ms)", d.DeviceName, dm.dmDisplayFrequency, o->vblank_ms);
-            o->output = out;
-            return out;
-        }
-        out->Release(); out = nullptr;
-    }
-    Log("[present] no DXGI output on this adapter matches the overlay's monitor - timer pacing");
-    return nullptr;
+    DXGI_OUTPUT_DESC d = {};
+    IDXGIOutput* out = GpuOutputFor(*o->g, mon, &d);
+    if (!out) { Log("[present] no DXGI output on this adapter matches the overlay's monitor - timer pacing"); return nullptr; }
+    DEVMODEW dm = {}; dm.dmSize = sizeof dm;
+    if (EnumDisplaySettingsW(d.DeviceName, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1) o->vblank_ms = 1000.0 / dm.dmDisplayFrequency;
+    Log("[present] pacing on %ls (%lu Hz, vblank %.2f ms)", d.DeviceName, dm.dmDisplayFrequency, o->vblank_ms);
+    o->output = out;
+    return out;
 }
 
 // WaitForVBlank can return at once (Intel eDP panel self-refresh: a presenter pacing on it spun a core).

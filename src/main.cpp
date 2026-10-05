@@ -9,7 +9,6 @@
 #include "settings.h"
 #include "mouse.h"
 #include <shellapi.h>
-#include <dwmapi.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -974,27 +973,7 @@ static HWND FindTarget(const Config& c)
     // captures the monitor, the overlay covers it and never hides for a foreground change.
     if (c.desktop) return GetDesktopWindow();
     if (c.window_class.empty() && c.window_title.empty()) return nullptr;   // would match the first window on the desktop
-    // The LARGEST plausible match: the title is also carried by launcher pages, thumbnails, tooltips and browser
-    // tabs. A game window is visible, uncloaked and bigger; a minimised one is judged by its restored size.
-    HWND best = nullptr, h = nullptr; LONGLONG best_area = 0;
-    while ((h = FindWindowExW(nullptr, h, c.window_class.empty() ? nullptr : c.window_class.c_str(), nullptr)) != nullptr)
-    {
-        if (!c.window_title.empty())
-        {
-            wchar_t t[256] = {}; GetWindowTextW(h, t, 256);
-            if (!wcsstr(t, c.window_title.c_str())) continue;
-        }
-        if (!IsWindowVisible(h) || (GetWindowLongW(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)) continue;
-        DWORD cloaked = 0;
-        if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof cloaked)) && cloaked) continue;
-        RECT r = {};
-        WINDOWPLACEMENT wp = { sizeof wp };
-        if (IsIconic(h) && GetWindowPlacement(h, &wp)) r = wp.rcNormalPosition; else if (!GetWindowRect(h, &r)) continue;
-        const LONGLONG w = r.right - r.left, ht = r.bottom - r.top;
-        if (w < 320 || ht < 240) continue;
-        if (w * ht > best_area) { best_area = w * ht; best = h; }
-    }
-    return best;
+    return FindLargestWindow(c.window_title.c_str(), c.window_class.c_str(), nullptr);
 }
 
 static void DumpFrame(Pipeline* p, const std::wstring& dir, int i)
@@ -1124,7 +1103,6 @@ static int RealMain(int argc, char** argv)
     if (!GpuInit(g, cfg.gpu_adapter)) return 1;
     if (cfg.selftest) ComposeSelfTest(g);
     ResolveWork(cfg, dir);
-    LARGE_INTEGER qpf; QueryPerformanceFrequency(&qpf);
 
     SetConsoleTitleW(L"JustFlow");
     Tray* tray = TrayCreate(L"JustFlow");
@@ -1445,13 +1423,7 @@ static int RealMain(int argc, char** argv)
                 if (t0 - last_processed_ms < period * 0.6) { ++rate_drops; continue; }
                 last_processed_ms = (t0 - last_processed_ms < period * 1.5) ? last_processed_ms + period : t0;
             }
-            // > 250 ms gap (DDA: raw QPC ticks; WGC: 100 ns) -> scene reset
-            const bool dda = CaptureIsDda(cap);
-            if (last_sysrel && sysrel - last_sysrel > (dda ? qpf.QuadPart / 4 : 2500000)) reset = true;
-            last_sysrel = sysrel;
-            // Capture timestamp in QPC ticks: DDA LastPresentTime already is; WGC SystemRelativeTime is
-            // 100 ns units (integer split keeps it exact: t * qpf overflows int64).
-            p->cap_qpc = dda ? sysrel : sysrel / 10000000 * qpf.QuadPart + (sysrel % 10000000) * qpf.QuadPart / 10000000;
+            p->cap_qpc = CaptureQpc(cap, sysrel, last_sysrel, reset);   // a > 250 ms gap is a scene reset
             p->acq_qpc = acq.QuadPart;
             acq_ms.add(acq_acc); hud_acq.add(acq_acc); acq_acc = 0;
             if (!PipelineFrame(p, CaptureTexture(cap), CaptureFence(cap), fv, reset)) { Log("[main] frame failed - exiting"); GpuLogDeviceRemoved(g, "frame"); quit = true; rc = 3; break; }
