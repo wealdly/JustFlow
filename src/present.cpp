@@ -53,7 +53,9 @@ struct Overlay
     IDXGIOutput* output = nullptr; bool output_looked_up = false;
     double vblank_ms = 1000.0 / 60.0;
     bool   vblank_dwm = false;     // WaitForVBlank did not wait: OverlayWaitVBlank uses DwmFlush
-    int    short_waits = 0;        // consecutive waits far shorter than a refresh
+    int    short_waits = 0;        // consecutive wake-ups far closer together than a refresh
+    double last_wake = 0, dwm_since = 0;   // OverlayWaitVBlank: the last return; when DwmFlush took over
+    bool   dwm_logged = false;
 };
 
 static bool WaitPq(Overlay* o, UINT64 v, DWORD ms)
@@ -450,17 +452,31 @@ static IDXGIOutput* Output(Overlay* o)
 bool OverlayWaitVBlank(Overlay* o)
 {
     IDXGIOutput* out = Output(o);
-    const double t0 = NowMs();
+    // A fallback is not forever: WaitForVBlank is tried again every 5 s. One trip (it happened right after
+    // the overlay was hidden and shown for a focus change) used to cost the rest of the session.
+    if (o->vblank_dwm && out && NowMs() - o->dwm_since > 5000.0) { o->vblank_dwm = false; o->short_waits = 0; }
     const bool ok = o->vblank_dwm ? SUCCEEDED(DwmFlush()) : (out && SUCCEEDED(out->WaitForVBlank()));
     if (!ok) return false;
-    if (NowMs() - t0 >= o->vblank_ms * 0.25) { o->short_waits = 0; return true; }
+    // Judged by the spacing of consecutive wake-ups, not by how long this wait took: a busy caller (DLSS-G
+    // and a 4K model sharing the GPU) reaches each wait just before the refresh, so its waits are short
+    // while the clock is fine - that tripped the fallback in a live session. A working vblank never wakes
+    // us twice within a refresh, however late we arrive.
+    const double now = NowMs(), dt = now - o->last_wake;
+    o->last_wake = now;
+    if (dt >= o->vblank_ms * 0.5) { o->short_waits = 0; return true; }
     if (++o->short_waits < 30) return true;
     o->short_waits = 0;
-    if (!o->vblank_dwm) { o->vblank_dwm = true; Log("[present] WaitForVBlank returns without waiting - pacing on DwmFlush"); return true; }
+    if (!o->vblank_dwm)
+    {
+        o->vblank_dwm = true; o->dwm_since = now;
+        if (!o->dwm_logged) { o->dwm_logged = true; Log("[present] WaitForVBlank returns without waiting - pacing on DwmFlush (re-tried every 5 s)"); }
+        return true;
+    }
     Log("[present] DwmFlush returns without waiting too - no display clock to pace on");
     return false;
 }
 double OverlayVBlankMs(Overlay* o) { Output(o); return o->vblank_ms; }
+bool   OverlayVBlankIsDwm(Overlay* o) { return o->vblank_dwm; }
 
 void OverlayHide(Overlay* o)
 {

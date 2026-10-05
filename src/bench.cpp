@@ -171,6 +171,15 @@ int RunBench(int argc, char** argv)
         // back-to-back burst of the frames "owed", which FG drops - read for a day as a DLSS-G slowdown in
         // FG-only mode (a model evaluate per frame happened to spread the burst).
         if (pace > 0) { if (NowMs() > pace_due + 1000.0 / pace) pace_due = NowMs(); while (NowMs() < pace_due) Sleep(1); pace_due += 1000.0 / pace; }
+        // Capture timestamps like live capture: the frame's place on the content clock, here its slot on the
+        // pace schedule - the video engine times itself by them, and without them it ran on arrival times
+        // and could not see what a late frame does. TEST JF_BENCH_STALL=<frame>,<ms>: one late frame.
+        if (pace > 0)
+        {
+            char sv[32]; int sf = -1, sms = 0;
+            if (GetEnvironmentVariableA("JF_BENCH_STALL", sv, sizeof sv) && sscanf_s(sv, "%d,%d", &sf, &sms) == 2 && i == sf) Sleep((DWORD)sms);
+            LARGE_INTEGER qf; QueryPerformanceFrequency(&qf); p->cap_qpc = (LONGLONG)((pace_due - 1000.0 / pace) * (double)qf.QuadPart / 1000.0);
+        }
         if (!PipelineFrame(p, tex[last_in], nullptr, 0, i == 0)) { Log("[bench] frame %d failed", i); GpuLogDeviceRemoved(g, "bench"); rc = 2; break; }
         // ponytail: idle after each frame so both lists of the frame retire and get sampled (the
         // stamp reader only sees the most recently retired slot). Per-stage GPU times are unaffected;

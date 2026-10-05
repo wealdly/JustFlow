@@ -589,7 +589,10 @@ static void VideoPresent(Fg* f)
     auto release = [&] { { std::lock_guard<std::mutex> lk(f->mu); held[0].s->state = 0; } held[0] = held[1]; held[1] = held[2]; --nheld; f->cv.notify_all(); };
     while (!f->stop && !f->failed)
     {
-        if (vb) { if (!OverlayWaitVBlank(f->ov)) { Log("[fg] no usable vblank wait under the overlay - video paced on the CPU timer"); vb = false; } }
+        // On DwmFlush the wait only wakes when something on the desktop is drawn - a frame we decided not
+        // to present draws nothing, so the loop slept until the video's next frame and showed real frames
+        // only (live: fg_gen 0, output = input). The engine needs every refresh: then the CPU timer.
+        if (vb && !OverlayVBlankIsDwm(f->ov)) { if (!OverlayWaitVBlank(f->ov)) { Log("[fg] no usable vblank wait under the overlay - video paced on the CPU timer"); vb = false; } }
         else Sleep((DWORD)std::max(1.0, vbms));
         if (f->hold) continue;
         FgSlot* n = nullptr;

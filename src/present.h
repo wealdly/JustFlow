@@ -51,6 +51,7 @@ void OverlayDrain(Overlay* o);
 // WaitForVBlank nor its DwmFlush fallback actually waits): pace on a CPU timer instead.
 bool   OverlayWaitVBlank(Overlay* o);
 double OverlayVBlankMs(Overlay* o);   // refresh period of that monitor (1000/60 if unknown)
+bool   OverlayVBlankIsDwm(Overlay* o);   // the wait is DwmFlush for now (it wakes on desktop compositions, not on every refresh)
 // Reposition over the target's DWMWA_EXTENDED_FRAME_BOUNDS, hide while the target is iconic,
 // re-assert topmost every `reassert_every` calls. Call once per frame (or per second when idle).
 void OverlayFollow(Overlay* o, int reassert_every);
