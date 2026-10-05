@@ -620,12 +620,15 @@ static void VideoPresent(Fg* f)
             // they are collected when this pair comes on screen - a period later, long finished.
             n->gen_ok = false; n->resolved = true;
             if (f->gens && !flow_only) { if (!Evaluate(f, n, n->interpolate && nheld >= 2)) break; n->resolved = false; }
-            // Arrival lag behind the content clock: the worst of the last 16 frames - any offset between the
-            // capture's timestamps and our clock, either way, plus a margin for jitter. It used to be a running
-            // max decaying 0.05 ms a frame from 0: timestamps 60 ms behind our clock (bench) and live capture
-            // came out as real frames only - in = out. Smoothing it down instead left no margin.
+            // Arrival lag behind the content clock: the second worst of the last 16 frames - any offset between
+            // the capture's timestamps and our clock, either way, plus a margin for jitter, while one stalled
+            // frame (DLSS-G's create) does not hold the shown instant back for 16 frames. It used to be a
+            // running max decaying 0.05 ms a frame from 0: timestamps 60 ms behind our clock (bench) and live
+            // capture came out as real frames only - in = out. Smoothing it down instead left no margin.
             lags[nlags++ % 16] = now - tn;
-            lag = lags[0]; for (int i = 1; i < std::min(nlags, 16); ++i) lag = std::max(lag, lags[i]);
+            { const int m = std::min(nlags, 16); double hi = -1e9, hi2 = -1e9;
+              for (int i = 0; i < m; ++i) { if (lags[i] > hi) { hi2 = hi; hi = lags[i]; } else if (lags[i] > hi2) hi2 = lags[i]; }
+              lag = m > 1 ? hi2 : hi; }
         }
         if (!nheld) continue;
         // the shown instant: one period plus the arrival lag plus a refresh behind now, so the frame after
@@ -814,7 +817,8 @@ Fg* FgCreate(Gpu& g, Shaders* sh, Overlay* ov, const wchar_t* dir, UINT out_w, U
     }
     f->thread = std::thread(f->lw ? Reproject : f->video ? VideoPresent : Presenter, f);
     RaisePresenterPriority(f->thread);
-    Log("[fg] %s %ux%u multiplier %d pacing=%s", f->lw ? "latewarp engine (Frame Warp to the mouse)" : f->video ? "video engine (interpolation on the content clock)" : f->warp ? "warp engine (extrapolation)" : "feature created", out_w, out_h, f->count + 1, vblank_pacing ? "vblank" : "timer");
+    if (f->lw || f->video) Log("[fg] %s %ux%u pacing=%s", f->lw ? "latewarp engine (Frame Warp to the mouse)" : f->gens ? "video engine (DLSS-G frames on the content clock)" : "video engine (flow interpolation on the content clock)", out_w, out_h, vblank_pacing ? "vblank" : "timer");
+    else Log("[fg] %s %ux%u multiplier %d pacing=%s", f->lw ? "latewarp engine (Frame Warp to the mouse)" : f->video ? "video engine (interpolation on the content clock)" : f->warp ? "warp engine (extrapolation)" : "feature created", out_w, out_h, f->count + 1, vblank_pacing ? "vblank" : "timer");
     return f;
 }
 

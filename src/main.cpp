@@ -1506,10 +1506,18 @@ static int RealMain(int argc, char** argv)
                 char mask[8]; if (p->mask_active) sprintf_s(mask, "%d", p->mask_n); else strcpy_s(mask, "-");
                 const char* filt_s = !cfg.filters_enabled ? "off" : FiltersLive(cfg) ? "on" : "-";
                 if (p->fg && FgMultiplier(p->fg) > 1 && FgPaused(p->fg)) snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG auto-paused  mask %s", nr, filt_s, mask);
-                else if (p->fg && FgMultiplier(p->fg) > 1) snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG %dX %.1fms  mask %s", nr, filt_s, FgMultiplier(p->fg), std::max(0.0, FgEvalMs(p->fg, nullptr)), mask);
+                // video and latewarp make a frame per refresh, not a fixed multiple: their name, not "2X"
+                else if (p->fg && FgMultiplier(p->fg) > 1)
+                {
+                    const bool per_refresh = cfg.fg_engine == FG_VIDEO || cfg.fg_engine == FG_LATEWARP;
+                    char fgs[24]; if (per_refresh) snprintf(fgs, sizeof fgs, "%ls", FgEngineName(cfg.fg_engine)); else snprintf(fgs, sizeof fgs, "%dX", FgMultiplier(p->fg));
+                    snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG %s %.1fms  mask %s", nr, filt_s, fgs, std::max(0.0, FgEvalMs(p->fg, nullptr)), mask);
+                }
                 else snprintf(p->hud_line[1], sizeof p->hud_line[1], "%s  filt %s  FG off  mask %s", nr, filt_s, mask);
                 // Why FG is or is not paying off: shown generated frames, then the gate that ate the rest.
-                if (p->fg && FgMultiplier(p->fg) > 1 && hud_frames)
+                if (p->fg && FgMultiplier(p->fg) > 1 && hud_frames && (cfg.fg_engine == FG_VIDEO || cfg.fg_engine == FG_LATEWARP))
+                    snprintf(p->hud_line[2], sizeof p->hud_line[2], "out/in %.1fx  generated %.1f per frame", hud_frames ? out_fps / std::max(1e-3, cap_fps) : 0.0, (double)hud_gen / hud_frames);
+                else if (p->fg && FgMultiplier(p->fg) > 1 && hud_frames)
                     snprintf(p->hud_line[2], sizeof p->hud_line[2], "gen %.0f%%  nopair %u  off %u  late %u", hud_gen * 100.0 / hud_frames, hud_nopair, hud_disabled, hud_preempt);
                 else p->hud_line[2][0] = 0;
                 hud_t = NowMs(); hud_frames = 0; hud_presented = 0; hud_model = 0;
