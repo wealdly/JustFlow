@@ -48,7 +48,8 @@ static const int kSlots = 4, kMaxGen = 3;   // 4: engine=video holds three real 
 struct FgSlot
 {
     ID3D12Resource *real = nullptr, *gen[kMaxGen] = {};
-    bool     gen_ok = false;   // engine=warp: the pipeline wrote gen[] for THIS frame (not while paused)
+    bool     gen_ok = false;   // engine=warp: the pipeline wrote gen[] for THIS frame (not while paused); engine=video: DLSS-G did
+    bool     resolved = true;  // engine=video: the DLSS-G evaluate of this frame has been collected (EvaluateResolve)
     ID3D12Resource* mask = nullptr;   // engine=latewarp: Frame Warp's no-warp mask for this frame (R8, NPSR)
     bool     mask_ok = false;  // the pipeline wrote it for THIS frame
     ID3D12Resource* flow = nullptr;   // engine=video: this frame's backward flow to the previous one (R16G16_FLOAT, NPSR)
@@ -71,6 +72,7 @@ struct Fg
     Overlay* ov = nullptr;
     UINT     w = 0, h = 0, mw = 0, mh = 0;
     int      count = 1;                      // generated frames per real frame (0 = passthrough)
+    int      gens = 1;                       // frames each DLSS-G evaluate makes: count; engine=video kMaxGen (0 = no DLSS-G)
     bool     warp = false;                   // engine=warp: the pipeline extrapolates into s->gen, no DLSS-G
     bool     lw = false;                     // engine=latewarp: every refresh re-projects the newest frame to the mouse (Reproject)
     Latewarp* lwf = nullptr; ID3D12Resource* lw_final[2] = {}; float lw_vfov = 1.0472f; ID3D12Resource* lw_last = nullptr;   // lw_last: bench
@@ -221,13 +223,13 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate)
     opt.reset = !interpolate;
     opt.mvecsSubrectSize = opt.depthSubrectSize = { f->mw, f->mh };
     opt.backbufferSubrectSize = opt.outputInterpSubrectSize = { f->w, f->h };
-    opt.multiFrameCount = (unsigned)f->count;
+    opt.multiFrameCount = (unsigned)f->gens;
     NVSDK_NGX_D3D12_DLSSG_Eval_Params ep = {};
     ep.pBackbuffer = s->real; ep.pMVecs = f->mv; ep.pDepth = f->depth; ep.pOutputDisableInterpolation = f->disable;
     f->params->Reset();
     f->params->Set(NVSDK_NGX_DLSSG_Parameter_BackbufferFrameID, (unsigned long long)s->seq);
     NVSDK_NGX_Result r = NVSDK_NGX_Result_Success; DWORD code = 0;
-    for (int i = 0; i < f->count; ++i)
+    for (int i = 0; i < f->gens; ++i)
     {
         opt.multiFrameIndex = (unsigned)i + 1;
         ep.pOutputInterpFrame = s->gen[i];
@@ -247,7 +249,7 @@ static bool Evaluate(Fg* f, FgSlot* s, bool interpolate)
     // multiplier up. The rects come from the addon, so they are the game's own frame geometry rather
     // than a guess, and they are axis-aligned: a copy per rect, no shader and no descriptors.
     // Real and generated frames then agree inside the rects, which is what stops the UI shimmering.
-    for (int i = 0; i < f->count; ++i) CopyRects(f, cl, s, s->real, s->gen[i]);
+    for (int i = 0; i < f->gens; ++i) CopyRects(f, cl, s, s->real, s->gen[i]);
     f->ctx.queue->Wait(g.fence, s->fence);   // GPU-side: the slot's real frame (list 2) is complete on the main queue
     const int slot = f->ctx.slot;
     const UINT64 v = GpuCtxEnd(f->ctx);
@@ -267,17 +269,17 @@ static bool EvaluateResolve(Fg* f, FgSlot* s, bool& allow)
 {
     if (!GpuCtxWait(f->ctx, f->ctx.fence, s->eval_fence, 10000)) return Fail(f, "evaluate fence wait (device removed?)");
     double ms[kMaxGen] = {};   // generation cost of this real frame = the sum of its evaluates
-    if (s->eval_slot >= 0 && GpuCtxStampsMsSlot(f->ctx, s->eval_slot, ms, f->count))
+    if (s->eval_slot >= 0 && GpuCtxStampsMsSlot(f->ctx, s->eval_slot, ms, f->gens))
     {
         double sum = 0; bool valid = true;
-        for (int i = 0; i < f->count; ++i) { if (ms[i] < 0) valid = false; sum += ms[i]; }
+        for (int i = 0; i < f->gens; ++i) { if (ms[i] < 0) valid = false; sum += ms[i]; }
         if (valid) { std::lock_guard<std::mutex> lk(f->mu); f->eval_ring[f->eval_n++ % 256] = sum; }
     }
     allow = true;
-    uint8_t* d = nullptr; D3D12_RANGE rr = { 0, (SIZE_T)f->count * 4 };
+    uint8_t* d = nullptr; D3D12_RANGE rr = { 0, (SIZE_T)f->gens * 4 };
     if (SUCCEEDED(f->disable_rb->Map(0, &rr, (void**)&d)))
     {
-        for (int i = 0; i < f->count; ++i) allow = allow && d[i * 4] == 0;
+        for (int i = 0; i < f->gens; ++i) allow = allow && d[i * 4] == 0;
         D3D12_RANGE none = { 0, 0 }; f->disable_rb->Unmap(0, &none);
     }
     else allow = false;
@@ -562,7 +564,9 @@ static void Reproject(Fg* f)
     f->cv.notify_all();
 }
 
-// engine=video: frame interpolation for 2D video, timed by the video's own clock. Every refresh shows the
+// engine=video: frame interpolation for 2D video, timed by the video's own clock. The in-between frames are
+// DLSS-G's (3 per real frame, at 1/4 steps, the nearest shown) when it is there and allows the pair,
+// else our own flow interpolation (CsVideoInterp) at the exact instant. Every refresh shows the
 // content instant due now minus one source period (plus the pipeline's lag): the two newest real frames
 // A and B bracket it, so the refresh gets A and B blended along B's flow at t = (instant - A) / (B - A).
 // 24 fps on 240 Hz becomes ten evenly spaced steps per frame and 23.976 drifts smoothly instead of
@@ -579,7 +583,8 @@ static void VideoPresent(Fg* f)
     // Moving on the moment it arrived jumped t from ~0.6 back to 0 - a skip in every frame.
     struct Held { FgSlot* s; double t; }; Held held[3]; int nheld = 0;
     double ob = 0, period = 0, lag = 0;   // the newest frame's observed time; source period; arrival lag behind content time
-    const FgSlot* shown = nullptr; float shown_t = -1; int k = 0;
+    const FgSlot* shown = nullptr; float shown_t = -1; int k = 0; ID3D12Resource* shown_tex = nullptr;   // shown/shown_t: the flow path's last frame
+    const bool flow_only = GetEnvironmentVariableA("JF_VID_FLOW", nullptr, 0) != 0;   // TEST: in-between frames from our flow only (A/B)
     char ev[16]; const float forced = GetEnvironmentVariableA("JF_VID_T", ev, sizeof ev) ? (float)atof(ev) : -1.0f;   // TEST: a fixed t (bench)
     auto release = [&] { { std::lock_guard<std::mutex> lk(f->mu); held[0].s->state = 0; } held[0] = held[1]; held[1] = held[2]; --nheld; f->cv.notify_all(); };
     while (!f->stop && !f->failed)
@@ -605,6 +610,10 @@ static void VideoPresent(Fg* f)
             ob = o;
             if (nheld == 3) release();   // a burst: the oldest goes
             held[nheld++] = { n, tn };
+            // DLSS-G makes the in-between frames now, against the frame it evaluated last (the one before);
+            // they are collected when this pair comes on screen - a period later, long finished.
+            n->gen_ok = false; n->resolved = true;
+            if (f->gens && !flow_only) { if (!Evaluate(f, n, n->interpolate && nheld >= 2)) break; n->resolved = false; }
             lag = std::max(now - tn, lag - 0.05);   // the worst recent arrival lag, decaying slowly
         }
         if (!nheld) continue;
@@ -622,15 +631,29 @@ static void VideoPresent(Fg* f)
             t = b->interpolate ? (float)std::clamp((c - ta) / std::max(tb - ta, 1.0), 0.0, 1.0) : (c < tb ? 0.0f : 1.0f);
         }
         if (forced >= 0 && a) t = forced;
+        if (a && !b->resolved) { bool allow = false; if (!EvaluateResolve(f, b, allow)) break; b->resolved = true; b->gen_ok = allow && b->interpolate; }
+        if (a && b->gen_ok)
+        {
+            // DLSS-G's frames sit at i/(gens+1): show the nearest - at 24 fps on 240 Hz that is an even
+            // 96 fps timeline, each step held for 2 or 3 refreshes.
+            const int steps = f->gens + 1, i = (int)std::lround(t * steps);
+            ID3D12Resource* tex = i <= 0 ? a->real : i >= steps ? b->real : b->gen[i - 1];
+            if (tex == shown_tex) continue;
+            const bool gen = i > 0 && i < steps;
+            if (!(gen ? PresentAfter(f, tex, b, false, f->ctx.fence, b->eval_fence) : PresentAfter(f, tex, i <= 0 ? a : b, i >= steps, g.fence, (i <= 0 ? a : b)->fence))) break;
+            if (gen) ++f->gen_shown;
+            shown_tex = tex; shown = nullptr; f->lw_last = tex; f->dbg = b;
+            continue;
+        }
         const FgSlot* src = t <= 0.02f ? a : t >= 0.98f ? b : nullptr;   // an end: that real frame as it is
         if (src)
         {
-            if (src == shown && shown_t < 0) continue;   // already on screen
+            if (src->real == shown_tex) continue;   // already on screen
             if (!PresentAfter(f, src->real, src, src == b, g.fence, src->fence)) break;
-            shown = src; shown_t = -1; f->dbg = b;
+            shown = src; shown_t = -1; shown_tex = src->real; f->dbg = b;
             continue;
         }
-        if (shown == b && fabsf(t - shown_t) < 0.005f) continue;
+        if (shown == b && shown_tex == f->lw_final[k ^ 1] && fabsf(t - shown_t) < 0.005f) continue;
         if (!GpuCtxBegin(g, f->ctx)) { Fail(f, "FG queue begin (device removed?)"); break; }
         ID3D12GraphicsCommandList* cl = f->ctx.list;
         ID3D12Resource* dst = f->lw_final[k];
@@ -642,7 +665,7 @@ static void VideoPresent(Fg* f)
         const UINT64 v = GpuCtxEnd(f->ctx);   // A and B were CPU-waited on arrival (WaitRendered)
         if (!v) { Fail(f, "video submit"); break; }
         if (!PresentAfter(f, dst, b, false, f->ctx.fence, v)) break;
-        ++f->gen_shown; f->lw_last = dst; f->dbg = b; shown = b; shown_t = t; k ^= 1;
+        ++f->gen_shown; f->lw_last = dst; f->dbg = b; shown = b; shown_t = t; shown_tex = dst; k ^= 1;
     }
     { std::lock_guard<std::mutex> lk(f->mu); for (int i = 0; i < nheld; ++i) held[i].s->state = 0; }
     f->cv.notify_all();
@@ -683,6 +706,43 @@ static void RaisePresenterPriority(std::thread& t)
         Log("[fg] presenter priority unchanged (err %lu) - normal priority is fine, just jitterier", GetLastError());
 }
 
+// DLSS-G: the NGX feature (core, else nvngx_dlssg.dll directly) and its guides. nullptr on success, else why not.
+static const char* SetupDlssg(Fg* f, const wchar_t* dir)
+{
+    Gpu& g = *f->g; const UINT mv_w = f->mw, mv_h = f->mh;
+    if (!(f->params = NgxCoreParams(g, dir, "[fg]"))) return "no NGX parameter block";
+    NVSDK_NGX_Result r;
+
+    f->create = NVSDK_NGX_D3D12_CreateFeature; f->release = NVSDK_NGX_D3D12_ReleaseFeature; g_fg_evaluate = NVSDK_NGX_D3D12_EvaluateFeature_C;
+    if (!CreateFeature(f, "NGX core"))
+    {
+        // Fallback: drive nvngx_dlssg.dll directly (NeuralScreen path) with the same parameter block.
+        const std::wstring path = f->dir + L"\\nvngx_dlssg.dll";
+        f->dll = LoadLibraryW(path.c_str());
+        if (!f->dll) { Log("[fg] %ls did not load (err %lu)", path.c_str(), GetLastError()); return "CreateFeature failed and no direct runtime"; }
+        auto init = (PFN_FgInitExt)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_Init_Ext");
+        f->create = (PFN_FgCreate)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_CreateFeature");
+        f->release = (PFN_FgRelease)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_ReleaseFeature");
+        g_fg_evaluate = (PFN_FgEvaluate)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_EvaluateFeature");
+        if (!init || !f->create || !f->release || !g_fg_evaluate) return "nvngx_dlssg.dll exports missing";
+        r = init(0x1000000ULL, dir, g.dev, NVSDK_NGX_Version_API, f->params);
+        Log("[fg] direct Init_Ext -> 0x%08X (%s)", r, NgxResultName(r));
+        if (NVSDK_NGX_FAILED(r) || !CreateFeature(f, "nvngx_dlssg.dll")) return "CreateFeature failed (core and direct)";
+    }
+
+    // guides + outputs
+    f->depth = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_depth");
+    std::vector<float> flat((size_t)mv_w * mv_h, 0.5f);
+    if (!f->depth || !GpuUploadTex(g, f->depth, flat.data(), mv_w, mv_h, 4, NPSR)) return "depth texture";
+    f->mv = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_mv");   // zeros, for good: see Evaluate
+    const std::vector<uint32_t> zero((size_t)mv_w * mv_h, 0);
+    if (!f->mv || !GpuUploadTex(g, f->mv, zero.data(), mv_w, mv_h, 4, NPSR)) return "mv texture";
+    f->disable = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_DEFAULT, UAV, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, L"fg_disable");
+    f->disable_rb = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"fg_disable_rb");
+    if (!f->disable || !f->disable_rb) return "disable buffers";
+    return nullptr;
+}
+
 Fg* FgCreate(Gpu& g, Shaders* sh, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier, bool vblank_pacing, int engine, float lw_vfov)
 {
     Fg* f = new Fg;
@@ -703,45 +763,21 @@ Fg* FgCreate(Gpu& g, Shaders* sh, Overlay* ov, const wchar_t* dir, UINT out_w, U
         return f;
     }
 
-    if (!f->warp && !f->lw && !f->video)   // extrapolation, Frame Warp and video need no DLSS-G
-    {
-        if (!(f->params = NgxCoreParams(g, dir, "[fg]"))) return fail("no NGX parameter block");
-        NVSDK_NGX_Result r;
-
-        f->create = NVSDK_NGX_D3D12_CreateFeature; f->release = NVSDK_NGX_D3D12_ReleaseFeature; g_fg_evaluate = NVSDK_NGX_D3D12_EvaluateFeature_C;
-        if (!CreateFeature(f, "NGX core"))
+    // DLSS-G: required by engine=dlssg; engine=video uses it for its in-between frames when it can, and
+    // interpolates along our own flow when it cannot.
+    if (!f->warp && !f->lw)
+        if (const char* why = SetupDlssg(f, dir))
         {
-            // Fallback: drive nvngx_dlssg.dll directly (NeuralScreen path) with the same parameter block.
-            const std::wstring path = f->dir + L"\\nvngx_dlssg.dll";
-            f->dll = LoadLibraryW(path.c_str());
-            if (!f->dll) { Log("[fg] %ls did not load (err %lu)", path.c_str(), GetLastError()); return fail("CreateFeature failed and no direct runtime"); }
-            auto init = (PFN_FgInitExt)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_Init_Ext");
-            f->create = (PFN_FgCreate)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_CreateFeature");
-            f->release = (PFN_FgRelease)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_ReleaseFeature");
-            g_fg_evaluate = (PFN_FgEvaluate)GetProcAddress(f->dll, "NVSDK_NGX_D3D12_EvaluateFeature");
-            if (!init || !f->create || !f->release || !g_fg_evaluate) return fail("nvngx_dlssg.dll exports missing");
-            r = init(0x1000000ULL, dir, g.dev, NVSDK_NGX_Version_API, f->params);
-            Log("[fg] direct Init_Ext -> 0x%08X (%s)", r, NgxResultName(r));
-            if (NVSDK_NGX_FAILED(r) || !CreateFeature(f, "nvngx_dlssg.dll")) return fail("CreateFeature failed (core and direct)");
+            if (!f->video) return fail(why);
+            Log("[fg] video: no DLSS-G (%s) - in-between frames from our flow", why); f->feature = nullptr;
         }
-
-        // guides + outputs
-        f->depth = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_depth");
-        std::vector<float> flat((size_t)mv_w * mv_h, 0.5f);
-        if (!f->depth || !GpuUploadTex(g, f->depth, flat.data(), mv_w, mv_h, 4, NPSR)) return fail("depth texture");
-        f->mv = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_mv");   // zeros, for good: see Evaluate
-        const std::vector<uint32_t> zero((size_t)mv_w * mv_h, 0);
-        if (!f->mv || !GpuUploadTex(g, f->mv, zero.data(), mv_w, mv_h, 4, NPSR)) return fail("mv texture");
-        f->disable = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_DEFAULT, UAV, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, L"fg_disable");
-        f->disable_rb = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"fg_disable_rb");
-        if (!f->disable || !f->disable_rb) return fail("disable buffers");
-    }
+    f->gens = f->video ? (f->feature ? kMaxGen : 0) : f->count;
     for (auto& s : f->slots)
     {
         s.real = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_real");
         if (!s.real) return fail("slot textures");
         if (f->video && !(s.flow = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_flow"))) return fail("video flow textures");
-        for (int i = 0; i < (f->lw || f->video ? 0 : f->count); ++i)
+        for (int i = 0; i < (f->lw ? 0 : f->gens); ++i)
             if (!(s.gen[i] = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_gen"))) return fail("slot textures");
     }
     if (f->video)
