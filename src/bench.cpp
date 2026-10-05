@@ -11,8 +11,6 @@
 #include <cstdlib>
 #include <cstring>
 
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
-
 // A texture (8-bit RGBA or BGRA, w x h, resting in `state`) read back and written as a PNG.
 bool SaveTexPng(Gpu& g, ID3D12Resource* tex, UINT w, UINT h, D3D12_RESOURCE_STATES state, const wchar_t* path)
 {
@@ -20,7 +18,13 @@ bool SaveTexPng(Gpu& g, ID3D12Resource* tex, UINT w, UINT h, D3D12_RESOURCE_STAT
     return tex && GpuReadbackTex(g, tex, px.data(), w, h, 4, state) && SavePngRgba(path, px.data(), w, h);
 }
 
-// ---- bench ----------------------------------------------------------------------------------------
+// A result line for both bench.log ("[bench] ...") and stdout.
+static void Report(const char* fmt, ...)
+{
+    char s[1024]; va_list ap; va_start(ap, fmt); vsnprintf(s, sizeof s, fmt, ap); va_end(ap);
+    Log("[bench] %s", s); printf("%s\n", s);
+}
+
 static std::vector<std::wstring> ListPngs(const std::wstring& path)
 {
     std::vector<std::wstring> out;
@@ -143,16 +147,15 @@ int RunBench(int argc, char** argv)
     static const char* const kToastText = "toast self-test";
     std::vector<uint8_t> with_toast;
     int last_in = 0;   // input index of the final frame: warm-up frames are not counted, so it is not (frames-1) % n
-    // async: the feature is created on the model thread (~0.5 s) while frames keep flowing, and a bench
-    // frame takes a millisecond - the whole run used to end before the first residual existed. Hold on
-    // input 0 until the model is live (10 s cap), then play the sequence from its start.
+    // async: the feature is created on the model thread (~0.5 s) and a bench frame takes a millisecond.
+    // Hold on input 0 until the model is live (10 s cap), then play the sequence from its start.
     int seq = 0; double pace_due = 0;
     for (int i = 0; evaluated < frames && (cfg.nr_async && evaluated == 0 ? NowMs() - t0 < 10000 : seq < frames + slack); ++i)
     {
         last_in = seq % (int)tex.size();
         if (toast_test && i == 5) { p->cfg.toast = true; PipelineToast(p, "%s", kToastText); }
-        // The thing every other bench run lacks: a reload while running. Fresh processes create the
-        // feature once at the right size, so they could never see a rebuild that failed to rebuild.
+        // A reload while running: a fresh process creates the feature once at the right size, so only
+        // this sees a rebuild that fails to rebuild.
         if (rework_w && i == frames / 3)
         {
             Config nc = p->cfg; nc.work_w = rework_w; nc.work_h = rework_h; nc.work_auto = false; nc.rebuild_debounce_frames = 4;
@@ -166,14 +169,11 @@ int RunBench(int argc, char** argv)
             PipelineReload(p, nc);
         }
         if (toast_test && i == 6) p->toast_until_ms = 0;
-        // Paced like a game: a frame that is late is late, and the schedule starts again from it. Pacing
-        // against the start time made every stall (DLSS-G's ~1 s feature create on frame 0) come out as a
-        // back-to-back burst of the frames "owed", which FG drops - read for a day as a DLSS-G slowdown in
-        // FG-only mode (a model evaluate per frame happened to spread the burst).
+        // Paced like a game: a late frame restarts the schedule. Pacing against the start time turns a
+        // stall (DLSS-G's ~1 s feature create) into a burst of the frames "owed", which FG drops.
         if (pace > 0) { if (NowMs() > pace_due + 1000.0 / pace) pace_due = NowMs(); while (NowMs() < pace_due) Sleep(1); pace_due += 1000.0 / pace; }
-        // Capture timestamps like live capture: the frame's place on the content clock, here its slot on the
-        // pace schedule - the video engine times itself by them, and without them it ran on arrival times
-        // and could not see what a late frame does. TEST JF_BENCH_STALL=<frame>,<ms>: one late frame.
+        // Capture timestamps like live capture: the frame's slot on the pace schedule (the video engine
+        // times itself by them). TEST JF_BENCH_STALL=<frame>,<ms>: one late frame.
         if (pace > 0)
         {
             char sv[32]; int sf = -1, sms = 0;
@@ -225,25 +225,22 @@ int RunBench(int argc, char** argv)
     if (p->fg && FgMultiplier(p->fg) > 1)
     {
         FgDebugHold(p->fg);
-        SaveTexPng(g, FgDebugGen(p->fg, 0), w, h, D3D12_RESOURCE_STATE_COPY_SOURCE, L"fg_gen.png");
-        SaveTexPng(g, FgDebugReal(p->fg), w, h, D3D12_RESOURCE_STATE_COPY_SOURCE, L"fg_real.png");
+        ID3D12Resource* gen = FgDebugGen(p->fg, 0), *real = FgDebugReal(p->fg);
+        std::vector<uint8_t> a((size_t)w * h * 4), b(a.size());
+        const bool got_a = gen && GpuReadbackTex(g, gen, a.data(), w, h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        const bool got_b = real && GpuReadbackTex(g, real, b.data(), w, h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        if (got_a) SavePngRgba(L"fg_gen.png", a.data(), w, h);
+        if (got_b) SavePngRgba(L"fg_real.png", b.data(), w, h);
         if (ID3D12Resource* m = FgDebugMask(p->fg))
         {
             const D3D12_RESOURCE_DESC md = m->GetDesc(); std::vector<uint8_t> px((size_t)md.Width * md.Height), rgba(px.size() * 4, 255);
             if (GpuReadbackTex(g, m, px.data(), (UINT)md.Width, md.Height, 1, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
             { for (size_t i = 0; i < px.size(); ++i) rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = px[i]; SavePngRgba(L"fg_mask.png", rgba.data(), (UINT)md.Width, md.Height); }
         }
-    }
-
-    // The UI restore on generated frames: inside a mask rect a generated frame must be pixel-exact
-    // against the composed frame it came from, and outside it must not be (DLSS-G interpolated it).
-    // Both halves matter - "identical everywhere" would mean the generated frame is just a copy.
-    if (p->fg && FgMultiplier(p->fg) > 1 && p->cfg.nrects > 0)
-    {
-        ID3D12Resource* gen = FgDebugGen(p->fg, 0), *real = FgDebugReal(p->fg);
-        std::vector<uint8_t> a((size_t)w * h * 4), b((size_t)w * h * 4);
-        if (gen && real && GpuReadbackTex(g, gen, a.data(), w, h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE)
-                       && GpuReadbackTex(g, real, b.data(), w, h, 4, D3D12_RESOURCE_STATE_COPY_SOURCE))
+        // The UI restore on generated frames: inside a mask rect a generated frame must be pixel-exact
+        // against the composed frame it came from, and outside it must not be (DLSS-G interpolated it).
+        // Both halves matter - "identical everywhere" would mean the generated frame is just a copy.
+        if (got_a && got_b && p->cfg.nrects > 0)
         {
             const UiRect& r = p->cfg.rects[0];
             size_t in_n = 0, in_diff = 0, out_n = 0, out_diff = 0;
@@ -255,86 +252,52 @@ int RunBench(int argc, char** argv)
                 if (inside) { ++in_n; if (!same) ++in_diff; } else { ++out_n; if (!same) ++out_diff; }
             }
             const double outpct = out_n ? 100.0 * (double)out_diff / (double)out_n : 0.0;
-            const bool pass = in_diff == 0 && out_diff > 0;
-            Log("[bench] FG ui restore: %zu/%zu px differ inside rect1, %.1f%% differ outside - %s",
-                in_diff, in_n, outpct, pass ? "PASS" : "FAIL");
-            printf("FG ui restore: %zu/%zu px differ inside rect1, %.1f%% differ outside - %s\n",
-                   in_diff, in_n, outpct, pass ? "PASS" : "FAIL");
+            Report("FG ui restore: %zu/%zu px differ inside rect1, %.1f%% differ outside - %s", in_diff, in_n, outpct, in_diff == 0 && out_diff > 0 ? "PASS" : "FAIL");
         }
     }
 
-    // The motion vectors, checked against KNOWN motion. These feed the NR model and the warp engines, so
-    // a wrong sign, scale or reference frame shows up as warping and temporal instability rather
-    // than as an error - which is why it can hide for a long time behind "FG is unstable".
-    // Feed --bench a panning sequence and the expected magnitude is arithmetic: a shift of N native
-    // pixels is N * (ww / w) at work resolution.
+    // The motion vectors against KNOWN motion: a wrong sign, scale or reference frame shows up as warping,
+    // not as an error. On a panning sequence a shift of N native px is N * (ww / w) work px.
     if (p->mv)
     {
-        const UINT ww = p->ww, wh = p->wh;
-        std::vector<uint8_t> raw((size_t)ww * wh * 4);
+        const UINT ww = p->ww, wh = p->wh; const size_t n = (size_t)ww * wh;
+        std::vector<uint8_t> raw(n * 4);   // R16G16 float
         if (GpuReadbackTex(g, p->mv, raw.data(), ww, wh, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
         {
-            auto half = [](uint16_t h) -> float {
-                const int e = (h >> 10) & 0x1F, m = h & 0x3FF; const float sgn = (h & 0x8000) ? -1.0f : 1.0f;
-                if (e == 0) return sgn * ldexpf((float)m, -24);
-                if (e == 31) return sgn * (m ? NAN : INFINITY);
-                return sgn * ldexpf((float)(m | 0x400), e - 25);
-            };
+            std::vector<float> xy(n * 2);
+            DirectX::PackedVector::XMConvertHalfToFloatStream(xy.data(), sizeof(float), (const DirectX::PackedVector::HALF*)raw.data(), sizeof(uint16_t), xy.size());
+            // the raw field, for scoring against ground truth (tools/scene exports exact motion)
+            FILE* mf = nullptr; if (_wfopen_s(&mf, L"mv_bench.f32", L"wb") == 0 && mf) { fwrite(xy.data(), sizeof(float), xy.size(), mf); fclose(mf); }
+            Log("[bench] mv_bench.f32 = input frame %d vs the one before it%s", last_in, last_in == 0 && tex.size() > 1 ? " (the WRAP pair: a scene cut, not motion)" : "");
             std::vector<float> xs, ys; size_t nz = 0, bad = 0;
-            for (size_t i = 0; i < (size_t)ww * wh; ++i)
+            for (size_t i = 0; i < n; ++i)
             {
-                const uint16_t* q = (const uint16_t*)&raw[i * 4];
-                const float vx = half(q[0]), vy = half(q[1]);
+                const float vx = xy[i * 2], vy = xy[i * 2 + 1];
                 if (!std::isfinite(vx) || !std::isfinite(vy)) { ++bad; continue; }
                 if (vx != 0.0f || vy != 0.0f) { ++nz; xs.push_back(vx); ys.push_back(vy); }
             }
-            {   // the raw field, for scoring against ground truth (tools/scene exports exact motion)
-                std::vector<float> xy((size_t)ww * wh * 2);
-                for (size_t i = 0; i < (size_t)ww * wh; ++i) { const uint16_t* q = (const uint16_t*)&raw[i * 4]; xy[i * 2] = half(q[0]); xy[i * 2 + 1] = half(q[1]); }
-                FILE* mf = nullptr; if (_wfopen_s(&mf, L"mv_bench.f32", L"wb") == 0 && mf) { fwrite(xy.data(), sizeof(float), xy.size(), mf); fclose(mf); }
-                Log("[bench] mv_bench.f32 = input frame %d vs the one before it%s", last_in, last_in == 0 && tex.size() > 1 ? " (the WRAP pair: a scene cut, not motion)" : "");
-            }
             auto med = [](std::vector<float>& v) { if (v.empty()) return 0.0f; std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
-            // Left and right halves separately: a rigid pan cannot tell a coarse flow grid from a
-            // fine one (every vector is the same, so downsampling loses nothing). Split motion can.
-            std::vector<float> lx, rx;
-            for (UINT y = 0; y < wh; ++y) for (UINT x = 0; x < ww; ++x)
-            {
-                const uint16_t* q = (const uint16_t*)&raw[((size_t)y * ww + x) * 4];
-                const float vx = half(q[0]);
-                if (!std::isfinite(vx)) continue;
-                (x < ww / 2 ? lx : rx).push_back(vx);
-            }
-            const float lmed = med(lx), rmed = med(rx);
-            // Transition width: columns whose median vector matches NEITHER side. That is the smear
-            // a coarse flow grid leaves at a motion boundary, and it is the only thing a rigid pan
-            // cannot show. Expect it to scale with the grid: one grid cell = `grid` OFA-input px.
-            int ambiguous = 0;
+            // Left and right halves separately: a rigid pan cannot tell a coarse flow grid from a fine one
+            // (every vector is the same). Split motion can: columns whose median matches NEITHER side are
+            // the smear a coarse grid leaves at a motion boundary (one cell = `grid` OFA-input px).
+            std::vector<float> lx, rx, colmed(ww);
             for (UINT x = 0; x < ww; ++x)
             {
                 std::vector<float> col;
-                for (UINT y = 0; y < wh; ++y)
-                {
-                    const uint16_t* q = (const uint16_t*)&raw[((size_t)y * ww + x) * 4];
-                    const float vx = half(q[0]); if (std::isfinite(vx)) col.push_back(vx);
-                }
-                const float m = med(col);
-                if (fabsf(m - lmed) > 1.0f && fabsf(m - rmed) > 1.0f) ++ambiguous;
+                for (UINT y = 0; y < wh; ++y) { const float vx = xy[((size_t)y * ww + x) * 2]; if (std::isfinite(vx)) col.push_back(vx); }
+                auto& side = x < ww / 2 ? lx : rx; side.insert(side.end(), col.begin(), col.end());
+                colmed[x] = med(col);
             }
-            Log("[bench] mv transition: %d of %u columns match neither side", ambiguous, ww);
-            printf("mv transition: %d of %u columns match neither side\n", ambiguous, ww);
-            const double frac = 100.0 * (double)nz / ((double)ww * wh);
-            const float mx = med(xs), my = med(ys);
-            Log("[bench] mv %ux%u: %.1f%% non-zero, median (%.2f, %.2f) work px, %zu non-finite", ww, wh, frac, mx, my, bad);
-            printf("mv %ux%u: %.1f%% non-zero, median (%.2f, %.2f) work px, %zu non-finite\n", ww, wh, frac, mx, my, bad);
-            Log("[bench] mv halves: left %.2f  right %.2f work px", lmed, rmed);
-            printf("mv halves: left %.2f  right %.2f work px\n", lmed, rmed);
+            const float lmed = med(lx), rmed = med(rx);
+            const auto ambiguous = std::count_if(colmed.begin(), colmed.end(), [&](float m) { return fabsf(m - lmed) > 1.0f && fabsf(m - rmed) > 1.0f; });
+            Report("mv transition: %d of %u columns match neither side", (int)ambiguous, ww);
+            Report("mv %ux%u: %.1f%% non-zero, median (%.2f, %.2f) work px, %zu non-finite", ww, wh, 100.0 * (double)nz / (double)n, med(xs), med(ys), bad);
+            Report("mv halves: left %.2f  right %.2f work px", lmed, rmed);
         }
     }
 
-    // The finished frame and the native one it came from, for judging what a setting does to the
-    // PICTURE rather than to a work-resolution intermediate (e.g. how much of the model's edit
-    // survives being composed up from a small work size).
+    // The finished frame and the native one it came from: what a setting does to the PICTURE, not to a
+    // work-resolution intermediate.
     if (p->shown && p->color4k)
     {
         wchar_t f[64]; _snwprintf_s(f, _TRUNCATE, L"final_%ux%u.png", p->ww, p->wh);
@@ -342,8 +305,8 @@ int RunBench(int argc, char** argv)
         SaveTexPng(g, p->color4k, w, h, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"final_native.png");
     }
 
-    // What the spike never checked: that the model wrote the whole work texture. A subrect here is
-    // the "renders in the top-left, dark everywhere else" symptom, and it is silent at runtime.
+    // That the model wrote the whole work texture: a subrect ("renders in the top-left, dark everywhere
+    // else") is silent at runtime.
     if (p->nr)
     {
         ID3D12Resource* out = cfg.nr_async ? p->nr_out_m : p->nr_out;
@@ -359,21 +322,18 @@ int RunBench(int argc, char** argv)
                 { ++nz; if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y; }
             }
             const double frac = 100.0 * (double)nz / ((double)ww * wh);
-            const char* verdict = frac > 99.0 ? "PASS" : "FAIL (the model wrote a subrect)";
-            {   // the model's own before/after, for inspecting what it did with scale
-                std::vector<uint8_t> in((size_t)ww * wh * 4);
-                ID3D12Resource* src = cfg.nr_async ? p->nr_in_m : p->nr_in;
-                if (src && GpuReadbackTex(g, src, in.data(), ww, wh, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
-                {
-                    wchar_t f1[64], f2[64];
-                    _snwprintf_s(f1, _TRUNCATE, L"work_in_%ux%u.png", ww, wh);
-                    _snwprintf_s(f2, _TRUNCATE, L"work_out_%ux%u.png", ww, wh);
-                    SavePngRgba(f1, in.data(), ww, wh); SavePngRgba(f2, px.data(), ww, wh);
-                    Log("[bench] wrote %ls and %ls", f1, f2);
-                }
+            // the model's own before/after, for inspecting what it did with scale
+            std::vector<uint8_t> in((size_t)ww * wh * 4);
+            ID3D12Resource* src = cfg.nr_async ? p->nr_in_m : p->nr_in;
+            if (src && GpuReadbackTex(g, src, in.data(), ww, wh, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
+            {
+                wchar_t f1[64], f2[64];
+                _snwprintf_s(f1, _TRUNCATE, L"work_in_%ux%u.png", ww, wh);
+                _snwprintf_s(f2, _TRUNCATE, L"work_out_%ux%u.png", ww, wh);
+                SavePngRgba(f1, in.data(), ww, wh); SavePngRgba(f2, px.data(), ww, wh);
+                Log("[bench] wrote %ls and %ls", f1, f2);
             }
-            Log("[bench] nr_out coverage %ux%u: %.1f%% written, bbox %u,%u..%u,%u - %s", ww, wh, frac, x0, y0, x1, y1, verdict);
-            printf("nr_out coverage %ux%u: %.1f%% written, bbox %u,%u..%u,%u - %s\n", ww, wh, frac, x0, y0, x1, y1, verdict);
+            Report("nr_out coverage %ux%u: %.1f%% written, bbox %u,%u..%u,%u - %s", ww, wh, frac, x0, y0, x1, y1, frac > 99.0 ? "PASS" : "FAIL (the model wrote a subrect)");
         }
     }
 
