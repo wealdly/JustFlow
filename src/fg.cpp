@@ -111,11 +111,12 @@ static bool Fail(Fg* f, const char* why)
 
 // The NEWEST ready slot, marked presenting; every older ready slot is dropped on the spot (counted).
 // Caller holds f->mu. nullptr when nothing is ready.
-static FgSlot* TakeNewestLocked(Fg* f)
+// rendered: only slots whose render fence has passed this value (the video engine never waits for one).
+static FgSlot* TakeNewestLocked(Fg* f, UINT64 rendered = ~0ull)
 {
     FgSlot* s = nullptr;
-    for (auto& x : f->slots) if (x.state == 2 && (!s || x.seq > s->seq)) s = &x;
-    for (auto& x : f->slots) if (x.state == 2 && &x != s) { x.state = 0; ++f->drops; }
+    for (auto& x : f->slots) if (x.state == 2 && x.fence <= rendered && (!s || x.seq > s->seq)) s = &x;
+    for (auto& x : f->slots) if (x.state == 2 && s && x.seq < s->seq) { x.state = 0; ++f->drops; }
     if (s) s->state = 3;
     return s;
 }
@@ -549,8 +550,8 @@ static void VideoPresent(Fg* f)
     double lags[16] = {}; int nlags = 0;   // the last arrival lags (ms)
     const FgSlot* shown = nullptr; float shown_t = -1; int k = 0; ID3D12Resource* shown_tex = nullptr;   // shown/shown_t: the flow path's last frame
     // every 5 s in the log: what the engine saw and did
-    struct { UINT wakes = 0, arrivals = 0, no_pair = 0, ends = 0, between = 0, dg_pairs = 0, dg_ok = 0, cut_pairs = 0; double t_sum = 0, t0 = 0, ms[6] = {}; } vs; vs.t0 = NowMs();
-    // where the loop's time goes (ms per 5 s): the wait for the refresh, the wait for a frame's render, DLSS-G
+    struct { UINT wakes = 0, arrivals = 0, no_pair = 0, ends = 0, between = 0, dg_pairs = 0, dg_ok = 0, cut_pairs = 0; double t_sum = 0, t0 = 0, ms[5] = {}; } vs; vs.t0 = NowMs();
+    // where the loop's time goes (ms per 5 s): the wait for the refresh, DLSS-G
     // record, DLSS-G collect, present (its wait for the last copy, the copy, Present), the rest
     double tm = NowMs(); auto lap = [&](int i) { const double x = NowMs(); vs.ms[i] += x - tm; tm = x; };
     const bool flow_only = GetEnvironmentVariableA("JF_VID_FLOW", nullptr, 0) != 0;   // TEST: in-between frames from our flow only (A/B)
@@ -558,7 +559,7 @@ static void VideoPresent(Fg* f)
     auto release = [&] { Release(f, held[0].s); held[0] = held[1]; held[1] = held[2]; --nheld; };
     while (!f->stop && !f->failed)
     {
-        lap(5);
+        lap(4);
         // On DwmFlush the wait only wakes when something on the desktop is drawn, and a refresh we do not
         // present draws nothing - the loop would sleep until the video's next frame. The engine needs
         // every refresh: then the CPU timer.
@@ -567,12 +568,14 @@ static void VideoPresent(Fg* f)
         lap(0);
         if (f->hold) continue;
         FgSlot* n = nullptr;
-        { std::lock_guard<std::mutex> lk(f->mu); n = TakeNewestLocked(f); }
+        // Only a frame the GPU has finished: waiting for one (the model at 4K takes ~14 ms) cost every arrival
+        // three refreshes - the pair in hand keeps being shown meanwhile, and the lag below absorbs the render time.
+        const UINT64 done = g.fence->GetCompletedValue();
+        { std::lock_guard<std::mutex> lk(f->mu); n = TakeNewestLocked(f, done); }
         f->cv.notify_all();   // FgAcquire may be waiting for a free slot
         const double now = NowMs();
         if (n)
         {
-            lap(5); if (!WaitRendered(f, n)) break; lap(1);
             const double o = n->cap_qpc ? QpcToMs(n->cap_qpc) : now, gap = o - ob;
             double tn = o;
             if (nheld && n->interpolate && gap > 2.0 && gap < 250.0)
@@ -587,7 +590,7 @@ static void VideoPresent(Fg* f)
             // DLSS-G makes the in-between frames now, against the frame it evaluated last (the one before);
             // they are collected when this pair comes on screen - a period later, long finished.
             n->gen_ok = false; n->resolved = true;
-            if (f->gens && !flow_only) { lap(5); if (!Evaluate(f, n, n->interpolate && nheld >= 2)) break; n->resolved = false; lap(2); }
+            if (f->gens && !flow_only) { lap(4); if (!Evaluate(f, n, n->interpolate && nheld >= 2)) break; n->resolved = false; lap(1); }
             // Arrival lag behind the content clock: the second worst of the last 16 frames - any offset between
             // the capture's timestamps and our clock, either way, plus a margin for jitter, while one stalled
             // frame (DLSS-G's create) does not hold the shown instant back for 16 frames.
@@ -615,11 +618,11 @@ static void VideoPresent(Fg* f)
         if (!a || period <= 0) ++vs.no_pair; else { vs.t_sum += t; if (t <= 0.02f || t >= 0.98f) ++vs.ends; else ++vs.between; }
         if (now - vs.t0 >= 5000.0)
         {
-            Log("[fg] video: %u refreshes, %u frames in, period %.1f ms, lag %.1f ms | no pair %u, at a real frame %u, between %u (mean t %.2f) | DLSS-G pairs %u/%u, cuts %u | ms: refresh wait %.0f, render wait %.0f, DLSS-G %.0f + collect %.0f, present %.0f, rest %.0f",
-                vs.wakes, vs.arrivals, period, lag, vs.no_pair, vs.ends, vs.between, vs.ends + vs.between ? vs.t_sum / (vs.ends + vs.between) : -1.0, vs.dg_ok, vs.dg_pairs, vs.cut_pairs, vs.ms[0], vs.ms[1], vs.ms[2], vs.ms[3], vs.ms[4], vs.ms[5]);
+            Log("[fg] video: %u refreshes, %u frames in, period %.1f ms, lag %.1f ms | no pair %u, at a real frame %u, between %u (mean t %.2f) | DLSS-G pairs %u/%u, cuts %u | ms: refresh wait %.0f, DLSS-G %.0f + collect %.0f, present %.0f, rest %.0f",
+                vs.wakes, vs.arrivals, period, lag, vs.no_pair, vs.ends, vs.between, vs.ends + vs.between ? vs.t_sum / (vs.ends + vs.between) : -1.0, vs.dg_ok, vs.dg_pairs, vs.cut_pairs, vs.ms[0], vs.ms[1], vs.ms[2], vs.ms[3], vs.ms[4]);
             vs = {}; vs.t0 = now;
         }
-        if (a && !b->resolved) { bool allow = false; lap(5); if (!EvaluateResolve(f, b, allow)) break; lap(3); b->resolved = true; b->gen_ok = allow && b->interpolate; ++vs.dg_pairs; vs.dg_ok += b->gen_ok; vs.cut_pairs += !b->interpolate; }
+        if (a && !b->resolved) { bool allow = false; lap(4); if (!EvaluateResolve(f, b, allow)) break; lap(2); b->resolved = true; b->gen_ok = allow && b->interpolate; ++vs.dg_pairs; vs.dg_ok += b->gen_ok; vs.cut_pairs += !b->interpolate; }
         if (a && b->gen_ok)
         {
             // DLSS-G's frames sit at i/(gens+1): show the nearest - at 24 fps on 240 Hz that is an even
@@ -628,9 +631,9 @@ static void VideoPresent(Fg* f)
             ID3D12Resource* tex = i <= 0 ? a->real : i >= steps ? b->real : b->gen[i - 1];
             if (tex == shown_tex) continue;
             const bool gen = i > 0 && i < steps;
-            lap(5);
-            if (!Present(f, tex, i <= 0 ? a : b, i >= steps, gen)) break;   // generated: after b's evaluate, else after the render
             lap(4);
+            if (!Present(f, tex, i <= 0 ? a : b, i >= steps, gen)) break;   // generated: after b's evaluate, else after the render
+            lap(3);
             if (gen) ++f->gen_shown;
             shown_tex = tex; f->lw_last = tex; f->dbg = b;
             continue;
@@ -639,7 +642,7 @@ static void VideoPresent(Fg* f)
         if (src)
         {
             if (src->real == shown_tex) continue;   // already on screen
-            lap(5); if (!Present(f, src->real, src, src == b, false)) break; lap(4);
+            lap(4); if (!Present(f, src->real, src, src == b, false)) break; lap(3);
             shown_tex = src->real; f->dbg = b;
             continue;
         }
@@ -652,9 +655,9 @@ static void VideoPresent(Fg* f)
         CsVideoInterp(g, f->sh, cl, a->real, b->real, b->flow, f->mw, f->mh, dst, f->w, f->h, t);
         GpuBarrier(cl, dst, UAV, CSRC); GpuBarrier(cl, a->real, NPSR, CSRC); GpuBarrier(cl, b->real, NPSR, CSRC);
         CopyRects(f, cl, b, b->real, dst);
-        const UINT64 v = GpuCtxEnd(f->ctx);   // A and B were CPU-waited on arrival (WaitRendered)
+        const UINT64 v = GpuCtxEnd(f->ctx);   // A and B had finished rendering when they were taken
         if (!v) { Fail(f, "video submit"); break; }
-        lap(5); if (!PresentAfter(f, dst, b, false, f->ctx.fence, v)) break; lap(4);
+        lap(4); if (!PresentAfter(f, dst, b, false, f->ctx.fence, v)) break; lap(3);
         ++f->gen_shown; f->lw_last = dst; f->dbg = b; shown = b; shown_t = t; shown_tex = dst; k ^= 1;
     }
     { std::lock_guard<std::mutex> lk(f->mu); for (int i = 0; i < nheld; ++i) held[i].s->state = 0; }
