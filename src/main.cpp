@@ -1,6 +1,6 @@
 // JustFlow: capture a window -> DLSS 5 neural rendering -> click-through overlay.
 //   justflow [--ini <file>] [--dump N]        live mode (app settings from justflow.ini, game profile from profiles\*.ini, see PickProfile)
-//   justflow --bench <png|dir> [--frames N] [--work WxH] [--no-present]
+//   justflow --bench <png|dir> [flags]        PNG frames through the live pipeline; flags in RunBench (bench.cpp)
 #include "png.h"
 #include "pipeline.h"
 #include "capture.h"
