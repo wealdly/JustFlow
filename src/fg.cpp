@@ -583,7 +583,10 @@ static void VideoPresent(Fg* f)
     // Moving on the moment it arrived jumped t from ~0.6 back to 0 - a skip in every frame.
     struct Held { FgSlot* s; double t; }; Held held[3]; int nheld = 0;
     double ob = 0, period = 0, lag = 0;   // the newest frame's observed time; source period; arrival lag behind content time
+    double lags[16] = {}; int nlags = 0;   // the last arrival lags (ms)
     const FgSlot* shown = nullptr; float shown_t = -1; int k = 0; ID3D12Resource* shown_tex = nullptr;   // shown/shown_t: the flow path's last frame
+    // every 5 s in the log: what the engine saw and did - the live failures were invisible in the stats
+    struct { UINT wakes = 0, arrivals = 0, no_pair = 0, ends = 0, between = 0, same = 0, dg_pairs = 0, dg_ok = 0, cut_pairs = 0; double t_sum = 0, t0 = 0; } vs; vs.t0 = NowMs();
     const bool flow_only = GetEnvironmentVariableA("JF_VID_FLOW", nullptr, 0) != 0;   // TEST: in-between frames from our flow only (A/B)
     char ev[16]; const float forced = GetEnvironmentVariableA("JF_VID_T", ev, sizeof ev) ? (float)atof(ev) : -1.0f;   // TEST: a fixed t (bench)
     auto release = [&] { { std::lock_guard<std::mutex> lk(f->mu); held[0].s->state = 0; } held[0] = held[1]; held[1] = held[2]; --nheld; f->cv.notify_all(); };
@@ -617,7 +620,12 @@ static void VideoPresent(Fg* f)
             // they are collected when this pair comes on screen - a period later, long finished.
             n->gen_ok = false; n->resolved = true;
             if (f->gens && !flow_only) { if (!Evaluate(f, n, n->interpolate && nheld >= 2)) break; n->resolved = false; }
-            lag = std::max(now - tn, lag - 0.05);   // the worst recent arrival lag, decaying slowly
+            // Arrival lag behind the content clock: the worst of the last 16 frames - any offset between the
+            // capture's timestamps and our clock, either way, plus a margin for jitter. It used to be a running
+            // max decaying 0.05 ms a frame from 0: timestamps 60 ms behind our clock (bench) and live capture
+            // came out as real frames only - in = out. Smoothing it down instead left no margin.
+            lags[nlags++ % 16] = now - tn;
+            lag = lags[0]; for (int i = 1; i < std::min(nlags, 16); ++i) lag = std::max(lag, lags[i]);
         }
         if (!nheld) continue;
         // the shown instant: one period plus the arrival lag plus a refresh behind now, so the frame after
@@ -634,7 +642,15 @@ static void VideoPresent(Fg* f)
             t = b->interpolate ? (float)std::clamp((c - ta) / std::max(tb - ta, 1.0), 0.0, 1.0) : (c < tb ? 0.0f : 1.0f);
         }
         if (forced >= 0 && a) t = forced;
-        if (a && !b->resolved) { bool allow = false; if (!EvaluateResolve(f, b, allow)) break; b->resolved = true; b->gen_ok = allow && b->interpolate; }
+        ++vs.wakes; vs.arrivals += n != nullptr;
+        if (!a || period <= 0) ++vs.no_pair; else { vs.t_sum += t; if (t <= 0.02f || t >= 0.98f) ++vs.ends; else ++vs.between; }
+        if (now - vs.t0 >= 5000.0)
+        {
+            Log("[fg] video: %u refreshes, %u frames in, period %.1f ms, lag %.1f ms | no pair %u, at a real frame %u, between %u (mean t %.2f) | DLSS-G pairs %u/%u, cuts %u",
+                vs.wakes, vs.arrivals, period, lag, vs.no_pair, vs.ends, vs.between, vs.ends + vs.between ? vs.t_sum / (vs.ends + vs.between) : -1.0, vs.dg_ok, vs.dg_pairs, vs.cut_pairs);
+            vs = {}; vs.t0 = now;
+        }
+        if (a && !b->resolved) { bool allow = false; if (!EvaluateResolve(f, b, allow)) break; b->resolved = true; b->gen_ok = allow && b->interpolate; ++vs.dg_pairs; vs.dg_ok += b->gen_ok; vs.cut_pairs += !b->interpolate; }
         if (a && b->gen_ok)
         {
             // DLSS-G's frames sit at i/(gens+1): show the nearest - at 24 fps on 240 Hz that is an even

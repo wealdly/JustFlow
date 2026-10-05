@@ -178,7 +178,9 @@ int RunBench(int argc, char** argv)
         {
             char sv[32]; int sf = -1, sms = 0;
             if (GetEnvironmentVariableA("JF_BENCH_STALL", sv, sizeof sv) && sscanf_s(sv, "%d,%d", &sf, &sms) == 2 && i == sf) Sleep((DWORD)sms);
-            LARGE_INTEGER qf; QueryPerformanceFrequency(&qf); p->cap_qpc = (LONGLONG)((pace_due - 1000.0 / pace) * (double)qf.QuadPart / 1000.0);
+            // TEST JF_BENCH_TS_AHEAD=<ms>: timestamps that run ahead of our clock, as a capture API may stamp them
+            const double ahead = GetEnvironmentVariableA("JF_BENCH_TS_AHEAD", sv, sizeof sv) ? atof(sv) : 0.0;
+            LARGE_INTEGER qf; QueryPerformanceFrequency(&qf); p->cap_qpc = (LONGLONG)((pace_due - 1000.0 / pace + ahead) * (double)qf.QuadPart / 1000.0);
         }
         if (!PipelineFrame(p, tex[last_in], nullptr, 0, i == 0)) { Log("[bench] frame %d failed", i); GpuLogDeviceRemoved(g, "bench"); rc = 2; break; }
         // ponytail: idle after each frame so both lists of the frame retire and get sampled (the
