@@ -1,6 +1,7 @@
 // JustFlow: capture a window -> DLSS 5 neural rendering -> click-through overlay.
 //   justflow [--ini <file>] [--dump N]        live mode (app settings from justflow.ini, game profile from profiles\*.ini, see PickProfile)
 //   justflow --bench <png|dir> [--frames N] [--work WxH] [--no-present]
+#include "png.h"
 #include "pipeline.h"
 #include "capture.h"
 #include "log.h"
@@ -476,6 +477,17 @@ static void SameTest(Pipeline* p, UINT64 f1, bool& dup, bool& cut)
                 dsum += (UINT)best;
             }
         cut = dsum > 0.03 * 255.0 * n;
+        // TEST JF_CUT_DUMP=<dir>: each detected cut -> <dir>\cut_NNNN_<metric>.png, previous | current tile grid
+        static char cdir[260] = {}; static const bool cdump = GetEnvironmentVariableA("JF_CUT_DUMP", cdir, sizeof cdir) != 0;
+        if (cdump && cut)
+        {
+            static int ncut = 0; std::vector<uint8_t> rgba((size_t)tw * 2 * th * 4, 255);
+            for (UINT y = 0; y < th; ++y)
+                for (UINT x = 0; x < tw * 2; ++x)
+                { const uint8_t v = x < tw ? p->same_prev[y * tw + x] : cur[y * tw + x - tw]; uint8_t* o = &rgba[((size_t)y * tw * 2 + x) * 4]; o[0] = o[1] = o[2] = v; }
+            wchar_t path[300]; _snwprintf_s(path, _TRUNCATE, L"%hs\\cut_%04d_%03d.png", cdir, ncut++, (int)(1000.0 * dsum / (255.0 * n)));
+            SavePngRgba(path, rgba.data(), tw * 2, th);
+        }
     }
     p->same_prev.swap(cur);
 }
