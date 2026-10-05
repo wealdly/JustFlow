@@ -37,39 +37,22 @@ std::wstring ExeDir()
     return p;
 }
 
-// [nr] work=auto. The model runs on a downscaled copy and its edit is composed back up, so the
-// RATIO to the native size matters more than the pixel count. Measured against the model's own edit
-// at native 4K, on two unrelated test frames:
+// [nr] work=auto: the divisor 1..4 of the capture nearest 1080 lines, rounded (ties go to the larger): 4K ->
+// 1920x1080, 1440p -> 2560x1440, 1080p -> 1920x1080. The model is scale-sensitive (by content, not monotonically;
+// the resampling is innocent). Against its own edit at native 4K, on two test frames:
 //     work        cost     fidelity (r)    strength
 //   2560x1440   5.65 ms    0.80 / 0.49    144% / 70%     <- 1.5x: a non-integer resample both ways
 //   1920x1080   3.79 ms    0.88 / 0.67    106% / 103%    <- 2x: exact
 //   1280x720    2.58 ms    0.73 / 0.55
 //    960x540    2.30 ms    0.44 / 0.53    (cost has a ~1.8 ms floor; below 720p it buys almost nothing)
-// 1080p beat 1440p on BOTH axes on those two frames. A third (tools/scene) reversed the fidelity order
-// (1440p 62%, 1080p 53% of the native edit), and replacing our downscale AND upscale with offline Lanczos /
-// bicubic moved no size by more than 2 points: the resampling is innocent, the model is scale-sensitive,
-// non-monotonically and by content. Cost still decides for 1080p; only native is reliably faithful. So auto is the divisor 1..4 of the native size
-// nearest 1080 lines, rounded (ties go to the larger): 4K -> 1920x1080, 1440p -> 2560x1440 (1:1, exact),
-// 1080p -> 1920x1080. It used to come from justflow.spike.ini, where the spike had picked 2560x1440
-// on evaluate time alone - and the capture size was not even known when it was read.
-//
-// The loss at a small work size is the model behaving differently at the wrong scale, not missing input:
-// a 640x360 edit could carry 77-90% of the native-4K edit, a 1080p one 87-99%, and we get 53-89%. What does
-// recover it is spending the same budget in TIME instead: on a moving tools/scene sequence, share of the
-// every-frame 4K edit reproduced -
-//   1920x1080 every frame   57%   (3.8 ms/frame)       3840x2160 model_every=4   81%   (12.2 ms / 4 = 3.0)
-//   1920x1080 model_every=3 49%                        3840x2160 model_every=6   76%
-// The edit is low-frequency, so it survives being motion-warped for several frames. NOT the default: the
-// bench cannot see what a 12 ms evaluate does to a game sharing the GPU. It is work=native + model_every,
-// which the Balanced and Quality presets select (settings.cpp).
+// The same budget spent in time does better (4K with model_every=4: 81% of the every-frame 4K edit; 1080p every
+// frame: 57%), but a 12 ms evaluate shares the game's GPU: that is the Balanced/Quality presets' call (settings.cpp).
 static void WorkAuto(Config& c, UINT w, UINT h)
 {
     if (!c.work_auto || !w || !h) return;
     float s = c.work_scale;   // divisor of the capture (work=50% -> 2); auto picks one: 1..4, nearest 1080 lines
-    // Any divisor, rounded: CsDownscale is an exact area filter over fractional footprints. Exact
-    // divisors only gave a 3840x2159 window (Chrome unfocused) no candidate but 1 - the model at 4K.
-    // (the search must not test `s` itself: setting it on the first candidate ended the loop at 100% -
-    // auto ran the model at native 4K, 12 ms instead of 4, from 10a3c24 until this)
+    // Any divisor, rounded: CsDownscale is an exact area filter over fractional footprints (exact divisors left
+    // a 3840x2159 window only 1). The search must not test `s` itself (WorkSelfTest).
     if (s < 1.0f)
     {
         UINT best = 1, best_d = ~0u;
@@ -83,7 +66,7 @@ static void WorkAuto(Config& c, UINT w, UINT h)
     c.work_w = std::max(64u, (UINT)(w / s + 0.5f)); c.work_h = std::max(64u, (UINT)(h / s + 0.5f));
 }
 
-// The work-size rule, checked ([log] selftest=1, bench): auto lost its search once and ran 4K at 100%.
+// The work-size rule against known answers ([log] selftest=1, bench).
 bool WorkSelfTest()
 {
     struct { const char* work; float scale; UINT w, h, ew, eh; } k[] = {
@@ -101,8 +84,7 @@ bool WorkSelfTest()
 
 void ResolveWork(Config& c, const std::wstring& dir)
 {
-    // The spike file still supplies the machine-level parameter block; the work SIZE is no longer its
-    // business (see WorkAuto). An explicit work=WxH in the profile is left exactly as written.
+    // The spike file supplies only the machine-level parameter block; the work size is WorkAuto's.
     const std::wstring ini = dir + L"\\justflow.spike.ini";
     if (c.work_auto) c.param_block = (int)GetPrivateProfileIntW(L"spike", L"param_block", c.param_block, ini.c_str());
 }
@@ -646,10 +628,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
 
     // ---- list 1: swizzle, gray, downscale, gray -> OFA input --------------------------------------
     if (wait_fence) g.queue->Wait(wait_fence, wait_value);
-    // Timestamps live in the ring slot GpuBegin is about to reset. Under GPU load nothing has retired
-    // by the time the after-submit read runs, so every slot was being wiped unread: all stages came
-    // back -1 and the HUD showed "NR 0.0 ms" exactly when the numbers mattered. GpuBegin waits for
-    // this slot to retire anyway - wait here first, read it, and nothing is lost or added.
+    // Before every GpuBegin: it resets the ring slot that holds unread timestamps (under GPU load nothing has
+    // retired by the after-submit read). GpuBegin waits for the slot anyway - wait here, read it, nothing is lost.
     auto harvest = [&] { if (!c.gpu_timestamps) return; const UINT64 v = g.alloc_fence[g.slot]; if (v) GpuWait(g, g.fence, v, 2000); PipelineReadStamps(p); };
     double tw = NowMs();
 
@@ -675,10 +655,9 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         SameTest(p, f0, dup, cut);
     }
     else p->same_prev.clear();   // the previous frame is not comparable across a reset
-    // Only while the picture on screen is final: a model still warming up (or without a residual yet), or
-    // one that has just published a newer residual, needs the frame - a paused video kept the plain image.
-    // The model is not handed a repeat it has already seen (a published residual feeding the next repeat
-    // back to it kept it evaluating one still picture forever).
+    // A repeat is dropped only while the picture on screen is final: a model still warming up (or without a
+    // residual yet), or one that has just published a newer one, needs the frame. But the model is not handed a
+    // repeat it has already seen, or it would evaluate one still picture forever.
     const bool no_handoff = dup && !p->shown_native;
     if (dup && (wait_pub || p->shown_native || c.selftest)) dup = false;   // selftest: the toast test composes one still frame twice
     if (dup) { ++p->dups; return true; }
@@ -693,8 +672,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     GpuBarrier(cl, p->color4k, NPSR, UAV);
     stamp(2 * PS_SWIZZLE); CsSwizzle(g, p->sh, cl, cap, p->color4k, p->w, p->h, p->hdr_white); stamp(2 * PS_SWIZZLE + 1);
     GpuBarrier(cl, p->color4k, UAV, NPSR);
-    // Deband the capture itself, before the model: compressed video's steps were fed to the model, which
-    // sharpened them into detail, and debanded after it. color4k stays the raw capture (CsSame compares it).
+    // Deband the capture itself, before the model (which sharpens compression steps into detail). color4k
+    // stays the raw capture (CsSame compares it).
     // ponytail: the UI rects are the last compose's (rect_tex is uploaded in list 2) - one frame behind.
     ID3D12Resource* src4k = p->color4k;
     if (c.filters_enabled && c.deband > 0)
@@ -717,9 +696,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     GpuBarrier(cl, p->nr_in, NPSR, UAV);
     stamp(2 * PS_GRAYDS);
     if (need_mv) CsGray(g, p->sh, cl, p->color4k, p->w, p->h, p->gray, p->gw, p->gh);
-    // Only the model reads nr_in. Without it (FG-only, the default), the compose takes the native
-    // path and never samples it, so this area filter would be dead work - and none of it while the
-    // layer is switched off (F9), when the compose shows native.
+    // Only the sync model reads nr_in: the native compose never samples it.
     if (!async && model_on) CsDownscale(g, p->sh, cl, src4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
     stamp(2 * PS_GRAYDS + 1);
     GpuBarrier(cl, p->nr_in, UAV, NPSR);
@@ -832,20 +809,14 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         GpuBarrier(cl, flow3, NPSR, COMMON);
     }
 
-    // Self-heal: a ready feature at the wrong size (NrEvaluate refuses it) schedules the ordinary
-    // rebuild, which reallocates and recreates in step. Without this a mismatch would sit on native
-    // forever, because nothing else would notice.
-    // Not while a create is already pending - that create IS the heal, and re-arming the countdown
-    // here starved it forever (the create waits for countdown == 0). --rework in bench caught that.
+    // Self-heal: a ready feature at the wrong size (NrEvaluate refuses it) schedules the ordinary rebuild,
+    // which reallocates and recreates in step. Not while a create is pending: that create IS the heal, and
+    // re-arming the countdown would starve it (the create waits for countdown == 0; bench --rework).
     if (!async && model_on && NrReady(p->nr) && !NrMatches(p->nr, p->ww, p->wh) && p->rebuild_countdown == 0 && !p->create_pending)
     { Log("[nr] feature size does not match the %ux%u work textures - rebuilding", p->ww, p->wh); p->rebuild_countdown = 1; }
-    // Not while a rebuild is counting down: that rebuild reallocates the work textures and then
-    // sets create_pending itself. Creating here used the NEW config size against the OLD textures.
-    // NOT gated on !NrReady: a rebuild leaves the old feature ready, and that gate meant the rebuild
-    // set create_pending, toasted "Rebuilding model" and then never recreated anything - every live
-    // change to a create-latched key (work size, style, local tone/structure) was silently ignored
-    // in sync mode. NrCreate retires the old feature itself, and this branch returns before any
-    // evaluate, so create and evaluate still never share a list.
+    // Not while a rebuild counts down (it reallocates the work textures, then sets create_pending). Not gated
+    // on !NrReady: a rebuild leaves the old feature ready, and NrCreate retires it. The create list returns
+    // before any evaluate: create and evaluate never share a list.
     if (!async && model_on && p->create_pending && p->rebuild_countdown == 0)
     {
         p->create_pending = false;
@@ -867,8 +838,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         else
         {
             if ((p->eval_fails++ % 120) == 0) Log("[nr] evaluate -> 0x%08X (%s) %s", r, NgxResultName(r), NrLastError(p->nr));
-            // Paying for a model that never answers is worse than none: after 30 in a row, off until the
-            // next create (reload, resize, rebuild), and say so.
+            // after 30 in a row, off until the next create (reload, resize, rebuild)
             if (p->eval_fails == 30) { p->model_dead = true; PipelineToast(p, "DLSS model failing (0x%08X) - off until reload", r); }
         }
     }
@@ -916,19 +886,17 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // Three layers, three independent switches, and none of them reaches into another:
     //
     //   capture -> deband ([filters] deband, F6)   compression steps, before the model sees them.
-//           -> NEURAL ([nr] enabled, F9)      the DLSS model, at work resolution,
+    //           -> NEURAL ([nr] enabled, F9)      the DLSS model, at work resolution,
     //                                             composed back as a residual at native resolution.
     //           -> FILTERS ([filters] enabled, F6) sharpen then vibrance, at native resolution.
-    //           -> UI rects + text                the addon mask and the HUD/toasts.
+    //           -> UI rects                       the addon mask (kept out of every layer).
     //           -> FRAME GEN ([fg] enabled, F8)   interpolates the finished frame; the UI is copied
-    //                                             back onto the generated ones.
+    //                                             back onto the generated ones. The HUD/toasts go over
+    //                                             every presented frame (PipelineUi).
     //
-    // The order is not arbitrary. Sharpening has to see what the model produced or it sharpens the
-    // wrong image, vibrance grades after the sharpen rather than feeding it exaggerated contrast,
-    // text goes on after both so it stays crisp, and FG runs last because it interpolates the frame
-    // as the viewer sees it. Every combination is valid: any layer off just passes its input through.
-    // Vibrance used to live inside the neural compose, which meant it silently died with the neural
-    // layer while sharpen carried on - that is the bug this layout exists to prevent.
+    // Sharpening has to see what the model produced, vibrance grades after the sharpen rather than feeding
+    // it exaggerated contrast, and FG interpolates the frame as the viewer sees it. Any layer off passes its
+    // input through; none reaches into another (vibrance in the neural compose died with that layer).
     ID3D12Resource* shown = compose_dst;
     if (filt)
     {
@@ -946,8 +914,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     GpuBarrier(cl, shown, UAV, CSRC);
     p->shown = shown;
     // the presenter thread presents (passthrough or generation); --no-present has no Fg
-    // engine=latewarp: Frame Warp holds still what does not move with the camera (a third-person
-    // character, anything moving on its own) - warping it by the camera's rotation smudged its edges.
+    // engine=latewarp: Frame Warp holds still what does not move with the camera (a third-person character),
+    // or the camera's rotation smudges it.
     if (fg_dst && lw_fg && need_pair0 && !reset)
         if (ID3D12Resource* m = FgMaskTarget(p->fg))
         {
@@ -1004,8 +972,6 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
 // ---- live mode ----------------------------------------------------------------------------------------
 static HWND FindTarget(const Config& c)
 {
-    // Both empty matches the FIRST window on the desktop, which is how a profile-less start would
-    // attach itself to something arbitrary. A profile that names nothing targets nothing.
     // Full desktop: the desktop window stands for the primary monitor - DDA duplicates its output, WGC
     // captures the monitor, the overlay covers it and never hides for a foreground change.
     if (c.desktop) return GetDesktopWindow();
@@ -1061,13 +1027,11 @@ std::wstring PickProfile(const std::wstring& dir, const std::wstring& ini, std::
     if (h != INVALID_HANDLE_VALUE) { do names.push_back(Stem(fd.cFileName)); while (FindNextFileW(h, &fd)); FindClose(h); }
     std::sort(names.begin(), names.end());
     auto find = [&](const std::wstring& n) { for (size_t i = 0; i < names.size(); ++i) if (!_wcsicmp(names[i].c_str(), n.c_str())) return (int)i; return -1; };
-    // A path with either slash is a path: "C:/x/y.ini" used to be read as a name in dir, missed, and
-    // silently gave defaults.
+    // a path with either slash is a path ("C:/x/y.ini"), anything else a name in dir
     if (!ini.empty()) { index = find(Stem(ini)); return ini.find_first_of(L"\\/") != std::wstring::npos ? ini : dir + L"\\" + ini; }
     if (names.empty()) return L"";
     Config a; ConfigLoad((dir + L"\\justflow.ini").c_str(), nullptr, a);   // [app] profile=<name> pins the startup profile
-    // none = start attached to nothing. The tray picks one, or "New profile from window..."
-    // generates one. JustFlow should not grab a game the user did not ask it to.
+    // none = start attached to nothing (the tray picks or generates one): no grabbing an unasked-for game
     if (_wcsicmp(a.profile.c_str(), L"none") == 0) { index = -1; return L""; }
     if (!a.profile.empty() && _wcsicmp(a.profile.c_str(), L"auto") != 0)
     {
@@ -1112,14 +1076,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 static int RealMain(int argc, char** argv)
 {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    // 1 ms timer resolution. Windows' default is 15.6 ms, and a Sleep(1) that waited a whole 15.6 ms
-    // in the capture loop was the single worst bug of this project - it stalled a frame every time
-    // the cursor moved. The same granularity applies to condition_variable timed waits, which is how
-    // the presenter paces when vblank pacing is unavailable: a 4.17 ms deadline would become 15.6 ms
-    // and the fallback would be worse than no pacing at all. Per-process since Win10 2004, so this
-    // does not change the timer for the rest of the system.
-    // Fail-safe: if it fails we are exactly where we were, and the vblank path does not need it.
-    // Reported after LogInit, not here - a silent failure is what made the Sleep(1) bug take a day.
+    // 1 ms timer resolution (per-process since Win10 2004): the default 15.6 ms granularity also applies to the
+    // condition_variable waits the presenter paces with when vblank pacing is unavailable. A failure is
+    // harmless but logged (after LogInit).
     const bool timer_1ms = timeBeginPeriod(1) == TIMERR_NOERROR;
     int dump = 0, preset = -1; bool settings_only = false;
     std::wstring ini_arg;   // --ini <file>: an explicit profile (next to the exe, or a path); else PickProfile
@@ -1145,10 +1104,8 @@ static int RealMain(int argc, char** argv)
     const int have = ConfigLoad(app_path.c_str(), ini_path.c_str(), cfg);
     // Standalone settings: dodge the game's monitor too, in case it is already running.
     if (settings_only) return SettingsDialog(nullptr, app_path.c_str(), ini_path.c_str(), L"JustFlow", FindTarget(cfg)) ? 0 : 1;
-    // One LIVE instance only. Two of them both open Desktop Duplication, both put a topmost overlay
-    // on the same window and both present to the same display - they fight, and every number in the
-    // log becomes meaningless. Held for the life of the process; --settings / --preset / --bench are
-    // short-lived tools and are deliberately not covered (they return above this).
+    // One LIVE instance only (two would fight over the capture, the overlay and the display). Held for the life
+    // of the process; --settings / --preset / --bench are short-lived tools and return above this.
     HANDLE only_one = CreateMutexW(nullptr, TRUE, L"Local\\JustFlow.SingleInstance");
     if (!only_one || GetLastError() == ERROR_ALREADY_EXISTS)
     {
@@ -1480,25 +1437,16 @@ static int RealMain(int argc, char** argv)
                 // overlay must hide promptly (OverlayFollow throttles its own geometry query to 50 ms).
                 OverlayFollow(p->ov, cfg.reassert_topmost_every);
                 PipelineUi(p);   // the HUD and toasts keep updating with no new frame (a paused video)
-                // No sleep here. CaptureAcquire already blocks on its own timeout (AcquireNextFrame /
-                // the frame event), and every early return runs after that wait, so this cannot spin.
-                // The Sleep(1) that was here stalled the capture loop on every MOUSE MOVE: Desktop
-                // Duplication reports a cursor-only update (LastPresentTime == 0), we skip it, and without
-                // timeBeginPeriod a Sleep(1) waits for the next 15.6 ms scheduler tick - so the real game
-                // frame behind it sat waiting. Moving the mouse is exactly when FG matters, and it turned
-                // into irregular capture, a jittery content interval, drops and warping. The stall was
-                // after acq_ms and before cpu_ms, so no stat ever showed it.
+                // No sleep: CaptureAcquire blocks on its own timeout, so this cannot spin, and a Sleep here
+                // delays the real frame behind every cursor-only update.
                 continue;
             }
             p->hdr_white = CaptureSdrWhite(cap);   // an HDR desktop duplicated as FP16: converted in the swizzle
             if (CaptureIsFloat(cap) && p->hdr_white <= 0) { Log("[main] FP16 (HDR) window capture is not supported - exiting"); quit = true; rc = 2; break; }
             LARGE_INTEGER acq; QueryPerformanceCounter(&acq);
             const double t0 = NowMs();
-            // max_fps: a GPU-bound game (Dawnwalker with 3X FG presents ~135 fps) would otherwise get a
-            // full pipeline pass per presented frame and lose the GPU time. Drop frames above the cap.
-            // Tolerant limiter: a frame that arrives a little early on capture jitter is still taken, and the
-            // schedule advances by whole periods so 90 fps in stays 90 fps through (a strict "< period"
-            // test rejected every early frame and turned a 90 fps capture into ~60).
+            // max_fps: drop frames above the cap, so a GPU-bound game keeps its GPU time. Tolerant: a frame a little
+            // early on capture jitter is still taken, and the schedule advances by whole periods (90 in stays 90).
             if (cfg.max_fps > 0)
             {
                 const double period = 1000.0 / cfg.max_fps;
@@ -1529,11 +1477,9 @@ static int RealMain(int argc, char** argv)
                 char capstr[12]; if (cfg.max_fps > 0) sprintf_s(capstr, "%d", cfg.max_fps); else strcpy_s(capstr, "none");
                 snprintf(p->hud_line[0], sizeof p->hud_line[0], "in %.0f  out %.0f  age %.0f ms  acq %.1f ms  cap %s", cap_fps, out_fps, std::max(0.0, age), std::max(0.0, hud_acq.med()), capstr);
                 hud_acq.v.clear();
-                // snprintf, not sprintf_s: an overflow here must clip the HUD, not fast-fail the
-                // process (sprintf_s calls the invalid-parameter handler, which is a hard kill).
+                // snprintf, not sprintf_s: an overflow must clip the HUD, not fast-fail the process.
+                // The line shows which LAYERS are live, not which settings are set.
                 char nr[48];
-                // Which LAYERS are live, not which settings are set: the three switches are
-                // independent, so the HUD has to be able to say "neural off, filters on, FG on".
                 if (!p->cfg.nr_enabled) strcpy_s(nr, "neural off");
                 else if (!p->nr) strcpy_s(nr, "neural: no model");
                 else if (cfg.nr_async)

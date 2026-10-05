@@ -19,19 +19,16 @@
 struct StageStats
 {
     std::vector<double> v;
-    // Bounded: every one of these is drained by the [stats] tick, so with stats off nothing
-    // would ever clear them. 4096 samples is ~45 s at 90 fps, far more than any percentile
-    // needs, and the cap costs a compare. (fg.cpp bounds its own ring the same way.)
+    // Bounded: only the [stats] tick drains these, so with stats off nothing would clear them
+    // (4096 samples is ~45 s at 90 fps; fg.cpp bounds its own ring the same way).
     void   add(double x) { if (x >= 0 && v.size() < 4096) v.push_back(x); }
     double pct(double p) const;   // -1 when empty
     double med() const { return pct(0.5); }
     double p95() const { return pct(0.95); }
 };
 
-// PS_LIST1/PS_LIST2 are whole-submission spans, so they count the barriers and the copies that no
-// per-stage stamp covers. They cannot be one span: GpuEnd advances the ring slot and GpuBegin
-// clears it, so a pair cannot cross a submission. Real frame cost is LIST1 + ofa + LIST2 - the old
-// frame_gpu_ms was a sum of stages with OFA excluded, which reported a fraction of the frame.
+// PS_LIST1/PS_LIST2 are whole-submission spans (barriers and copies included); a stamp pair cannot cross
+// a submission, so the real frame cost is LIST1 + ofa + LIST2.
 // The GPU-timed stages, in stamp-pair order: stage i is bracketed by stamps 2i and 2i+1 (PipelineReadStamps
 // reads the first PS_STAMPED pairs in one loop). PS_OFA / PS_OFA2 come last: bench only, a CPU round trip.
 enum PipeStage { PS_SWIZZLE, PS_GRAYDS, PS_EVAL, PS_COMPOSE, PS_EXPAND, PS_FILTER, PS_LIST1, PS_LIST2, PS_STAMPED, PS_OFA = PS_STAMPED, PS_OFA2, PS_COUNT };
@@ -164,7 +161,7 @@ void PipelineUi(Pipeline* p);
 bool PipelineResize(Pipeline* p, UINT w, UINT h);
 // Hot reload: compose params apply next frame; a create-latched change schedules a debounced rebuild.
 void PipelineReload(Pipeline* p, const Config& c);
-// Toast `fmt` (printf) top-centre for 2 s (drawn by the next PipelineFrame while [ui] toast=1). Main thread only.
+// Toast `fmt` (printf) top-centre for 2 s (drawn by PipelineUi while [ui] toast=1). Main thread only.
 void PipelineToast(Pipeline* p, const char* fmt, ...);
 // Pull retired GPU timestamps into p->st (called inside PipelineFrame; call once more after idle).
 void PipelineReadStamps(Pipeline* p);
