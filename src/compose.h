@@ -83,6 +83,9 @@ inline int TextBoxH(int scale, int pad) { return 8 * scale + 2 * pad; }
 // (CAS-style, strength 0..1) and THEN vibrance (saturation, 1 = untouched) - grading last, so the
 // sharpener never amplifies colour it just pushed. Pixels inside the first `nrects` rects of the
 // rect texture (as uploaded by the compose recorded earlier in the same list) pass through both.
+// Deband (deband.hlsl, haasn's mpv algorithm): src -> dst (RGBA8 w x h, UAV), strength 0..2 (1 = default),
+// UI rects (rect_tex, nrects) pass through. seed varies the grain per frame.
+void CsDeband(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* dst, UINT w, UINT h, float strength, UINT nrects, UINT seed);
 void CsSharpen(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* dst, UINT w, UINT h,
                float strength, float saturation, UINT nrects);
 

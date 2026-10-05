@@ -122,6 +122,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.filters_enabled = B(L"filters", L"enabled", c.filters_enabled);
     c.sharpen = F(L"filters", L"sharpen", F(L"nr", L"sharpen", c.sharpen));
     c.saturation = F(L"filters", L"saturation", F(L"nr", L"saturation", c.saturation));
+    c.deband = F(L"filters", L"deband", c.deband);
     c.warmup = I(L"nr", L"warmup", c.warmup);
     c.rebuild_debounce_frames = I(L"nr", L"rebuild_debounce_frames", c.rebuild_debounce_frames);
     c.max_fps = I(L"nr", L"max_fps", c.max_fps);

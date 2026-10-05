@@ -175,12 +175,13 @@ static bool AllocNative(Pipeline* p)
     p->gray = GpuMakeTex(g, p->gw, p->gh, DXGI_FORMAT_R8_UNORM, FUAV, UAV, L"gray");
     p->out4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, D3D12_RESOURCE_STATE_COPY_SOURCE, L"out4k");
     p->sharp4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, D3D12_RESOURCE_STATE_COPY_SOURCE, L"sharp4k");
+    p->deb4k = GpuMakeTex(g, p->w, p->h, DXGI_FORMAT_R8G8B8A8_UNORM, FUAV, NPSR, L"deb4k");
     p->shown = p->out4k;
     p->same_w = (p->w + 63) / 64; p->same_h = (p->h + 63) / 64; p->same_pitch = AlignUp(p->same_w * 2, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
     p->same = GpuMakeTex(g, p->same_w, p->same_h, DXGI_FORMAT_R8G8_UNORM, FUAV, CSRC, L"same");
     p->same_rb = GpuMakeBuffer(g, (UINT64)p->same_pitch * p->same_h, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"same_rb");
     if (p->w % p->gw || p->h % p->gh) Log("[main] warning: gray block %ux%u -> %ux%u is not integer", p->w, p->h, p->gw, p->gh);
-    return p->color4k && p->gray && p->out4k && p->sharp4k && p->same && p->same_rb;
+    return p->color4k && p->gray && p->out4k && p->sharp4k && p->deb4k && p->same && p->same_rb;
 }
 
 static bool AllocWork(Pipeline* p)
@@ -379,7 +380,7 @@ void PipelineDestroy(Pipeline* p)
     StopModel(p);
     GpuWaitIdle(*p->g);
     if (p->fg) FgDestroy(p->fg);
-    REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->nr_in); REL(p->nr_out); REL(p->mv);
+    REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->deb4k); REL(p->nr_in); REL(p->nr_out); REL(p->mv);
     REL(p->model_src); ReleaseModelWork(p);
     for (auto& r : p->strip_rb) REL(r);
     REL(p->mvgrid); for (auto& r : p->mvgrid_rb) REL(r); REL(p->same); REL(p->same_rb);
@@ -399,7 +400,7 @@ bool PipelineResize(Pipeline* p, UINT w, UINT h)
     StopModel(p);   // restarted lazily by the next frame (model_src is native-sized)
     GpuWaitIdle(*p->g);
     DropFg(p);   // sized to the output; recreated on the next frame
-    REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->model_src); REL(p->same); REL(p->same_rb);
+    REL(p->color4k); REL(p->gray); REL(p->out4k); REL(p->sharp4k); REL(p->deb4k); REL(p->model_src); REL(p->same); REL(p->same_rb);
     p->w = w; p->h = h;
     p->force_reset = true;
     {   // a new native size can change what auto means; the ordinary rebuild reallocates and recreates in step
@@ -841,7 +842,16 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         ID3D12Resource* const filt_dst = fg_dst ? fg_dst : p->sharp4k;
         GpuBarrier(cl, p->out4k, UAV, NPSR);
         GpuBarrier(cl, filt_dst, CSRC, UAV);
-        stamp(2 * PS_FILTER); CsSharpen(g, p->sh, cl, p->out4k, filt_dst, p->w, p->h, c.sharpen, c.saturation, (UINT)cp.nrects); stamp(2 * PS_FILTER + 1);   // rect_tex holds this frame's rects (compose above)
+        stamp(2 * PS_FILTER);
+        ID3D12Resource* sharp_src = p->out4k;   // deband first: sharpening would harden the bands
+        if (c.deband > 0)
+        {
+            GpuBarrier(cl, p->deb4k, NPSR, UAV);
+            CsDeband(g, p->sh, cl, p->out4k, p->deb4k, p->w, p->h, c.deband, (UINT)cp.nrects, p->frame_index * 0x9E3779B9u);
+            GpuBarrier(cl, p->deb4k, UAV, NPSR);
+            sharp_src = p->deb4k;
+        }
+        CsSharpen(g, p->sh, cl, sharp_src, filt_dst, p->w, p->h, c.sharpen, c.saturation, (UINT)cp.nrects); stamp(2 * PS_FILTER + 1);   // rect_tex holds this frame's rects (compose above)
         GpuBarrier(cl, p->out4k, NPSR, CSRC);
         shown = filt_dst;
     }

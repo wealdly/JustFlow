@@ -87,9 +87,11 @@ const Setting kSettings[] = {
 
     // ---- 1 Filters: ordinary post passes, independent of the neural layer ----------------------
     { 1, L"filters", L"enabled",      L"Filter layer (F6, all profiles)",  Bool,  nullptr, L"0",
-      L"Turns the sharpen and vibrance passes on or off, for every profile. They cost well under 1 ms and run after the neural layer." },
+      L"Turns the deband, sharpen and saturation passes on or off, for every profile. They run after the neural layer: 0.1 ms at 4K, 0.5 ms with deband." },
+    { 1, L"filters", L"deband",       L"Deband",             Float, nullptr, L"0.0",
+      L"Smooths the visible steps (banding) that compression leaves in skies, shadows and other gradients, before the sharpening. 0 = off, 1 = default, up to 2. Real edges are left alone; a fine grain keeps the smoothed gradient from banding again." },
     { 1, L"filters", L"sharpen",      L"Sharpen",            Float, nullptr, L"0.0",
-      L"Contrast-adaptive sharpening. 0 = off, 0.2-0.5 is subtle; higher can leave halos on edges." },
+      L"AMD FSR1 RCAS sharpening: each pixel is sharpened as far as it can go without clipping, and grain or compression noise is left alone. 0 = off, 0.3-0.5 is natural, 1 = maximum." },
     { 1, L"filters", L"saturation",   L"Vibrance",           Float, nullptr, L"1.0",
       L"Vibrance: lifts muted colours more than ones that are already strong. 1.0 = unchanged." },
 

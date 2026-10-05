@@ -63,7 +63,8 @@ struct Config
     // reaches into another: [nr] enabled, [filters] enabled, [fg] enabled. `enabled` is a bypass
     // that KEEPS the tuned values, so a filter A/B does not cost you the numbers you arrived at.
     bool  filters_enabled = false;
-    float sharpen = 0.0f;                  // CAS-style sharpen after the compose, 0 = off (0.3-0.5 typical); live (F11)
+    float sharpen = 0.0f;                  // RCAS sharpen after the compose, 0 = off (0.3-0.5 typical); live (F11)
+    float deband = 0.0f;                   // [filters] deband before the sharpen, 0 = off, 1 = default; live
     // [ofa]
     UINT  ofa_w = 960, ofa_h = 540;
     int   ofa_grid = 0;
@@ -119,7 +120,7 @@ std::wstring ConfigStrayKeys(const wchar_t* profile);
 bool ConfigIsAppKey(const wchar_t* sec, const wchar_t* key);
 // True if a key that is latched at CreateFeature differs (work size, style, block, tuning).
 // The filter layer is live: switched on AND with something in it.
-inline bool FiltersLive(const Config& c) { return c.filters_enabled && (c.sharpen > 0 || c.saturation != 1.0f); }
+inline bool FiltersLive(const Config& c) { return c.filters_enabled && (c.sharpen > 0 || c.deband > 0 || c.saturation != 1.0f); }
 bool ConfigNeedsRebuild(const Config& a, const Config& b);
 // True if a key that is only read when the capture and the overlay are created differs, so a
 // reload has to tear the pipeline down and build it again. Deliberately NOT exclude_from_capture:

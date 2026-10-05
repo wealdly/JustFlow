@@ -13,6 +13,7 @@
 #include "cs_nowarp.h"
 #include "cs_same.h"
 #include "cs_vinterp.h"
+#include "cs_deband.h"
 #include "cs_text.h"
 #include "cs_sharpen.h"
 #include <algorithm>
@@ -21,7 +22,7 @@
 
 struct Shaders
 {
-    ComputePso swizzle, gray, downscale, expand, compose, residual, compose_residual, text, sharpen, warp, mvgrid, nowarp, same, vinterp;
+    ComputePso swizzle, gray, downscale, expand, compose, residual, compose_residual, text, sharpen, warp, mvgrid, nowarp, same, vinterp, deband;
     // UI rects for compose: 256x1 R32_SINT texture (64 rects x 4), refilled from a per-slot upload
     // buffer inside CsCompose (recorded into the caller's list; nothing blocks).
     ID3D12Resource* rect_tex = nullptr;
@@ -86,6 +87,7 @@ Shaders* ShadersCreate(Gpu& g)
     ok &= GpuMakeCompute(g, g_cs_nowarp, sizeof g_cs_nowarp, 1, 1, 6, s->nowarp, L"cs_nowarp");
     ok &= GpuMakeCompute(g, g_cs_same, sizeof g_cs_same, 2, 1, 3, s->same, L"cs_same");
     ok &= GpuMakeCompute(g, g_cs_vinterp, sizeof g_cs_vinterp, 3, 1, 5, s->vinterp, L"cs_vinterp");
+    ok &= GpuMakeCompute(g, g_cs_deband, sizeof g_cs_deband, 2, 1, 8, s->deband, L"cs_deband");
     ok &= GpuMakeCompute(g, g_cs_text,      sizeof g_cs_text,      1, 1, 24, s->text,      L"cs_text");
     ok &= GpuMakeCompute(g, g_cs_sharpen,   sizeof g_cs_sharpen,   2, 1, 5,  s->sharpen,   L"cs_sharpen");
     s->rect_tex = GpuMakeTex(g, kRectInts, 1, DXGI_FORMAT_R32_SINT, D3D12_RESOURCE_FLAG_NONE,
@@ -109,7 +111,7 @@ Shaders* ShadersCreate(Gpu& g)
 void ShadersDestroy(Shaders* s)
 {
     if (!s) return;
-    ComputePso* p[] = { &s->swizzle, &s->gray, &s->downscale, &s->expand, &s->compose, &s->residual, &s->compose_residual, &s->text, &s->sharpen, &s->warp, &s->mvgrid, &s->nowarp, &s->same, &s->vinterp };
+    ComputePso* p[] = { &s->swizzle, &s->gray, &s->downscale, &s->expand, &s->compose, &s->residual, &s->compose_residual, &s->text, &s->sharpen, &s->warp, &s->mvgrid, &s->nowarp, &s->same, &s->vinterp, &s->deband };
     for (ComputePso* x : p) { if (x->pso) x->pso->Release(); if (x->root) x->root->Release(); }
     if (s->rect_tex) s->rect_tex->Release();
     if (s->font_tex) s->font_tex->Release();
@@ -263,6 +265,17 @@ void CsText(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* d
     c.scale = (UINT)scale; c.alpha = alpha < 0 ? 0 : alpha > 1 ? 1 : alpha; c.pad = box_pad; c.len = (UINT)n; c.w = w; c.h = h;
     const GpuView srv = { s->font_tex, DXGI_FORMAT_R8_UINT }, uav = { dst, DXGI_FORMAT_R8G8B8A8_UNORM };
     GpuDispatch(g, cl, s->text, &srv, &uav, &c, GpuGroups((UINT)bw, 8), GpuGroups((UINT)bh, 8));
+}
+
+void CsDeband(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* dst, UINT w, UINT h, float strength, UINT nrects, UINT seed)
+{
+    // strength 1: steps within 2.5 code values smoothed in two iterations reaching mpv's 16 px per 1080
+    // lines (32 at 4K - a wider reach measured no better on a 7-bit 4K gradient), +-0.5 code value of grain
+    const float k = std::clamp(strength, 0.0f, 2.0f);
+    struct { UINT w, h; float threshold, range, grain; UINT iterations, nrects, seed; } c = { w, h, k * 2.5f / 255.0f, 16.0f * h / 1080.0f, k * 1.0f / 255.0f, 2u, std::min(nrects, kMaxRects), seed };
+    const GpuView srv[2] = { { src, DXGI_FORMAT_R8G8B8A8_UNORM }, { s->rect_tex, DXGI_FORMAT_R32_SINT } };
+    const GpuView uav = { dst, DXGI_FORMAT_R8G8B8A8_UNORM };
+    GpuDispatch(g, cl, s->deband, srv, &uav, &c, GpuGroups(w, 8), GpuGroups(h, 8));
 }
 
 void CsSharpen(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* dst, UINT w, UINT h,
