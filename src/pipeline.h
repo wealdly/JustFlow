@@ -85,9 +85,9 @@ struct Pipeline
     double     mask_seen = 0;                    // NowMs() of the last valid decode (0 = never); stale after 1 s
     bool       mask_active = false;              // a fresh mask is being applied (logged on change)
 
-    // ---- on-screen text (CsText onto the frame handed onward): toast (2 s, 0.4 s fade) + status HUD
+    // ---- on-screen text (PipelineUi, onto the overlay's UI layer): toast (2 s, 0.4 s fade) + status HUD
     char       toast[65] = "";
-    double     toast_t0 = 0, toast_until_ms = 0;
+    double     toast_until_ms = 0;
     bool       model_toast_pending = false;      // "Model ready" once a rebuilt model composes
     bool       hud = false;                      // [ui] hud, F7
     std::string ui_key;                          // PipelineUi: what the UI layer shows now (redrawn when it changes)
