@@ -14,8 +14,8 @@ static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_
 static const D3D12_RESOURCE_STATES CSRC = D3D12_RESOURCE_STATE_COPY_SOURCE;
 static const D3D12_RESOURCE_STATES CDST = D3D12_RESOURCE_STATE_COPY_DEST;
 static const D3D12_RESOURCE_STATES COMMON = D3D12_RESOURCE_STATE_COMMON;
-static const int kFrames = 4, kPairs = 3;
 static const D3D12_RESOURCE_STATES PRESENT = D3D12_RESOURCE_STATE_PRESENT;
+static const int kFrames = 4, kPairs = 3;
 
 // Rest states: frame NPSR, pair grids NPSR, backbuffers PRESENT. Guarded by XeFg::mu: every field below except
 // the textures' contents, which the fences order.
@@ -45,9 +45,9 @@ struct XeFg
     std::thread th;
     std::atomic<bool> stop{ false }, failed{ false }, enabled{ true };
     std::atomic<double> margin{ 0.0 }, max_in{ 100.0 };
-    std::atomic<bool>   extrap{ false };
+    std::atomic<bool>   extrap{ false };   // XeFgSetExtrapolate: show the newest frame pushed ahead instead of interpolating behind it
     std::atomic<bool>   vsync{ false };    // XeFgSetVsync: flip on vblank (no tearing) instead of immediately
-    std::atomic<double> lead{ 1.5 };       // vsync: the least lead before the vblank the frame flips on (it adapts up on misses)   // XeFgSetExtrapolate: show the newest frame pushed ahead instead of interpolating behind it
+    std::atomic<double> lead{ 1.5 };       // vsync: the least lead before the vblank the frame flips on (it adapts up on misses)
     // presenter-owned, published under mu for stats
     UINT in = 0, presented = 0, generated = 0, extrapolated = 0, held = 0, early = 0, missed = 0;
     UINT stall_hold = 0, stall_late = 0, stall_other = 0, jumps = 0;   // the smoothness check
@@ -87,11 +87,8 @@ struct DisplayClock
             timer_mode = true; Log("[xefg] no usable vblank wait - pacing on a high-resolution timer");
         }
         const double t0 = NowMs();
-        if (!timer) timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
         if (next < t0) next = t0 + vb;   // (re)anchor after a stall
-        LARGE_INTEGER due; due.QuadPart = -(LONGLONG)((next - t0) * 10000.0);   // relative, 100 ns units
-        if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, 100);
-        else Sleep((DWORD)std::max(1.0, next - t0));
+        SleepUntil(next);
         next += vb;
     }
     // Sleep until `t` on the NowMs clock (high-resolution waitable timer; returns at once if past).
@@ -100,7 +97,7 @@ struct DisplayClock
         const double now = NowMs();
         if (t <= now) return;
         if (!timer) timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-        LARGE_INTEGER due; due.QuadPart = -(LONGLONG)((t - now) * 10000.0);
+        LARGE_INTEGER due; due.QuadPart = -(LONGLONG)((t - now) * 10000.0);   // relative, 100 ns units
         if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, 100);
         else Sleep((DWORD)std::max(1.0, t - now));
     }
@@ -111,23 +108,18 @@ static void Presenter(XeFg* f)
     Gpu& g = *f->g;
     DisplayClock clock; clock.vb = OverlayVBlankMs(f->ov);
     // hold: how far behind now the content time runs. A pair that lands at time s causes no pause only if
-    // the content has not yet passed its start ta, i.e. hold >= s - ta. That need is measured per pair
-    // and hold = the max over the last kNeed pairs - half a refresh + margin: it rises at once when a pair lands late and
-    // falls slowly, so the content never visibly changes speed. It adapts to the cadence: a 45 fps game
-    // on a 120 Hz display lands 16.7 / 25 ms apart, and a fixed margin sized for the 22 ms mean paused
-    // the motion ~7 times a second (measured: margin 3 -> 7.8 held/s, 6 -> 6.4, 9 -> 0).
+    // the content has not yet passed its start ta, i.e. hold >= s - ta. That need is measured per pair and
+    // hold = the max over the last kNeed pairs - half a refresh + margin: a max, not a mean, because a
+    // 45 fps game on 120 Hz lands 16.7 / 25 ms apart and a margin sized for the mean paused the motion.
     static const int kNeed = 64;
     double need[kNeed] = {}; int need_n = 0; double hold = 0; bool have_hold = false;
     // hold_target is what the pairs ask for; hold moves toward it per presented frame - up by at most
-    // 0.5 ms a refresh, so a rise slows the content ~6% for a while instead of freezing it for the whole
-    // step at once (an 8.6 ms rise was a full stalled refresh: the stutter that showed in the test scene).
+    // 0.5 ms a refresh, so a rise slows the content a little for a while instead of freezing a whole refresh.
     double hold_target = 0;
     double interval = 0; bool have_interval = false;   // EMA of tb - ta: the game's frame time
-    // Learned margin on top of that: the half-refresh trim was measured on an idle machine, and under
-    // load (a browser playing video beside the game) pairs land late more often - 20-30 held vblanks a
-    // second. Every pause that ENDS because a late pair arrived (a short one: a paused game or a loading
-    // screen stalls for far longer and must not ratchet the latency up) adds its length; it decays
-    // ~0.1 ms a second, so a machine that calms down gets the latency back.
+    // Learned margin on top (under load pairs land late more often): every SHORT pause that ends because a
+    // late pair arrived adds its length (a paused game or a loading screen must not ratchet the latency
+    // up); it decays ~0.1 ms a second, so a machine that calms down gets the latency back.
     double extra = 0, held_since = -1, extra_t = 0;
     bool vsync_applied = false;
     double lead_now = 0, last_signal = 0;   // vsync: the adaptive lead, and when the swapchain last signalled
@@ -148,12 +140,11 @@ static void Presenter(XeFg* f)
     {
         // Vsync paces on the swapchain itself (max frame latency 1: it signals when the last frame reached
         // the screen, i.e. at a vblank), then renders LATE: the flip waits for the next vblank anyway, so
-        // sleep until `lead` before it - the frame is `lead` old when it lands instead of a whole refresh
-        // (rendering right after the vblank, as immediate mode does, made vsync cost 8.1 ms at 120 Hz).
+        // sleep until `lead` before it - the frame is `lead` old when it lands instead of a whole refresh.
         // Immediate mode paces on the vblank and flips at once.
         // The lead adapts: the swapchain signals a whole refresh late when the last frame missed its vblank,
         // and each miss renders 0.25 ms earlier from then on (up to 4 ms); on time, it creeps back toward
-        // the minimum (--lead), ~0.1 ms a second. The least latency this machine can hold without stutter.
+        // the minimum (--lead), ~0.1 ms a second.
         double woke;
         if (f->vsync && OverlayWaitFrameLatency(f->ov, 100))
         {
@@ -177,21 +168,17 @@ static void Presenter(XeFg* f)
         XePair* newest = nullptr;
         for (auto& p : f->pr) if (p.valid && (!newest || p.seq > newest->seq)) newest = &p;
         if (!newest) continue;
-        // EMAs, once per new pair. Latency is how long after the game presented a frame we had it
-        // ready to use; the interval is the game's frame time. hold = both + margin: at the moment a
-        // new pair lands, the content time has just reached the end of the previous one.
+        // Once per new pair: learn from the pause it ended, the interval EMA, and the hold it needs.
         if (newest->seq != seen_seq)
         {
             seen_seq = newest->seq;
             if (held_since >= 0)
             {
                 const double late = now - held_since;
-                // Not while extrapolating: lateness up to a whole interval is already absorbed by pushing
-                // further ahead, so a pause there is a real stall - learning from it only bought back the
-                // latency the mode exists to remove (one hiccup: hold 3.4 -> 11.7 ms, minutes to decay).
-                // Only a pair late DESPITE the full hold teaches anything: while the hold is still ramping
-                // up to its target, late pairs are expected (learning from them pinned the margin at its
-                // 15 ms cap at every start - hold 36-39 ms instead of ~24).
+                // Not while extrapolating: lateness up to an interval is absorbed by pushing further ahead,
+                // and learning from a real stall there would buy back the latency the mode removes.
+                // Only a pair late DESPITE the full hold teaches anything: while the hold ramps up, late
+                // pairs are expected (learning from them pinned the margin at its 15 ms cap at every start).
                 if (!f->extrap && have_interval && late < 2.0 * interval && hold >= hold_target - 0.5)
                 { extra = std::min(extra + late + 0.5, 15.0); hold_target += late + 0.5; }
                 held_since = -1;
@@ -206,9 +193,8 @@ static void Presenter(XeFg* f)
                 {
                     need[need_n++ % kNeed] = n;
                     double mx = 0; for (int k = 0; k < std::min(need_n, kNeed); ++k) mx = std::max(mx, need[k]);
-                    // - half a refresh: the presenter only looks at vblanks, so a pair that is "late" by less
-                    // than that between two of them never shows as a pause (measured at 45 on 120 Hz: the
-                    // hold could drop ~5 ms below the max with no held frame, and 8 ms was too far).
+                    // - half a refresh: the presenter only looks at vblanks, so a pair "late" by less than
+                    // that between two of them never shows as a pause (measured at 45 on 120 Hz: ~5 ms ok, 8 too far).
                     const double target = mx - 0.5 * clock.vb + f->margin.load(std::memory_order_relaxed) + extra;
                     hold_target = std::max(0.0, target);   // content time never ahead of now
                     if (!have_hold) hold = hold_target;
@@ -445,7 +431,6 @@ bool XeFgSubmit(XeFg* f, ID3D12Resource* src, ID3D12Fence* wait_fence, UINT64 wa
 }
 
 void XeFgSetEnabled(XeFg* f, bool on) { f->enabled = on; }
-bool XeFgEnabled(const XeFg* f) { return f->enabled; }
 void XeFgSetTiming(XeFg* f, double margin_ms, double max_in_fps)
 {
     f->margin.store(std::clamp(margin_ms, -20.0, 50.0)); f->max_in.store(std::clamp(max_in_fps, 0.0, 1000.0));

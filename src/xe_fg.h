@@ -15,7 +15,7 @@
 //   over the last 64 pairs - half a refresh (the slack of sampling at vblanks) + margin (default 0),
 //   fast up, slow down. The pair with ta <= c <= tb is interpolated at
 //   t = (c - ta) / (tb - ta) and presented through the overlay. c past the newest pair = the game
-//   stalled: the newest real frame is held (t = 1), never extrapolated.
+//   stalled: the newest real frame is held (t = 1) - or, with XeFgSetExtrapolate, pushed ahead first.
 // Reuse: the main queue waits (GPU side) on the presenter's last read of a frame or pair before it
 // overwrites it - the same scheme as fg.cpp's slots.
 // Off (XeFgSetEnabled false), or the game already above max_in_fps: real frames only, each shown
@@ -40,7 +40,6 @@ ID3D12Resource* XeFgLastFrame(XeFg* f);
 // present time on the NowMs clock. reset: do not pair with the previous frame (scene cut, gap).
 bool  XeFgSubmit(XeFg* f, ID3D12Resource* src, ID3D12Fence* wait_fence, UINT64 wait_value, double cap_ms, bool reset);
 void  XeFgSetEnabled(XeFg* f, bool on);
-bool  XeFgEnabled(const XeFg* f);
 void  XeFgSetTiming(XeFg* f, double margin_ms, double max_in_fps);
 // Extrapolation: the content clock runs just behind the newest frame's arrival instead of one frame
 // interval behind it, and past the newest frame shows it pushed ahead along its own flow (up to one
