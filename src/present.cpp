@@ -51,7 +51,7 @@ struct Overlay
     // present queue: swapchain + backbuffer copies, decoupled from the pipeline queue
     ID3D12CommandQueue* pq = nullptr;
     ID3D12CommandAllocator* alloc = nullptr; ID3D12GraphicsCommandList* list = nullptr;
-    ID3D12Fence* fence = nullptr; HANDLE event = nullptr; UINT64 fence_value = 0;
+    ID3D12Fence* fence = nullptr; HANDLE event = nullptr; std::atomic<UINT64> fence_value{ 0 };   // presenter writes, OverlayGuard (main) reads
     // Where a present's wall time goes (presenter thread writes, stats reader drains). us, summed.
     std::atomic<UINT64> pres_n{ 0 }, pres_prev_us{ 0 }, pres_call_us{ 0 }, pres_total_us{ 0 };
     IDXGIOutput* output = nullptr; bool output_looked_up = false;
@@ -525,7 +525,7 @@ LONGLONG OverlayPresentQpc(Overlay* o)
     return o->present_qpc;
 }
 
-void OverlayGuard(Overlay* o, ID3D12CommandQueue* q) { if (o->fence_value) q->Wait(o->fence, o->fence_value); }
+void OverlayGuard(Overlay* o, ID3D12CommandQueue* q) { if (const UINT64 v = o->fence_value) q->Wait(o->fence, v); }
 void OverlayDrain(Overlay* o) { Drain(o); }
 
 // ponytail: the output is resolved once (first call); a window dragged to another monitor keeps
@@ -563,9 +563,7 @@ static IDXGIOutput* Output(Overlay* o)
 bool OverlayWaitVBlank(Overlay* o)
 {
     IDXGIOutput* out = Output(o);
-    // A fallback is not forever: WaitForVBlank is tried again every 5 s. One trip (it happened right after
-    // the overlay was hidden and shown for a focus change) used to cost the rest of the session.
-    if (o->vblank_dwm && out && NowMs() - o->dwm_since > 5000.0) { o->vblank_dwm = false; o->short_waits = 0; }
+    OverlayVBlankIsDwm(o);   // the 5 s re-try
     const bool ok = o->vblank_dwm ? SUCCEEDED(DwmFlush()) : (out && SUCCEEDED(out->WaitForVBlank()));
     if (!ok) return false;
     // Judged by the spacing of consecutive wake-ups, not by how long this wait took: a busy caller (DLSS-G
@@ -587,7 +585,14 @@ bool OverlayWaitVBlank(Overlay* o)
     return false;
 }
 double OverlayVBlankMs(Overlay* o) { Output(o); return o->vblank_ms; }
-bool   OverlayVBlankIsDwm(Overlay* o) { return o->vblank_dwm; }
+// A fallback is not forever: WaitForVBlank is tried again every 5 s. One trip (it happened right after the
+// overlay was hidden and shown for a focus change) used to cost the rest of the session. The re-try lives
+// here, not in the wait: the video engine stops calling the wait while this says DwmFlush.
+bool OverlayVBlankIsDwm(Overlay* o)
+{
+    if (o->vblank_dwm && Output(o) && NowMs() - o->dwm_since > 5000.0) { o->vblank_dwm = false; o->short_waits = 0; }
+    return o->vblank_dwm;
+}
 
 void OverlayHide(Overlay* o)
 {

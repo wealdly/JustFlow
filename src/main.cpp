@@ -647,19 +647,48 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // this slot to retire anyway - wait here first, read it, and nothing is lost or added.
     auto harvest = [&] { if (!c.gpu_timestamps) return; const UINT64 v = g.alloc_fence[g.slot]; if (v) GpuWait(g, g.fence, v, 2000); PipelineReadStamps(p); };
     double tw = NowMs();
+
+    // ---- duplicate / scene-cut test, a list of its own ----------------------------------------------
+    // A capture identical to the last one (a browser repainting the same video frame at the display
+    // rate) is not a frame: it returns here, before list 1, flow, model and compose - handed on, it inflated
+    // "fps in" past the FG governor's floor and paid the whole pipeline for nothing. It used to share list 1,
+    // so a repeat still paid the swizzle, deband, gray and downscale (24 fps video in a 240 Hz browser: ~216
+    // times a second). A scene cut (a film changing camera, a game teleporting) is a reset: the model carried
+    // the old shot's history into the new one and smeared it, and DLSS-G interpolated between two unrelated images.
+    // ponytail: the CPU waits for this list here, behind whatever the queue still holds from the last frame
+    // (a sync model evaluate). A one-frame-late readback would avoid it at the cost of one late cut.
+    bool dup = false, cut = false;
+    const bool check_same = !reset;   // after a reset color4k is not the previous frame
+    if (check_same)
+    {
+        harvest();
+        if (!GpuBegin(g)) return false;
+        GpuBarrier(cl, cap, D3D12_RESOURCE_STATE_COMMON, NPSR);
+        GpuBarrier(cl, p->same, CSRC, UAV);
+        CsSame(g, p->sh, cl, cap, p->color4k, p->w, p->h, p->hdr_white, p->same);
+        GpuBarrier(cl, p->same, UAV, CSRC);
+        GpuCopyToReadback(cl, p->same, p->same_rb, DXGI_FORMAT_R8G8_UNORM, p->same_w, p->same_h, p->same_pitch);
+        GpuBarrier(cl, cap, NPSR, D3D12_RESOURCE_STATE_COMMON);
+        const UINT64 f0 = GpuEnd(g);
+        if (!f0) return false;
+        SameTest(p, f0, dup, cut);
+    }
+    else p->same_prev.clear();   // the previous frame is not comparable across a reset
+    // Only while the picture on screen is final: a model still warming up (or without a residual yet), or
+    // one that has just published a newer residual, needs the frame - a paused video kept the plain image.
+    // The model is not handed a repeat it has already seen (a published residual feeding the next repeat
+    // back to it kept it evaluating one still picture forever).
+    const bool no_handoff = dup && !p->shown_native;
+    if (dup && (wait_pub || p->shown_native || c.selftest)) dup = false;   // selftest: the toast test composes one still frame twice
+    if (dup) { ++p->dups; return true; }
+    if (cut) { reset = true; ++p->cuts; }
+    if (reset) p->reset_frame = p->frame_index;
+
     harvest();
     if (!GpuBegin(g)) return false;
     p->cpu_wait[0].add(NowMs() - tw);
     stamp(2 * PS_LIST1);   // spans the whole submission, barriers and copies included
     GpuBarrier(cl, cap, D3D12_RESOURCE_STATE_COMMON, NPSR);
-    const bool check_same = !reset;   // after a reset color4k is not the previous frame
-    if (check_same)
-    {
-        GpuBarrier(cl, p->same, CSRC, UAV);
-        CsSame(g, p->sh, cl, cap, p->color4k, p->w, p->h, p->hdr_white, p->same);
-        GpuBarrier(cl, p->same, UAV, CSRC);
-        GpuCopyToReadback(cl, p->same, p->same_rb, DXGI_FORMAT_R8G8_UNORM, p->same_w, p->same_h, p->same_pitch);
-    }
     GpuBarrier(cl, p->color4k, NPSR, UAV);
     stamp(2 * PS_SWIZZLE); CsSwizzle(g, p->sh, cl, cap, p->color4k, p->w, p->h, p->hdr_white); stamp(2 * PS_SWIZZLE + 1);
     GpuBarrier(cl, p->color4k, UAV, NPSR);
@@ -708,7 +737,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // model_every: hand a frame over only on the Nth, so the model's cadence is locked to the
     // capture (90 in, N=2 -> 45 evaluates/s, residual always exactly one frame old) rather than
     // free-running against a sleep-based rate cap and drifting in and out of phase.
-    if (async && p->model_wants_frame.load() && (c.model_every <= 1 || p->frame_index % (UINT)c.model_every == 0))
+    if (async && !no_handoff && p->model_wants_frame.load() && (c.model_every <= 1 || p->frame_index % (UINT)c.model_every == 0))
     {
         handoff = true; p->model_wants_frame = false;
         // held slot 2..4: not the last hand-off's (the model's next flow reference), not cmp_held (ours)
@@ -727,26 +756,6 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     MaskUpdate(p);
     PipelineReadStamps(p);
 
-    // ---- duplicate / scene-cut test (CsSame in list 1) ----------------------------------------------
-    // A capture identical to the last one (a browser repainting the same video frame at the display
-    // rate) is not a frame: it returns here, before flow, model and compose - handed on, it inflated
-    // "fps in" past the FG governor's floor and paid the whole pipeline for nothing. A scene cut (a film
-    // changing camera, a game teleporting) is a reset: the model carried the old shot's history into the
-    // new one and smeared it, and DLSS-G interpolated between two unrelated images.
-    // ponytail: the CPU waits for list 1 here, behind whatever the queue still holds from the last frame
-    // (a sync model evaluate). A one-frame-late readback would avoid it at the cost of one late cut.
-    bool dup = false, cut = false;
-    if (!check_same) p->same_prev.clear();   // the previous frame is not comparable across a reset
-    else SameTest(p, f1, dup, cut);
-    // Only while the picture on screen is final: a model still warming up (or without a residual yet), or
-    // one that has just published a newer residual, needs the frame - a paused video kept the plain image.
-    // The model is not handed a duplicate it has already seen (a published residual feeding the next
-    // duplicate back to it kept it evaluating one still picture forever).
-    if (dup && handoff && !p->shown_native) { p->model_reset_pending |= mf.reset; p->model_wants_frame = true; handoff = false; }
-    if (dup && (wait_pub || p->shown_native || c.selftest)) dup = false;   // selftest: the toast test composes one still frame twice
-    if (dup) { ++p->dups; return true; }
-    if (cut) { reset = true; ++p->cuts; }
-    if (reset) p->reset_frame = p->frame_index;
     if (handoff)
     {
         mf.fence = f1; mf.reset |= cut;
@@ -1433,6 +1442,7 @@ static int RealMain(int argc, char** argv)
                 hud_disabled += fs.disabled; hud_preempt += fs.preempts;
                 fs_agg.vblank_wait_sum_ms += fs.vblank_wait_sum_ms; fs_agg.vblank_waits += fs.vblank_waits;
                 fs_agg.record_wait_sum_ms += fs.record_wait_sum_ms; fs_agg.record_waits += fs.record_waits;
+                if (cfg.stats_every <= 0) { fs_agg.spacing_ms.clear(); fs_agg.age_ms.clear(); fs_agg.pipe_ms.clear(); }   // no [stats] tick to clear them: the HUD reads this drain's only
                 fs_agg.spacing_ms.insert(fs_agg.spacing_ms.end(), fs.spacing_ms.begin(), fs.spacing_ms.end());
                 fs_agg.age_ms.insert(fs_agg.age_ms.end(), fs.age_ms.begin(), fs.age_ms.end());
                 fs_agg.pipe_ms.insert(fs_agg.pipe_ms.end(), fs.pipe_ms.begin(), fs.pipe_ms.end());
