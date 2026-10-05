@@ -142,6 +142,7 @@ bool GpuCtxStampsMsSlot(GpuCtx& c, int slot, double* ms, int pairs);
 // ---- misc ------------------------------------------------------------------------------------
 double NowMs();   // QPC milliseconds
 double QpcToMs(LONGLONG qpc_ticks);   // same clock as NowMs
+double Pct(std::vector<double> v, double p);   // sorted v[(size_t)(p * n)], clamped to the last; -1 when empty
 const char* NgxResultName(unsigned r);
 
 // ---- process (the exes' shared startup) ---------------------------------------------------------

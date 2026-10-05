@@ -817,8 +817,8 @@ static int RunLive(int argc, char** argv)
             {
                 XeFgStatsOut s; XeFgStats(fg, s);
                 const double dt = (now - stats_t) / 1000.0; stats_t = now;
-                std::vector<double>& sp = s.spacing_ms; std::sort(sp.begin(), sp.end());
-                auto q = [&](double p) { return sp.empty() ? -1.0 : sp[std::min(sp.size() - 1, (size_t)(sp.size() * p))]; };
+                const std::vector<double>& sp = s.spacing_ms;
+                auto q = [&](double p) { return Pct(sp, p); };
                 const double vbm = OverlayVBlankMs(ov); size_t late = 0;
                 for (double x : sp) late += x > vbm * 1.5;
                 std::vector<double>& av = s.after_vblank_ms; std::sort(av.begin(), av.end());

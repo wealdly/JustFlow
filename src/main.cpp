@@ -22,14 +22,6 @@ bool SaveTexPng(Gpu& g, ID3D12Resource* tex, UINT w, UINT h, D3D12_RESOURCE_STAT
 
 const char* const kPipeStageName[PS_COUNT] = { "swizzle", "gray+downscale", "eval", "compose", "expand", "filter", "list1(all)", "list2(all)", "ofa", "ofa2" };
 
-double StageStats::pct(double p) const
-{
-    if (v.empty()) return -1;
-    std::vector<double> s = v; std::sort(s.begin(), s.end());
-    size_t i = (size_t)(p * (double)s.size()); if (i >= s.size()) i = s.size() - 1;
-    return s[i];
-}
-
 // [nr] work=auto: the divisor 1..4 of the capture nearest 1080 lines, rounded (ties go to the larger): 4K ->
 // 1920x1080, 1440p -> 2560x1440, 1080p -> 1920x1080. The model is scale-sensitive (by content, not monotonically;
 // the resampling is innocent). Against its own edit at native 4K, on two test frames:

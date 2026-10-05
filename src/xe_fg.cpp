@@ -435,7 +435,7 @@ ID3D12Resource* XeFgLastFrame(XeFg* f) { return f->last >= 0 ? f->fr[f->last].te
 
 void XeFgStats(XeFg* f, XeFgStatsOut& out)
 {
-    auto med = [](std::vector<double>& v) { if (v.empty()) return -1.0; std::sort(v.begin(), v.end()); const double m = v[v.size() / 2]; v.clear(); return m; };
+    auto med = [](std::vector<double>& v) { const double m = Pct(v, 0.5); v.clear(); return m; };
     out.flow_ms = med(f->flow_ms);   // main thread (the caller) owns it
     std::lock_guard<std::mutex> lk(f->mu);
     out.in = f->in; out.presented = f->presented; out.generated = f->generated; out.extrapolated = f->extrapolated; out.held = f->held; out.early = f->early;

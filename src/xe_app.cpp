@@ -592,8 +592,7 @@ int RunTrayApp(const std::wstring& dir)
             {
                 XeFgStatsOut o; XeFgStats(s.fg, o);
                 const double dt = (now - s.stats_t) / 1000.0; s.stats_t = now;
-                std::sort(o.spacing_ms.begin(), o.spacing_ms.end());
-                auto q = [&](double p) { return o.spacing_ms.empty() ? -1.0 : o.spacing_ms[std::min(o.spacing_ms.size() - 1, (size_t)(o.spacing_ms.size() * p))]; };
+                auto q = [&](double p) { return Pct(o.spacing_ms, p); };
                 Log("[stats] %ls: content %.1f fps  in %.1f  out %.1f fps (gen %u, ext %u, held %u)%s | flow %.2f ms  interp %.2f ms | hold %.1f ms | spacing p5 %.2f  med %.2f  p95 %.2f ms",
                     s.exe.c_str(), r.fps, o.in / dt, o.presented / dt, o.generated, o.extrapolated, o.held, o.passthrough ? " PASSTHROUGH" : "",
                     o.flow_ms, o.interp_ms, o.hold_ms, q(0.05), q(0.5), q(0.95));

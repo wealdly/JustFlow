@@ -22,7 +22,7 @@ struct StageStats
     // Bounded: only the [stats] tick drains these, so with stats off nothing would clear them
     // (4096 samples is ~45 s at 90 fps; fg.cpp bounds its own ring the same way).
     void   add(double x) { if (x >= 0 && v.size() < 4096) v.push_back(x); }
-    double pct(double p) const;   // -1 when empty
+    double pct(double p) const { return Pct(v, p); }   // -1 when empty
     double med() const { return pct(0.5); }
     double p95() const { return pct(0.95); }
 };

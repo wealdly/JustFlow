@@ -13,6 +13,13 @@ double QpcToMs(LONGLONG qpc)
     return (double)qpc * 1000.0 / (double)f.QuadPart;
 }
 
+double Pct(std::vector<double> v, double p)
+{
+    if (v.empty()) return -1;
+    std::sort(v.begin(), v.end());
+    return v[std::min(v.size() - 1, (size_t)(p * (double)v.size()))];
+}
+
 double NowMs()
 {
     LARGE_INTEGER c; QueryPerformanceCounter(&c);
