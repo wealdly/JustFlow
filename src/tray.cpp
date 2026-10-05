@@ -63,23 +63,14 @@ static HICON LoadAppIcon()
                              GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CYSMICON, dpi), LR_DEFAULTCOLOR);
 }
 
-// Fallback without the resource: a filled disc with a lighter ring, 32x32 BGRA + empty AND mask.
-static HICON MakeIcon()
-{
-    const int N = 32;
-    std::vector<DWORD> xr(N * N, 0);
-    std::vector<BYTE> an(N * N / 8, 0);
-    for (int y = 0; y < N; ++y)
-        for (int x = 0; x < N; ++x)
-        {
-            const float dx = x - 15.5f, dy = y - 15.5f, r = dx * dx + dy * dy;
-            if (r > 15.5f * 15.5f) continue;
-            xr[y * N + x] = r > 11.5f * 11.5f ? 0xFF9ACBFF : 0xFF2A70D8;   // ARGB: ring, disc
-        }
-    return CreateIcon(GetModuleHandleW(nullptr), N, N, 1, 32, an.data(), (const BYTE*)xr.data());
-}
-
 // ---- settings dialog ---------------------------------------------------------------------------
+
+// Copies of the paths: the dialogs and message boxes below block, and the menu holds t->mu while it
+// reads them (std::mutex is not recursive).
+struct Paths { std::wstring app, profile; HWND game; };
+static Paths GetPaths(Tray* t) { std::lock_guard<std::mutex> lk(t->mu); return { t->app_ini, t->profile_ini, t->game }; }
+
+struct InDialog { bool& f; InDialog(bool& x) : f(x) { f = true; } ~InDialog() { f = false; } };
 
 // profiles\<name>.ini -> the directory that holds them
 static std::wstring ProfilesDir(const std::wstring& profile_ini)
@@ -88,39 +79,28 @@ static std::wstring ProfilesDir(const std::wstring& profile_ini)
     return sl == std::wstring::npos ? L"profiles" : profile_ini.substr(0, sl);
 }
 
+// profiles\<name>.ini -> <name>; "" for no profile
+static std::wstring ProfileName(const std::wstring& ini)
+{
+    const size_t sl = ini.find_last_of(L"\\/"), from = sl == std::wstring::npos ? 0 : sl + 1, dot = ini.rfind(L".ini");
+    return ini.substr(from, dot == std::wstring::npos ? std::wstring::npos : dot - from);
+}
+
+// The shipped default a profile can be reset to: profiles\defaults\ is refreshed by every build and is
+// never live config, so it is always the pristine copy.
+static std::wstring DefaultsPath(const std::wstring& ini) { return ProfilesDir(ini) + L"\\defaults\\" + ProfileName(ini) + L".ini"; }
+
 static void ShowNewProfileDialog(Tray* t)
 {
-    struct Guard { bool& f; Guard(bool& x) : f(x) { f = true; } ~Guard() { f = false; } } guard(t->in_dialog);
-    std::wstring app, profile;
-    { std::lock_guard<std::mutex> lk(t->mu); app = t->app_ini; profile = t->profile_ini; }
-    if (NewProfileDialog(t->hwnd, ProfilesDir(profile).c_str(), app.c_str(), t->app.c_str()))
+    InDialog guard(t->in_dialog);
+    const Paths p = GetPaths(t);
+    if (NewProfileDialog(t->hwnd, ProfilesDir(p.profile).c_str(), p.app.c_str(), t->app.c_str()))
         Push(t, TrayRescanProfiles);
-}
-
-// The active profile's name and the shipped default it could be reset to (profiles\\defaults\\ is
-// refreshed by every build and is never live config, so it is always the pristine copy).
-// NoLock: for callers that already hold t->mu (BuildMenu). std::mutex is not recursive - taking it
-// twice on one thread throws, and an exception escaping a window procedure is terminate(): that
-// was a crash on every tray-menu open with a profile active.
-static std::wstring ActiveProfileNoLock(const std::wstring& ini, std::wstring* path = nullptr, std::wstring* def = nullptr)
-{
-    if (ini.empty()) return L"";
-    const size_t sl = ini.find_last_of(L"\\/"), dot = ini.rfind(L".ini");
-    const std::wstring name = ini.substr(sl == std::wstring::npos ? 0 : sl + 1, dot == std::wstring::npos ? std::wstring::npos : dot - (sl == std::wstring::npos ? 0 : sl + 1));
-    if (path) *path = ini;
-    if (def) *def = ProfilesDir(ini) + L"\\defaults\\" + name + L".ini";
-    return name;
-}
-
-static std::wstring ActiveProfile(Tray* t, std::wstring* path = nullptr, std::wstring* def = nullptr)
-{
-    std::wstring ini; { std::lock_guard<std::mutex> lk(t->mu); ini = t->profile_ini; }
-    return ActiveProfileNoLock(ini, path, def);
 }
 
 static void ResetProfile(Tray* t)
 {
-    std::wstring path, def; const std::wstring name = ActiveProfile(t, &path, &def);
+    const std::wstring path = GetPaths(t).profile, name = ProfileName(path), def = DefaultsPath(path);
     if (name.empty() || GetFileAttributesW(def.c_str()) == INVALID_FILE_ATTRIBUTES) return;
     const std::wstring q = L"Reset \"" + name + L"\" to its shipped defaults?\n\nEvery setting in this profile is replaced. The app settings (hotkeys, HUD) are not touched.";
     if (MessageBoxW(t->hwnd, q.c_str(), t->app.c_str(), MB_OKCANCEL | MB_ICONQUESTION | MB_TOPMOST) != IDOK) return;
@@ -130,27 +110,25 @@ static void ResetProfile(Tray* t)
 
 static void RemoveProfile(Tray* t)
 {
-    std::wstring path, app; const std::wstring name = ActiveProfile(t, &path);
+    const Paths p = GetPaths(t); const std::wstring name = ProfileName(p.profile);
     if (name.empty()) return;
-    { std::lock_guard<std::mutex> lk(t->mu); app = t->app_ini; }
     const std::wstring q = L"Remove the profile \"" + name + L"\"?\n\nIt goes to the Recycle Bin, and JustFlow detaches until you pick another profile.";
     if (MessageBoxW(t->hwnd, q.c_str(), t->app.c_str(), MB_OKCANCEL | MB_ICONWARNING | MB_TOPMOST) != IDOK) return;
     // Recycle Bin, not DeleteFile: a profile can hold a lot of tuning, and "remove" should be undoable.
-    std::wstring from = path; from.push_back(L'\0');   // SHFileOperation wants a double-NUL-terminated list
+    std::wstring from = p.profile; from.push_back(L'\0');   // SHFileOperation wants a double-NUL-terminated list
     SHFILEOPSTRUCTW op = {}; op.wFunc = FO_DELETE; op.pFrom = from.c_str();
     op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
     if (SHFileOperationW(&op) != 0) { MessageBoxW(t->hwnd, L"Could not remove the profile.", t->app.c_str(), MB_OK | MB_ICONERROR | MB_TOPMOST); return; }
-    WritePrivateProfileStringW(L"app", L"profile", L"none", app.c_str());
+    WritePrivateProfileStringW(L"app", L"profile", L"none", p.app.c_str());
     Push(t, TrayRescanProfiles);
 }
 
 static void ShowSettingsDialog(Tray* t)
 {
-    struct Guard { bool& f; Guard(bool& x) : f(x) { f = true; } ~Guard() { f = false; } } guard(t->in_dialog);
-    std::wstring app, profile; HWND game;
-    { std::lock_guard<std::mutex> lk(t->mu); app = t->app_ini; profile = t->profile_ini; game = t->game; }
+    InDialog guard(t->in_dialog);
+    const Paths p = GetPaths(t);
     // Apply reloads with the window still open; OK reloads only for what changed after the last Apply.
-    if (SettingsDialog(t->hwnd, app.c_str(), profile.c_str(), t->app.c_str(), game,
+    if (SettingsDialog(t->hwnd, p.app.c_str(), p.profile.c_str(), t->app.c_str(), p.game,
                        [](void* c) { Push((Tray*)c, TrayReload); }, t)) Push(t, TrayReload);
 }
 
@@ -169,18 +147,14 @@ static HMENU BuildMenu(Tray* t)
     HMENU fg = CreatePopupMenu();
     AppendMenuW(fg, MF_STRING | (t->fg_on ? MF_CHECKED : 0), IDM_FG, L"Enabled");
     AppendMenuW(fg, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(fg, MF_STRING, IDM_ENG0, L"DLSS-G (interpolate)");
-    AppendMenuW(fg, MF_STRING, IDM_ENG1, L"Warp (extrapolate, no added latency)");
-    AppendMenuW(fg, MF_STRING, IDM_ENG2, L"Latewarp (Frame Warp to the mouse)");
-    AppendMenuW(fg, MF_STRING, IDM_ENG3, L"Video (smooth playback, one frame late)");
+    static const wchar_t* const kEngines[FG_ENGINE_COUNT] = { L"DLSS-G (interpolate)", L"Warp (extrapolate, no added latency)",
+        L"Latewarp (Frame Warp to the mouse)", L"Video (smooth playback, one frame late)" };
+    for (int i = 0; i < FG_ENGINE_COUNT; ++i) AppendMenuW(fg, MF_STRING, IDM_ENG0 + i, kEngines[i]);
     CheckMenuRadioItem(fg, IDM_ENG0, IDM_ENG3, IDM_ENG0 + std::clamp(t->engine, 0, FG_ENGINE_COUNT - 1), MF_BYCOMMAND);
     AppendMenuW(fg, MF_SEPARATOR, 0, nullptr);
     const UINT per_frame = t->engine == FG_LATEWARP || t->engine == FG_VIDEO ? MF_GRAYED : 0;   // both run at the display's refresh, not a multiple
-    AppendMenuW(fg, MF_STRING | per_frame, IDM_MULT2, L"2X");
-    AppendMenuW(fg, MF_STRING | per_frame, IDM_MULT3, L"3X");
-    AppendMenuW(fg, MF_STRING | per_frame, IDM_MULT4, L"4X");
-    const int mult = t->mult < 2 ? 2 : t->mult > 4 ? 4 : t->mult;
-    CheckMenuRadioItem(fg, IDM_MULT2, IDM_MULT4, IDM_MULT2 + mult - 2, MF_BYCOMMAND);
+    for (int x = 2; x <= 4; ++x) AppendMenuW(fg, MF_STRING | per_frame, IDM_MULT2 + x - 2, (std::to_wstring(x) + L"X").c_str());
+    CheckMenuRadioItem(fg, IDM_MULT2, IDM_MULT4, IDM_MULT2 + std::clamp(t->mult, 2, 4) - 2, MF_BYCOMMAND);
     MENUITEMINFOW mi = { sizeof mi };
     mi.fMask = MIIM_STRING | MIIM_SUBMENU | MIIM_STATE | MIIM_ID;
     mi.wID = IDM_FG_POPUP; mi.hSubMenu = fg;
@@ -202,15 +176,12 @@ static HMENU BuildMenu(Tray* t)
     for (size_t i = 0; i < t->profiles.size(); ++i) AppendMenuW(pr, MF_STRING, IDM_PROFILE0 + i, t->profiles[i].c_str());
     if (t->profile >= 0 && t->profile < (int)t->profiles.size())
         CheckMenuRadioItem(pr, IDM_PROFILE0, IDM_PROFILE0 + (UINT)t->profiles.size() - 1, IDM_PROFILE0 + t->profile, MF_BYCOMMAND);
+    if (const std::wstring name = ProfileName(t->profile_ini); !name.empty())
     {
-        std::wstring def; const std::wstring name = ActiveProfileNoLock(t->profile_ini, nullptr, &def);   // t->mu is held here
-        if (!name.empty())
-        {
-            const bool has_def = GetFileAttributesW(def.c_str()) != INVALID_FILE_ATTRIBUTES;
-            AppendMenuW(pr, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(pr, MF_STRING | (has_def ? 0 : MF_GRAYED), IDM_PROFILE_RESET, (L"Reset \"" + name + L"\" to defaults").c_str());
-            AppendMenuW(pr, MF_STRING, IDM_PROFILE_REMOVE, (L"Remove \"" + name + L"\"...").c_str());
-        }
+        const bool has_def = GetFileAttributesW(DefaultsPath(t->profile_ini).c_str()) != INVALID_FILE_ATTRIBUTES;
+        AppendMenuW(pr, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(pr, MF_STRING | (has_def ? 0 : MF_GRAYED), IDM_PROFILE_RESET, (L"Reset \"" + name + L"\" to defaults").c_str());
+        AppendMenuW(pr, MF_STRING, IDM_PROFILE_REMOVE, (L"Remove \"" + name + L"\"...").c_str());
     }
     AppendMenuW(m, MF_POPUP, (UINT_PTR)pr, L"Profiles");
     AppendMenuW(m, MF_STRING, IDM_NEWPROFILE, L"New profile from window...");
@@ -264,9 +235,7 @@ static void ShowMenu(Tray* t)
         if (cmd >= IDM_PROFILE0) Push(t, TraySelectProfile, cmd - IDM_PROFILE0);
         else if (cmd >= IDM_PRESET0 && cmd < IDM_PRESET0 + kPresetCount)
         {
-            std::wstring profile;
-            { std::lock_guard<std::mutex> lk(t->mu); profile = t->profile_ini; }
-            PresetApply(profile.c_str(), cmd - IDM_PRESET0);
+            PresetApply(GetPaths(t).profile.c_str(), cmd - IDM_PRESET0);
             Push(t, TrayReload);
         }
         break;
@@ -344,7 +313,6 @@ static void TrayThread(Tray* t)
     RegisterClassW(&wc);   // second registration in-process just fails; CreateWindow still works
     t->taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     t->icon = LoadAppIcon();
-    if (!t->icon) t->icon = MakeIcon();
     t->hwnd = CreateWindowExW(0, wc.lpszClassName, t->app.c_str(), WS_OVERLAPPED, 0, 0, 0, 0, nullptr, nullptr, inst, t);
     // A popup menu is drawn above its OWNER. The taskbar is topmost, so a menu owned by an ordinary
     // hidden window comes up behind it and the bottom entries (Quit) cannot be clicked. Topmost owner,
