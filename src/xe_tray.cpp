@@ -1,40 +1,28 @@
+// justflow_xe's tray: tray_host's thread and message-only window, three state icons, and the menu built
+// from the last pushed state each time it opens.
 #include "xe_tray.h"
+#include "tray_host.h"
 #include "log.h"
-#include <shellapi.h>
-#include <deque>
-#include <mutex>
-#include <thread>
 
-#pragma comment(lib, "shell32.lib")
-
-enum { WM_TRAY = WM_APP + 1 };   // menu item ids are the XeTrayEvent values
-
-struct XeTray
+struct XeTray : TrayHost
 {
-    std::thread th;
-    HWND hwnd = nullptr;
-    UINT taskbar_created = 0;
-    std::mutex mu;
+    std::mutex mu;   // guards state
     XeTrayState state;
-    std::deque<XeTrayEvent> events;
-    HANDLE ready = nullptr;
+    TrayQueue<XeTrayEvent> events;
     HICON icons[3] = {};   // XeTrayIcon: generating, watching, off (resources 1..3)
+
+    void Show(DWORD msg);   // NIM_ADD / NIM_MODIFY with the current icon and tooltip
+    void AddIcon() override { Show(NIM_ADD); }
+    bool OnMessage(UINT msg, WPARAM wp, LPARAM lp) override;
 };
 
-static HICON LoadTrayIcon(int id)
+void XeTray::Show(DWORD msg)
 {
-    const UINT dpi = GetDpiForSystem();
-    return (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(id), IMAGE_ICON,
-                             GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CYSMICON, dpi), LR_DEFAULTCOLOR);
-}
-
-static void AddIcon(XeTray* t, DWORD msg)
-{
-    NOTIFYICONDATAW n = { sizeof n };
-    n.hWnd = t->hwnd; n.uID = 1; n.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP; n.uCallbackMessage = WM_TRAY;
+    NOTIFYICONDATAW n = Nid();
+    n.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP; n.uCallbackMessage = WM_TRAY_ICON;
     std::wstring tip; int icon;
-    { std::lock_guard<std::mutex> lk(t->mu); tip = L"JustFlow XE - " + t->state.status; icon = t->state.icon; }
-    n.hIcon = t->icons[icon >= 0 && icon < 3 ? icon : 1];
+    { std::lock_guard<std::mutex> lk(mu); tip = L"JustFlow XE - " + state.status; icon = state.icon; }
+    n.hIcon = icons[icon >= 0 && icon < 3 ? icon : 1];
     if (!n.hIcon) n.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     wcsncpy_s(n.szTip, tip.c_str(), _TRUNCATE);
     Shell_NotifyIconW(msg, &n);
@@ -67,60 +55,30 @@ static void ShowMenu(XeTray* t)
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, XeTrayOpenLog, L"Open log");
     AppendMenuW(m, MF_STRING, XeTrayQuit, L"Quit");
-    POINT p; GetCursorPos(&p);
-    SetForegroundWindow(t->hwnd);   // required, or the menu does not close when clicking elsewhere
-    const int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, 0, t->hwnd, nullptr);   // 0 = dismissed (XeTrayNone)
-    PostMessageW(t->hwnd, WM_NULL, 0, 0);
-    DestroyMenu(m);
-    if (cmd != XeTrayNone) { std::lock_guard<std::mutex> lk(t->mu); t->events.push_back((XeTrayEvent)cmd); }
+    const int cmd = t->TrackMenu(m, false);   // 0 = dismissed (XeTrayNone); menu ids are the XeTrayEvent values
+    if (cmd != XeTrayNone) t->events.Push((XeTrayEvent)cmd);
 }
 
-static LRESULT CALLBACK Proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+bool XeTray::OnMessage(UINT msg, WPARAM, LPARAM lp)
 {
-    XeTray* t = (XeTray*)GetWindowLongPtrW(h, GWLP_USERDATA);
-    if (t && msg == t->taskbar_created) { AddIcon(t, NIM_ADD); return 0; }   // Explorer restarted
-    if (t && msg == WM_TRAY && (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_LBUTTONUP)) { ShowMenu(t); return 0; }
-    if (t && msg == WM_APP + 2) { AddIcon(t, NIM_MODIFY); return 0; }        // state changed: tooltip
-    if (msg == WM_CLOSE) { DestroyWindow(h); return 0; }
-    if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
-    return DefWindowProcW(h, msg, wp, lp);
-}
-
-static void Thread(XeTray* t)
-{
-    WNDCLASSW wc = {}; wc.lpfnWndProc = Proc; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"JustFlowXeTray";
-    RegisterClassW(&wc);
-    t->hwnd = CreateWindowExW(0, wc.lpszClassName, L"JustFlow XE", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
-    if (t->hwnd)
-    {
-        SetWindowLongPtrW(t->hwnd, GWLP_USERDATA, (LONG_PTR)t);
-        t->taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
-        AddIcon(t, NIM_ADD);
-    }
-    SetEvent(t->ready);
-    MSG m;
-    while (t->hwnd && GetMessageW(&m, nullptr, 0, 0) > 0) { TranslateMessage(&m); DispatchMessageW(&m); }
-    if (t->hwnd) { NOTIFYICONDATAW n = { sizeof n }; n.hWnd = t->hwnd; n.uID = 1; Shell_NotifyIconW(NIM_DELETE, &n); }
+    if (msg == WM_TRAY_ICON && (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_LBUTTONUP)) { ShowMenu(this); return true; }
+    if (msg == WM_TRAY_STATE) { Show(NIM_MODIFY); return true; }   // tooltip and icon
+    return false;
 }
 
 XeTray* XeTrayCreate()
 {
     XeTray* t = new XeTray;
     t->state.status = L"starting";
-    for (int i = 0; i < 3; ++i) if (!(t->icons[i] = LoadTrayIcon(i + 1))) Log("[tray] icon resource %d did not load (err %lu) - stock icon instead", i + 1, GetLastError());
-    t->ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    t->th = std::thread(Thread, t);
-    WaitForSingleObject(t->ready, 5000);
-    if (!t->hwnd) { XeTrayDestroy(t); return nullptr; }
+    for (int i = 0; i < 3; ++i) if (!(t->icons[i] = TrayLoadIcon(i + 1))) Log("[tray] icon resource %d did not load (err %lu) - stock icon instead", i + 1, GetLastError());
+    if (!t->Start(L"JustFlowXeTray", true)) { XeTrayDestroy(t); return nullptr; }
     return t;
 }
 
 void XeTrayDestroy(XeTray* t)
 {
     if (!t) return;
-    if (t->hwnd) PostMessageW(t->hwnd, WM_CLOSE, 0, 0);
-    if (t->th.joinable()) t->th.join();
-    if (t->ready) CloseHandle(t->ready);
+    t->Stop();
     for (HICON i : t->icons) if (i) DestroyIcon(i);
     delete t;
 }
@@ -133,13 +91,7 @@ void XeTraySet(XeTray* t, const XeTrayState& s)
         changed = s.status != t->state.status || s.icon != t->state.icon;
         t->state = s;
     }
-    if (changed && t->hwnd) PostMessageW(t->hwnd, WM_APP + 2, 0, 0);
+    if (changed && t->hwnd) PostMessageW(t->hwnd, WM_TRAY_STATE, 0, 0);
 }
 
-bool XeTrayPoll(XeTray* t, XeTrayEvent& ev)
-{
-    std::lock_guard<std::mutex> lk(t->mu);
-    if (t->events.empty()) return false;
-    ev = t->events.front(); t->events.pop_front();
-    return true;
-}
+bool XeTrayPoll(XeTray* t, XeTrayEvent& ev) { return t->events.Pop(ev); }
