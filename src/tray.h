@@ -34,7 +34,7 @@ struct TrayState
 
 struct Tray;
 
-Tray* TrayCreate(const wchar_t* app_name);   // the icon is generated
+Tray* TrayCreate(const wchar_t* app_name);   // the icon is the exe's (justflow.rc)
 void  TrayDestroy(Tray*);
 void  TraySetProfiles(Tray*, const wchar_t* const* names, int count);          // Profiles submenu (radio)
 // The two ini files the Settings dialog and the quality presets write to. Call again on a profile

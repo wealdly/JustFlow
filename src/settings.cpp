@@ -8,26 +8,21 @@
 // ui.feather, ui.toast_scale, overlay.mode. They are for debugging, not for tuning, and a panel
 // that lists everything is a panel nobody can read.
 //
-// The NR model's real control surface, measured rather than assumed. OpenDLSS-NR reimplements build
-// 310.8.0 - ours - as a 71-block Swin/ViT U-net taking a frame, three lanes of Gaussian noise, the
-// previous output reprojected, and FIVE CONDITIONING SCALARS, emitting an RGB residual plus a
-// temporal-blend logit. We expose exactly five scalars, and all five change the output:
+// The NR model's control surface, measured by output hash. The network (build 310.8.0, a Swin/ViT
+// U-net) takes five conditioning scalars, and all five change the output:
 //   style, intensity, local_tone, local_structure, skin_structure
-// Dead, confirmed by identical output hashes:
-//   preset          DLSSNR.Hint.Render.Preset picks a different network in DLSS SR; for feature 18
-//                   presets 0..5 are byte-identical. It is not one of the five scalars.
+// Dead (identical output hashes):
+//   preset          presets 0..5 are byte-identical for this feature; not one of the five scalars.
 //   ui_correction   no change at 0 or 1. Our addon rects are what protects the interface anyway.
 // Ini-only but LIVE, kept off the panel for room rather than because they do nothing:
 //   intensity       clamped above 1.0, effective below it. NOT interchangeable with
-//                   residual_strength, which scales the delta in our compose and leaves the model's
-//                   own output untouched (identical hash to baseline).
+//                   residual_strength, which scales the delta in our compose, not the model's output.
 //   skin_structure  -1 follows local_structure, but 0 and 2 give different pictures.
 //   auto_mask       changes the output even on content with no skin in it.
-// An earlier version of this comment said all four "were tested and do nothing useful". Three of the
-// four were live; the claim came from inherited notes and one upstream remark, and no test.
 
 #include "settings.h"
 #include "config.h"
+#include <algorithm>
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <string>
@@ -51,18 +46,16 @@ struct Setting
 
 // One tab per pipeline LAYER, in the order a frame passes through them: neural (the DLSS model,
 // composed back as a residual), then ordinary filters, then frame generation, then
-// presentation. Everything neural is on ONE tab - splitting the layer's switches from the model's
-// tuning across two tabs meant hunting for which tab a knob lived on, which was the original
-// complaint. A layer you are not running is a tab you never open.
+// presentation. Everything neural is on ONE tab, so no knob has to be hunted for across tabs, and a
+// layer you are not running is a tab you never open.
 const wchar_t* const kTabs[] = { L"Neural", L"Filters", L"Frame gen", L"Display", L"System", L"Hotkeys" };
 const int kTabCount = (int)(sizeof kTabs / sizeof *kTabs);
 
-// Model resolution as a share of the screen (capture): a percentage, never "Nx" - "3x" read as upscaling
-// when it meant a third. auto = nearest 1080 lines
-// (2x on 4K). native and WxH in an ini still work (config.cpp) and show up as extra entries.
+// Model resolution as a share of the screen (capture): a percentage, never "Nx" - "3x" reads as upscaling
+// when it means a third. auto = nearest 1080 lines (50% on 4K). Nx, native and WxH in an ini still work
+// (config.cpp) and show up as extra entries.
 const wchar_t* const kWork = L"auto|100%|67%|50%|33%";
 // Optical flow input: read by the DLSS model and the warp engines only - DLSS-G measures motion itself.
-// Measured on an idle 5080 from a 4K capture: 0.55 / 1.05 / 1.49 / 3.61 ms.
 const wchar_t* const kFlow = L"640x360|960x540|1280x720|1920x1080";
 
 const Setting kSettings[] = {
@@ -152,21 +145,6 @@ const int kCount = (int)(sizeof kSettings / sizeof *kSettings);
 
 const int ID_TAB = 50, ID_APPLY = 51, ID_PRESET = 52, ID_PRESET_LBL = 53, ID_CTL0 = 1000, ID_LBL0 = 2000;
 
-// "[Ctrl+][Alt+][Shift+]Key", Key = F1..F24 or one letter/digit. ParseHotkey in config.cpp is
-// lenient (it falls back to a default vk); this is the strict check the user's typing needs.
-bool ValidHotkey(std::wstring s)
-{
-    for (auto& c : s) c = (wchar_t)towupper(c);
-    size_t pos;
-    while ((pos = s.find(L'+')) != std::wstring::npos)
-    {
-        const std::wstring m = s.substr(0, pos); s = s.substr(pos + 1);
-        if (m != L"CTRL" && m != L"ALT" && m != L"SHIFT") return false;
-    }
-    if (s.size() >= 2 && s[0] == L'F') { const int n = _wtoi(s.c_str() + 1); return n >= 1 && n <= 24 && s == L"F" + std::to_wstring(n); }
-    return s.size() == 1 && iswalnum(s[0]);
-}
-
 // ---- ini -------------------------------------------------------------------------------------
 
 const wchar_t* FileFor(const Setting& s, const wchar_t* app, const wchar_t* profile)
@@ -193,10 +171,10 @@ const PresetKey kPreset[] = {
     // Four model tiers, and they are tiers of TIME, not of work size: the model's edit is low-frequency and survives being motion-
     // warped for several frames, while a smaller work size makes the model itself behave differently.
     // Measured on a moving 4K sequence (share of the every-frame native edit, average model cost):
-    //   auto (1080p) every 3rd 49% 1.3 ms | every frame 57% 3.8 ms | 1x (native) every 6th 76% 2.0 ms | every 3rd 80% 4.1 ms
+    //   auto (1080p) every 3rd 49% 1.3 ms | every frame 57% 3.8 ms | 100% every 6th 76% 2.0 ms | every 3rd 80% 4.1 ms
     // Performance stays the small per-frame evaluate because it is the one that cannot hitch a game
-    // sharing the GPU; a native evaluate is one ~12 ms block at 4K. The old 1440p / 1800p tiers were
-    // non-integer ratios of 4K and lost to 1080p on cost AND fidelity (see WorkAuto in main.cpp).
+    // sharing the GPU; a native evaluate is one ~12 ms block at 4K. No 1440p / 1800p tier: non-integer
+    // ratios of 4K lose to 1080p on cost AND fidelity (WorkAuto in main.cpp).
     { L"nr",  L"work",    { L"auto",      L"auto",      L"100%",      L"100%" } },
     { L"nr",  L"model_every", { L"3",     L"1",         L"6",         L"3" } },
     { L"filters", L"sharpen", { L"0.4",   L"0.3",       L"0.2",       L"0.0" } },
@@ -204,7 +182,7 @@ const PresetKey kPreset[] = {
 };
 const wchar_t* const kPresetNames[kPresetCount] = { L"High performance", L"Performance", L"Balanced", L"Quality" };
 
-// ---- dialog template -------------------------------------------------------------------------
+// ---- dialog ----------------------------------------------------------------------------------
 
 struct DlgData
 {
@@ -240,63 +218,63 @@ void PlaceClearOf(HWND h, HWND avoid)
                  0, 0, SWP_NOSIZE | SWP_NOZORDER);
 }
 
-std::vector<WORD> BuildTemplate()
+// In-memory DLGTEMPLATE for both dialogs: the header, then one item() per control. A control's class is a
+// predefined atom (0x80 button, 0x81 edit, 0x82 static, 0x83 listbox, 0x85 combobox) or a name in `cls`.
+struct DlgTemplate
 {
     std::vector<WORD> w;
-    auto dw  = [&](DWORD v) { w.push_back(LOWORD(v)); w.push_back(HIWORD(v)); };
-    auto str = [&](const wchar_t* s) { do w.push_back(*s); while (*s++); };
-    // class as an atom (0xFFFF + atom) or, when `cls` is given, as a name string
-    auto item = [&](DWORD style, int x, int y, int cx, int cy, WORD id, WORD atom, const wchar_t* cls, const wchar_t* text)
+    void dw(DWORD v) { w.push_back(LOWORD(v)); w.push_back(HIWORD(v)); }
+    void str(const wchar_t* s) { do w.push_back(*s); while (*s++); }
+    DlgTemplate(int items, int cx, int cy, const wchar_t* title)
+    {
+        dw(DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU); dw(0);
+        w.insert(w.end(), { (WORD)items, 0, 0, (WORD)cx, (WORD)cy, 0, 0 }); str(title);
+        w.push_back(8); str(L"MS Shell Dlg");
+    }
+    void item(DWORD style, int x, int y, int cx, int cy, WORD id, WORD atom, const wchar_t* text, const wchar_t* cls = nullptr)
     {
         if (w.size() & 1) w.push_back(0);
         dw(style | WS_CHILD | WS_VISIBLE); dw(0);
-        w.push_back((WORD)x); w.push_back((WORD)y); w.push_back((WORD)cx); w.push_back((WORD)cy);
-        w.push_back(id);
-        if (cls) str(cls); else { w.push_back(0xFFFF); w.push_back(atom); }
-        str(text);
-        w.push_back(0);
-    };
+        w.insert(w.end(), { (WORD)x, (WORD)y, (WORD)cx, (WORD)cy, id });
+        if (cls) str(cls); else w.insert(w.end(), { 0xFFFF, atom });
+        str(text); w.push_back(0);
+    }
+};
 
-    // Size to the LONGEST tab instead of a number I typed once: adding rows to a tab used to push
-    // them off the bottom of the panel (the Look tab did exactly that when it gained two).
+std::vector<WORD> BuildTemplate()
+{
+    // Sized to the longest tab, so a tab that gains rows never pushes them off the panel.
     int rows_per_tab[kTabCount] = {};
     for (const auto& s : kSettings) ++rows_per_tab[s.tab];
-    int max_rows = 1;
-    for (int r : rows_per_tab) if (r > max_rows) max_rows = r;
+    const int max_rows = std::max(1, *std::max_element(rows_per_tab, rows_per_tab + kTabCount));
     const int tab_h = 16 * max_rows + 29;       // rows start at y = 30, 16 apart, + padding
     const int btn_y = 5 + tab_h + 6, dlg_h = btn_y + 22;
 
-    dw(DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU); dw(0);
-    w.push_back((WORD)(1 + kCount * 2 + 3 + 2));              // tab + label/control pairs + 3 buttons + quality label/combo
-    w.push_back(0); w.push_back(0); w.push_back(300); w.push_back((WORD)dlg_h);
-    w.push_back(0); w.push_back(0); str(L"JustFlow settings");
-    w.push_back(8); str(L"MS Shell Dlg");
-
+    DlgTemplate t(1 + kCount * 2 + 3 + 2, 300, dlg_h, L"JustFlow settings");   // tab + label/control pairs + 3 buttons + quality label/combo
     // The tab control comes first: CreateWindow puts each later sibling above it, so the rows draw
     // on top of the tab body without any z-order fixing.
-    item(WS_TABSTOP, 5, 5, 290, tab_h, ID_TAB, 0, WC_TABCONTROLW, L"");
+    t.item(WS_TABSTOP, 5, 5, 290, tab_h, ID_TAB, 0, L"", WC_TABCONTROLW);
 
     int row[kTabCount] = {};
     for (int i = 0; i < kCount; ++i)
     {
         const Setting& s = kSettings[i];
         const int y = 30 + row[s.tab]++ * 16;
-        // label 116 DLU: the longest label measured 160 px against the old 150 (bench: label_fit)
-        item(SS_LEFT | SS_NOTIFY, 14, y + 2, 116, 9, (WORD)(ID_LBL0 + i), 0x0082, nullptr, s.label);
+        t.item(SS_LEFT | SS_NOTIFY, 14, y + 2, 116, 9, (WORD)(ID_LBL0 + i), 0x0082, s.label);   // 116 DLU fits the longest label
         if (s.type == Bool)
-            item(BS_AUTOCHECKBOX | WS_TABSTOP, 134, y, 120, 10, (WORD)(ID_CTL0 + i), 0x0080, nullptr, L"");
+            t.item(BS_AUTOCHECKBOX | WS_TABSTOP, 134, y, 120, 10, (WORD)(ID_CTL0 + i), 0x0080, L"");
         else if (s.type == Enum)
-            item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 134, y, 110, 90, (WORD)(ID_CTL0 + i), 0x0085, nullptr, L"");
+            t.item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 134, y, 110, 90, (WORD)(ID_CTL0 + i), 0x0085, L"");
         else
-            item(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 134, y, s.type == Hotkey ? 110 : 70, 12, (WORD)(ID_CTL0 + i), 0x0081, nullptr, L"");
+            t.item(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 134, y, s.type == Hotkey ? 110 : 70, 12, (WORD)(ID_CTL0 + i), 0x0081, L"");
     }
     // Quality preset, outside the tabs because it reaches across them (neural, filters, flow input).
-    item(SS_LEFT | SS_NOTIFY, 7, btn_y + 3, 32, 9, ID_PRESET_LBL, 0x0082, nullptr, L"Quality");
-    item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 40, btn_y + 1, 84, 90, ID_PRESET, 0x0085, nullptr, L"");
-    item(BS_PUSHBUTTON | WS_TABSTOP, 128, btn_y, 52, 15, ID_APPLY, 0x0080, nullptr, L"Apply");
-    item(BS_DEFPUSHBUTTON | WS_TABSTOP, 185, btn_y, 52, 15, IDOK, 0x0080, nullptr, L"OK");
-    item(BS_PUSHBUTTON | WS_TABSTOP, 242, btn_y, 52, 15, IDCANCEL, 0x0080, nullptr, L"Cancel");
-    return w;
+    t.item(SS_LEFT | SS_NOTIFY, 7, btn_y + 3, 32, 9, ID_PRESET_LBL, 0x0082, L"Quality");
+    t.item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 40, btn_y + 1, 84, 90, ID_PRESET, 0x0085, L"");
+    t.item(BS_PUSHBUTTON | WS_TABSTOP, 128, btn_y, 52, 15, ID_APPLY, 0x0080, L"Apply");
+    t.item(BS_DEFPUSHBUTTON | WS_TABSTOP, 185, btn_y, 52, 15, IDOK, 0x0080, L"OK");
+    t.item(BS_PUSHBUTTON | WS_TABSTOP, 242, btn_y, 52, 15, IDCANCEL, 0x0080, L"Cancel");
+    return t.w;
 }
 
 // latewarp and video run at the display's refresh: the multiplier and the governor mean nothing to them, so their
@@ -449,7 +427,8 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         {
             if (kSettings[i].type != Hotkey) continue;
             const std::wstring v = CtlValue(h, i);
-            if (ValidHotkey(v)) continue;
+            bool valid; ParseHotkey(v, 0, &valid);
+            if (valid) continue;
             SendMessageW(GetDlgItem(h, ID_TAB), TCM_SETCURSEL, kSettings[i].tab, 0);
             ShowTab(h, kSettings[i].tab);
             MessageBoxW(h, (L"\"" + v + L"\" is not a hotkey.\n\nUse [Ctrl+][Alt+][Shift+]Key, where Key is "
@@ -527,26 +506,12 @@ struct PickData { std::vector<WinPick> wins; const wchar_t *dir, *app, *name; bo
 
 std::vector<WORD> BuildPickTemplate()
 {
-    std::vector<WORD> w;
-    auto dw = [&](DWORD v) { w.push_back(LOWORD(v)); w.push_back(HIWORD(v)); };
-    auto str = [&](const wchar_t* s) { do w.push_back(*s); while (*s++); };
-    auto item = [&](DWORD style, int x, int y, int cx, int cy, WORD id, WORD atom, const wchar_t* text)
-    {
-        if (w.size() & 1) w.push_back(0);
-        dw(style | WS_CHILD | WS_VISIBLE); dw(0);
-        w.push_back((WORD)x); w.push_back((WORD)y); w.push_back((WORD)cx); w.push_back((WORD)cy);
-        w.push_back(id); w.push_back(0xFFFF); w.push_back(atom); str(text); w.push_back(0);
-    };
-    dw(DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU); dw(0);
-    w.push_back(4);
-    w.push_back(0); w.push_back(0); w.push_back(300); w.push_back(190);
-    w.push_back(0); w.push_back(0); str(L"New profile from a window");
-    w.push_back(8); str(L"MS Shell Dlg");
-    item(SS_LEFT, 7, 7, 286, 18, 300, 0x0082, L"Pick the game's window. A profile is written for its title and class, and selected.");
-    item(LBS_NOTIFY | WS_BORDER | WS_VSCROLL | WS_TABSTOP, 7, 28, 286, 130, ID_LIST, 0x0083, L"");
-    item(BS_DEFPUSHBUTTON | WS_TABSTOP, 185, 166, 52, 15, IDOK, 0x0080, L"Create");
-    item(BS_PUSHBUTTON | WS_TABSTOP, 242, 166, 52, 15, IDCANCEL, 0x0080, L"Cancel");
-    return w;
+    DlgTemplate t(4, 300, 190, L"New profile from a window");
+    t.item(SS_LEFT, 7, 7, 286, 18, 300, 0x0082, L"Pick the game's window. A profile is written for its title and class, and selected.");
+    t.item(LBS_NOTIFY | WS_BORDER | WS_VSCROLL | WS_TABSTOP, 7, 28, 286, 130, ID_LIST, 0x0083, L"");
+    t.item(BS_DEFPUSHBUTTON | WS_TABSTOP, 185, 166, 52, 15, IDOK, 0x0080, L"Create");
+    t.item(BS_PUSHBUTTON | WS_TABSTOP, 242, 166, 52, 15, IDCANCEL, 0x0080, L"Cancel");
+    return t.w;
 }
 
 INT_PTR CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)

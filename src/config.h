@@ -1,7 +1,5 @@
-// Two ini layers, loaded with GetPrivateProfile*; reload on hotkey.
-//   justflow.ini (next to the exe) = APP: [app], [hotkeys], [overlay], [ui] toast*/hud*, [log] stats_every/
-//     gpu_timestamps/selftest, [ofa] dll_path, [nr] param_block (machine-level, from the spike).
-//   profiles\<game>.ini = GAME: everything else. The table in config.cpp (kAppKeys) is the authority.
+// Two ini layers, loaded with GetPrivateProfile*; reload on hotkey. justflow.ini (next to the exe) holds the
+// app keys, profiles\<game>.ini everything else; kAppKeys in config.cpp says which is which.
 #pragma once
 #include <windows.h>
 #include <string>
@@ -31,19 +29,16 @@ struct Config
     bool cursor = false, border = false;
     bool desktop = false;   // [capture] desktop=1: the whole primary monitor, not a window (full-desktop FG)
     // capture.mode: auto | wgc | dda. auto = window capture when this Windows can run it uncapped
-    // (MinUpdateInterval, Win11 24H2+), Desktop Duplication otherwise. WGC only reports updates of the
-    // TARGET window; DDA reports the whole desktop, including our own overlay's presents, which
-    // measured as a self-sustaining 240 'frames' a second from a window that never changes.
+    // (MinUpdateInterval, Win11 24H2+), Desktop Duplication otherwise. WGC reports only the TARGET
+    // window's updates; DDA reports the whole desktop, our own overlay's presents included.
     bool dda = false;
     // [nr]
-    //   enabled = the neural layer - the DLSS neural-rendering model (4-12 ms) - which is what F9 toggles
-    //   and what persists.
-    bool  nr_enabled = false;              // out of the box: frame generation only (README)
+    bool  nr_enabled = false;              // the neural layer (F9), the DLSS model: 4-12 ms. Off out of the box (README)
     UINT  work_w = 0, work_h = 0;          // 0 = auto until the capture size is known (WorkAuto in main.cpp)
     bool  work_auto = false;               // [nr] work=auto: re-derived from the native size, never from a fixed number
     int   nr_passes = 1;                   // [nr] passes: model passes per frame, 1..3 (NrConfig::passes)
     float work_scale = 0;                  // [nr] work=Nx: the model at capture / N (1x = native, 2x = half); 0 = auto or WxH
-    int   param_block = 1;                 // 1 Allocate, 2 Capability, 3 Own           [app layer]
+    int   param_block = 1;                 // 1 Allocate, 2 Capability, 3 Own
     NrTuning tuning;
     float exposure_scale = 1.0f;
     float residual_strength = 1.0f;
@@ -70,8 +65,8 @@ struct Config
     int   ofa_grid = 0;
     int   ofa_perf = 0;   // [ofa] perf: 0 fast, 1 medium, 2 slow - NVOFA's accuracy/cost preset
     float zero_below = 0.5f;
-    std::wstring ofa_dll;                  // [app layer]
-    // [ui] (toast*/hud* are app layer, the rest profile)
+    std::wstring ofa_dll;
+    // [ui]
     int   feather = 12;
     int   nrects = 0;                      // manual rects (rect1..rect16); the addon mask adds up to 64 more at compose time
     UiRect rects[16] = {};
@@ -83,10 +78,7 @@ struct Config
     int   hud_corner = 0;                  // 0 tl, 1 tr, 2 bl, 3 br
     int   hud_scale = 3;
     // [fg]
-    // On by default: the cheapest layer. It only pays above ~1.5x gain (the governor pauses it below),
-    // and a game running its own frame generation should keep that and switch ours off (F8): stacking
-    // ours on theirs interpolates interpolations.
-    bool  fg_enabled = true;
+    bool  fg_enabled = true;               // on by default, the cheapest layer; a game with its own FG should switch ours off (F8)
     int   fg_multiplier = 2;               // presented frames per rendered frame, 2..4
     bool  fg_pacing_vblank = true;         // pacing=vblank | timer
     int   fg_engine = 0;                   // FgEngine, [fg] engine=dlssg | warp | latewarp
@@ -94,15 +86,15 @@ struct Config
     float fg_min_gain = 1.5f;              // governor: pause generation while presented/submitted stays below this (0 = never)
     float fg_max_in_fps = 90.0f;           // governor: no generation while the game already delivers more than this (0 = never)
     float fg_phase_ms = 0.0f;              // shifts every scheduled present target (negative = earlier); live (F11)
-    // [overlay] (app layer)
+    // [overlay]
     // mode: 0 composed (layered, DWM-composed) | 1 direct (monitor-sized, no redirection bitmap;
     // falls back to layered when the click-through self-test fails). Both stay click-through.
     int   overlay_mode = 0;
     bool  exclude_from_capture = false;
     int   reassert_topmost_every = 300;
-    // [hotkeys] (app layer)
+    // [hotkeys]
     HotkeySpec hk_toggle, hk_wipe, hk_reload, hk_quit, hk_fg, hk_hud, hk_filters;
-    // [log] (file is per profile, the rest app layer)
+    // [log]
     std::wstring log_file = L"justflow.log";
     int   stats_every = 180;
     bool  gpu_timestamps = true;
@@ -118,9 +110,9 @@ std::wstring ConfigStrayKeys(const wchar_t* profile);
 // Which file a key belongs in: true = justflow.ini, false = profiles\<game>.ini. The settings UI
 // writes through this so the layer split has one authority (kAppKeys in config.cpp).
 bool ConfigIsAppKey(const wchar_t* sec, const wchar_t* key);
-// True if a key that is latched at CreateFeature differs (work size, style, block, tuning).
 // The filter layer is live: switched on AND with something in it.
 inline bool FiltersLive(const Config& c) { return c.filters_enabled && (c.sharpen > 0 || c.deband > 0 || c.saturation != 1.0f); }
+// True if a key that is latched at CreateFeature differs (work size, passes, block, tuning).
 bool ConfigNeedsRebuild(const Config& a, const Config& b);
 // True if a key that is only read when the capture and the overlay are created differs, so a
 // reload has to tear the pipeline down and build it again. Deliberately NOT exclude_from_capture:
@@ -129,5 +121,6 @@ bool ConfigNeedsRebuild(const Config& a, const Config& b);
 bool ConfigNeedsRestart(const Config& a, const Config& b);
 // Fills an NrConfig from the config (work size must already be resolved).
 NrConfig ConfigToNr(const Config& c);
-// "[Ctrl+][Alt+][Shift+]Key" (Key = F1..F24 or a letter/digit) <-> HotkeySpec. Unparsable key -> def_vk.
-HotkeySpec   ParseHotkey(std::wstring s, UINT def_vk);
+// "[Ctrl+][Alt+][Shift+]Key" (Key = F1..F24 or a letter/digit) -> HotkeySpec. Lenient: an unparsable key gives
+// def_vk, an unknown modifier is skipped. *strict (optional) = the text is exactly that grammar (Settings checks it).
+HotkeySpec   ParseHotkey(std::wstring s, UINT def_vk, bool* strict = nullptr);
