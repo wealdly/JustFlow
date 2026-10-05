@@ -19,19 +19,16 @@ static const AppKey kAppKeys[] = {
     { L"ofa", L"dll_path" },
     { L"nr", L"param_block" }, { L"nr", L"enabled" },
     // The three layer switches (F9 / F6 / F8, the tray, Settings) are the user's, not a game's: one state
-    // for every profile. Profiles set quality dials only - a profile that switched layers on made
-    // picking it (or a preset) turn the 4-12 ms model on behind the user's back.
+    // for every profile, so picking a profile never turns the 4-12 ms model on behind the user's back.
     { L"filters", L"enabled" },
     { L"fg", L"enabled" },
 };
 
-static bool IsAppKey(const wchar_t* sec, const wchar_t* key)
+bool ConfigIsAppKey(const wchar_t* sec, const wchar_t* key)
 {
     for (const auto& k : kAppKeys) if (!_wcsicmp(k.sec, sec) && (!k.key || !_wcsicmp(k.key, key))) return true;
     return false;
 }
-
-bool ConfigIsAppKey(const wchar_t* sec, const wchar_t* key) { return IsAppKey(sec, key); }
 
 std::wstring ConfigStrayKeys(const wchar_t* profile)
 {
@@ -47,24 +44,28 @@ std::wstring ConfigStrayKeys(const wchar_t* profile)
         {
             std::wstring key(e, wcscspn(e, L"="));
             while (!key.empty() && iswspace(key.back())) key.pop_back();
-            if (IsAppKey(k.sec, key.c_str())) out += (out.empty() ? L"" : L", ") + std::wstring(k.sec) + L"." + key;
+            if (ConfigIsAppKey(k.sec, key.c_str())) out += (out.empty() ? L"" : L", ") + std::wstring(k.sec) + L"." + key;
         }
     }
     return out;
 }
 
-HotkeySpec ParseHotkey(std::wstring s, UINT def_vk)
+HotkeySpec ParseHotkey(std::wstring s, UINT def_vk, bool* strict)
 {
     HotkeySpec h; h.vk = def_vk;
+    bool ok = true;
     for (auto& c : s) c = (wchar_t)towupper(c);
     size_t pos;
     while ((pos = s.find(L'+')) != std::wstring::npos)
     {
         const std::wstring m = s.substr(0, pos); s = s.substr(pos + 1);
-        if (m == L"CTRL") h.mods |= MOD_CONTROL; else if (m == L"ALT") h.mods |= MOD_ALT; else if (m == L"SHIFT") h.mods |= MOD_SHIFT;
+        if (m == L"CTRL") h.mods |= MOD_CONTROL; else if (m == L"ALT") h.mods |= MOD_ALT; else if (m == L"SHIFT") h.mods |= MOD_SHIFT; else ok = false;
     }
-    if (s.size() >= 2 && s[0] == L'F') { const int n = _wtoi(s.c_str() + 1); if (n >= 1 && n <= 24) h.vk = VK_F1 + n - 1; }
-    else if (s.size() == 1) h.vk = (UINT)s[0];
+    const int n = s.size() >= 2 && s[0] == L'F' ? _wtoi(s.c_str() + 1) : 0;
+    if (n >= 1 && n <= 24) { h.vk = VK_F1 + n - 1; ok = ok && s == L"F" + std::to_wstring(n); }   // strict: no "F01", no "F1x"
+    else if (s.size() == 1) { h.vk = (UINT)s[0]; ok = ok && iswalnum(s[0]); }
+    else ok = false;
+    if (strict) *strict = ok;
     return h;
 }
 
@@ -74,7 +75,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     const wchar_t* pa = exists(app) ? app : nullptr;
     const wchar_t* pp = exists(profile) ? profile : nullptr;
     // each key is read from the file of its layer; a missing file reads as "key absent" (default kept)
-    auto P = [&](const wchar_t* sec, const wchar_t* key) { return IsAppKey(sec, key) ? pa : pp; };
+    auto P = [&](const wchar_t* sec, const wchar_t* key) { return ConfigIsAppKey(sec, key) ? pa : pp; };
     auto S = [&](const wchar_t* sec, const wchar_t* key, const std::wstring& def) -> std::wstring
     {
         const wchar_t* path = P(sec, key); if (!path) return def;
@@ -103,7 +104,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.work_auto = !c.work_w || !c.work_h;
     c.nr_passes = std::clamp(I(L"nr", L"passes", c.nr_passes), 1, 3);
     // model resolution as a share of the capture: 100% = the capture itself, 50% = half each way. Kept
-    // internally as the divisor; "Nx" (the divisor, from an earlier build) and "native" still read.
+    // internally as the divisor; the legacy "Nx" (the divisor itself) and "native" still read.
     const wchar_t last = work.empty() ? 0 : work.back();
     const float wv = (float)_wtof(work.c_str());
     c.work_scale = work == L"native" ? 1.0f : (last == L'%' && wv > 0) ? 100.0f / wv : (last == L'x' || last == L'X') ? wv : 0.0f;
@@ -119,9 +120,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     c.exposure_scale = F(L"nr", L"exposure_scale", c.exposure_scale);
     c.residual_strength = F(L"nr", L"residual_strength", c.residual_strength);
     c.chroma = F(L"nr", L"chroma", c.chroma);
-    // sharpen/saturation used to live in [nr], which put the filter layer's keys inside the neural
-    // layer's section. They read from [filters] now, falling back to the old home so a profile
-    // written before the move keeps its values.
+    // [nr] sharpen/saturation: their old home, still read so older profiles keep their values
     c.filters_enabled = B(L"filters", L"enabled", c.filters_enabled);
     c.sharpen = F(L"filters", L"sharpen", F(L"nr", L"sharpen", c.sharpen));
     c.saturation = F(L"filters", L"saturation", F(L"nr", L"saturation", c.saturation));
