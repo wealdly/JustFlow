@@ -59,7 +59,7 @@ static int RunCell(UINT w, UINT h, NrParamBlock block, const char* out_path)
     Synth(px, w, h, 3); GpuUploadTex(g, color[1], px.data(), w, h, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     std::vector<uint8_t> zero((size_t)w * h * 4, 0); GpuUploadTex(g, mv, zero.data(), w, h, 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-    NrConfig cfg; cfg.work_w = w; cfg.work_h = h; cfg.block = block;
+    NrConfig cfg; cfg.work_w = w; cfg.work_h = h;
     if (!GpuBegin(g)) { result("NOBEGIN", 0, -1, -1, -1, 0); return 2; }
     const bool created = NrCreate(nr, g.list, cfg);
     const UINT64 cv = GpuEnd(g);
@@ -107,7 +107,6 @@ int main(int argc, char** argv)
     wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
     for (const Size& sz : sizes) for (int bl : blocks)
     {
-        // the fork's block styles only matter once per size; run the cheap ones first
         wchar_t cmd[512]; swprintf_s(cmd, L"\"%ls\" --cell %u %u %d", exe, sz.w, sz.h, bl);
         STARTUPINFOW si = { sizeof si }; PROCESS_INFORMATION pi = {};
         const double t0 = NowMs();

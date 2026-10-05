@@ -42,18 +42,15 @@ struct Retired { NVSDK_NGX_Handle* h; int evals_left; };
 struct Nr
 {
     Gpu* g = nullptr;
-    std::wstring dir;
     HMODULE fwd = nullptr;
     PFN_NR_InitExt init_ext = nullptr; PFN_NR_Create create = nullptr; PFN_NR_Evaluate evaluate = nullptr; PFN_NR_Release release = nullptr;
     NVSDK_NGX_Parameter* params = nullptr;
     OwnParams own;
     NrParamBlock block = NrBlockAllocate;
-    bool core_inited = false;
     int float_slot = -1;          // -2 = typed Set(float) works, >=0 = vtable slot, -1 = unknown
     static const int kMaxPasses = 3;
-    NVSDK_NGX_Handle* feature = nullptr;   // pass 1; passes 2..3 in more[] (nullptr when not configured)
-    NVSDK_NGX_Handle* more[kMaxPasses - 1] = {};
-    ID3D12Resource*   mid[2] = {};         // passes > 1: pass outputs feeding the next pass (RGBA8 work size, UAV at rest)
+    NVSDK_NGX_Handle* pass[kMaxPasses] = {};      // one feature per model pass; pass[0] exists whenever any does
+    ID3D12Resource*   mid[kMaxPasses - 1] = {};   // mid[k]: pass k's output, pass k+1's input (RGBA8 work size, UAV at rest)
     bool submitted = false;
     NrConfig live;
     std::vector<Retired> retired;
@@ -65,10 +62,8 @@ static void NVSDK_CONV Discard(const char*, NVSDK_NGX_Logging_Level, NVSDK_NGX_F
 
 // ---- parameter writes: typed first, vtable slot when the block's typed float setter is a no-op --
 // The driver's capability block does not lay out its setters the way the header declares them
-// (fork finding: float setter answers on slot 6). Getters mirror setters +8. Calling convention
-// is __thiscall with the block as `this`.
+// (its float setter answers on slot 6). __thiscall with the block as `this`.
 typedef void(__thiscall* PFN_SetF)(void*, const char*, float);
-typedef void(__thiscall* PFN_SetU)(void*, const char*, unsigned int);
 typedef void(__thiscall* PFN_SetULL)(void*, const char*, unsigned long long);
 
 static void SetF(Nr* n, const char* name, float v)
@@ -79,8 +74,8 @@ static void SetF(Nr* n, const char* name, float v)
 static void SetU(Nr* n, const char* name, unsigned int v) { n->params->Set(name, v); }
 static void SetRes(Nr* n, const char* name, ID3D12Resource* r)
 {
-    // resources go through the 64-bit setter (slot 0) as a ULL; the typed ID3D12Resource* setter
-    // left them unset on the capability block (fork finding).
+    // resources go through the 64-bit setter (slot 0) as a ULL: the typed ID3D12Resource* setter
+    // leaves them unset on the capability block.
     if (n->block == NrBlockCapability) { void** vt = *(void***)n->params; ((PFN_SetULL)vt[0])(n->params, name, (unsigned long long)r); }
     else n->params->Set(name, r);
 }
@@ -118,8 +113,8 @@ NVSDK_NGX_Parameter* NgxCoreParams(Gpu& g, const wchar_t* dir, const char* tag)
 
 Nr* NrInit(Gpu& g, const wchar_t* dir, NrParamBlock block)
 {
-    Nr* n = new Nr; n->g = &g; n->dir = dir; n->block = block;
-    std::wstring fwd = n->dir + L"\\nvngx.dll_justflow.dll", rt = n->dir + L"\\nvngx_dlssnr.dll";
+    Nr* n = new Nr; n->g = &g; n->block = block;
+    const std::wstring fwd = std::wstring(dir) + L"\\nvngx.dll_justflow.dll", rt = std::wstring(dir) + L"\\nvngx_dlssnr.dll";
     n->fwd = LoadLibraryW(fwd.c_str());
     if (!n->fwd) { Log("[ngx] forwarder %ls did not load (err %lu)", fwd.c_str(), GetLastError()); delete n; return nullptr; }
     auto load = (int(*)(const wchar_t*))GetProcAddress(n->fwd, "NrfFwdLoad");
@@ -143,7 +138,6 @@ Nr* NrInit(Gpu& g, const wchar_t* dir, NrParamBlock block)
         NVSDK_NGX_Result r = NVSDK_NGX_D3D12_Init(0x1000000ULL, dir, g.dev, &n->common, NVSDK_NGX_Version_API);
         Log("[ngx] NVSDK_NGX_D3D12_Init -> 0x%08X (%s)", r, NgxResultName(r));
         if (NVSDK_NGX_FAILED(r)) { delete n; return nullptr; }
-        n->core_inited = true;
         r = block == NrBlockAllocate ? NVSDK_NGX_D3D12_AllocateParameters(&n->params) : NVSDK_NGX_D3D12_GetCapabilityParameters(&n->params);
         Log("[ngx] parameter block: %s -> 0x%08X", block == NrBlockAllocate ? "AllocateParameters" : "GetCapabilityParameters", r);
         if (NVSDK_NGX_FAILED(r) || !n->params) { delete n; return nullptr; }
@@ -159,21 +153,23 @@ void NrShutdown(Nr* n)
 {
     if (!n) return;
     for (auto& r : n->retired) n->release(r.h);
-    if (n->feature) n->release(n->feature);
-    for (auto*& h : n->more) if (h) n->release(h);
-    for (auto*& t : n->mid) if (t) t->Release();
-    if (n->core_inited && n->block != NrBlockOwn) { NVSDK_NGX_D3D12_DestroyParameters(n->params); NVSDK_NGX_D3D12_Shutdown1(n->g->dev); }
+    for (auto* h : n->pass) if (h) n->release(h);
+    for (auto* t : n->mid) if (t) t->Release();
+    if (n->block != NrBlockOwn) { NVSDK_NGX_D3D12_DestroyParameters(n->params); NVSDK_NGX_D3D12_Shutdown1(n->g->dev); }
     if (n->fwd) FreeLibrary(n->fwd);
     delete n;
 }
 
 int NrFloatSlot(const Nr* n) { return n->float_slot; }
-bool NrReady(const Nr* n) { return n->feature && n->submitted; }
+bool NrReady(const Nr* n) { return n->pass[0] && n->submitted; }
 void NrMarkSubmitted(Nr* n) { n->submitted = true; }
 const char* NrLastError(const Nr* n) { return n->last_error.c_str(); }
+bool NrMatches(const Nr* n, UINT w, UINT h) { return n && n->pass[0] && n->live.work_w == w && n->live.work_h == h; }
 
-static void SetTuning(Nr* n, const NrTuning& t)
+static void SetCommon(Nr* n, UINT w, UINT h, const NrTuning& t)
 {
+    SetU(n, "DLSSNR.Enabled", 1u);
+    SetU(n, "DLSSNR.Width", w); SetU(n, "DLSSNR.Height", h);
     SetU(n, "DLSSNR.Hint.Render.Preset", (unsigned)t.preset);
     SetF(n, "DLSSNR.Intensity", t.intensity);
     SetU(n, "DLSSNR.Style", (unsigned)t.style);
@@ -189,40 +185,12 @@ static void SetTuning(Nr* n, const NrTuning& t)
 // an already re-graded image (OptiScaler: "local tone is applied only by the first layer").
 static NrTuning PassTuning(const NrTuning& t, int k) { NrTuning p = t; if (k) p.local_tone = 0.0f; return p; }
 
-static NVSDK_NGX_Handle* CreateOne(Nr* n, ID3D12GraphicsCommandList* cl, const NrConfig& cfg, const NrTuning& tuning);
-
-bool NrCreate(Nr* n, ID3D12GraphicsCommandList* cl, const NrConfig& cfg)
-{
-    if (n->feature) { n->retired.push_back({ n->feature, 32 }); n->feature = nullptr; n->submitted = false; }
-    for (auto*& h : n->more) if (h) { n->retired.push_back({ h, 32 }); h = nullptr; }
-    const int passes = std::clamp(cfg.passes, 1, Nr::kMaxPasses);
-    NVSDK_NGX_Handle* first = CreateOne(n, cl, cfg, PassTuning(cfg.tuning, 0));
-    if (!first) return false;
-    for (int k = 1; k < passes; ++k)
-        if (!(n->more[k - 1] = CreateOne(n, cl, cfg, PassTuning(cfg.tuning, k)))) { Log("[ngx] pass %d not created - running %d", k + 1, k); break; }
-    for (int i = 0; i < 2; ++i)
-    {
-        const bool need = n->more[i] != nullptr;   // pass i+2 reads mid[i]
-        const D3D12_RESOURCE_DESC d = n->mid[i] ? n->mid[i]->GetDesc() : D3D12_RESOURCE_DESC{};
-        if (n->mid[i] && (!need || d.Width != cfg.work_w || d.Height != cfg.work_h)) { n->mid[i]->Release(); n->mid[i] = nullptr; }
-        if (need && !n->mid[i]) n->mid[i] = GpuMakeTex(*n->g, cfg.work_w, cfg.work_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"nr_pass");
-        if (need && !n->mid[i]) { n->release(n->more[i]); n->more[i] = nullptr; }
-    }
-    n->feature = first; n->live = cfg; n->submitted = false;
-    int live = 1; for (auto* h : n->more) live += h != nullptr;
-    Log("[ngx] feature 18 created %ux%u preset %d, %d pass%s (submit before evaluating)", cfg.work_w, cfg.work_h, cfg.tuning.preset, live, live > 1 ? "es" : "");
-    return true;
-}
-
 static NVSDK_NGX_Handle* CreateOne(Nr* n, ID3D12GraphicsCommandList* cl, const NrConfig& cfg, const NrTuning& tuning)
 {
     n->params->Reset();
     SetU(n, "CreationNodeMask", 1u); SetU(n, "VisibilityNodeMask", 1u);
-    SetU(n, "DLSSNR.Enabled", 1u);
-    SetU(n, "DLSSNR.Width", cfg.work_w); SetU(n, "DLSSNR.Height", cfg.work_h);
-    // No Input/Output dims, no Upscaling/Scale: feature 18 ignores them. Measured - the old
-    // "style A" set all six and produced byte-identical output at 1080p and 1440p.
-    SetTuning(n, tuning);
+    // No Input/Output dims, no Upscaling/Scale: feature 18 ignores them (byte-identical output with them set).
+    SetCommon(n, cfg.work_w, cfg.work_h, tuning);
     NVSDK_NGX_Handle* h = nullptr; DWORD code = 0;
     NVSDK_NGX_Result r = (NVSDK_NGX_Result)0x7FFFFFFF;
     NgxMutex().lock();   // no lock_guard: __try forbids unwindable objects in this frame
@@ -233,40 +201,26 @@ static NVSDK_NGX_Handle* CreateOne(Nr* n, ID3D12GraphicsCommandList* cl, const N
     return h;
 }
 
-bool NrMatches(const Nr* n, UINT w, UINT h) { return n && n->feature && n->live.work_w == w && n->live.work_h == h; }
-
-static unsigned EvaluateOne(Nr* n, ID3D12GraphicsCommandList* cl, NVSDK_NGX_Handle* f, const NrTuning& tuning, ID3D12Resource* color, ID3D12Resource* mv, ID3D12Resource* output, bool reset, float exposure_scale);
-
-unsigned NrEvaluate(Nr* n, ID3D12GraphicsCommandList* cl, ID3D12Resource* color, ID3D12Resource* mv, ID3D12Resource* output, bool reset, float exposure_scale)
+bool NrCreate(Nr* n, ID3D12GraphicsCommandList* cl, const NrConfig& cfg)
 {
-    if (!n->feature) return NVSDK_NGX_Result_FAIL_FeatureNotFound;
-    const UINT w = n->live.work_w, h = n->live.work_h;
-    // The feature and the textures must be the same size, checked HERE because every caller comes
-    // through here. A feature larger than the textures fails with InvalidParameter on every frame; a
-    // feature SMALLER than them succeeds and writes only a top-left subrect, leaving the rest of
-    // the output at zero - which composes to a dark frame with a correct corner. That was the
-    // long-running "renders in the upper left" bug: a live work-size change that left the two out
-    // of step. Refusing the call shows native instead, until the rebuild brings them back in line.
+    for (auto*& h : n->pass) if (h) { n->retired.push_back({ h, 32 }); h = nullptr; }
+    n->submitted = false;
+    const int passes = std::clamp(cfg.passes, 1, Nr::kMaxPasses);
+    if (!(n->pass[0] = CreateOne(n, cl, cfg, PassTuning(cfg.tuning, 0)))) return false;
+    for (int k = 1; k < passes; ++k)
+        if (!(n->pass[k] = CreateOne(n, cl, cfg, PassTuning(cfg.tuning, k)))) { Log("[ngx] pass %d not created - running %d", k + 1, k); break; }
+    for (int i = 0; i < Nr::kMaxPasses - 1; ++i)
     {
-        const D3D12_RESOURCE_DESC oc = output->GetDesc(), ic = color->GetDesc();
-        if (oc.Width != w || oc.Height != h || ic.Width != w || ic.Height != h)
-        {
-            n->last_error = "work textures do not match the feature size";
-            return NVSDK_NGX_Result_FAIL_InvalidParameter;
-        }
+        const bool need = n->pass[i + 1] != nullptr;
+        const D3D12_RESOURCE_DESC d = n->mid[i] ? n->mid[i]->GetDesc() : D3D12_RESOURCE_DESC{};
+        if (n->mid[i] && (!need || d.Width != cfg.work_w || d.Height != cfg.work_h)) { n->mid[i]->Release(); n->mid[i] = nullptr; }
+        if (need && !n->mid[i]) n->mid[i] = GpuMakeTex(*n->g, cfg.work_w, cfg.work_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"nr_pass");
+        if (need && !n->mid[i]) { n->release(n->pass[i + 1]); n->pass[i + 1] = nullptr; }
     }
-    // pass k reads pass k-1's output: color -> mid[0] -> mid[1] -> output, as many as are live
-    int last = 0; while (last < 2 && n->more[last]) ++last;   // index of the last pass
-    ID3D12Resource* in = color; unsigned r = 1;
-    for (int k = 0; k <= last && r == 1; ++k)
-    {
-        ID3D12Resource* out = k == last ? output : n->mid[k];
-        r = EvaluateOne(n, cl, k ? n->more[k - 1] : n->feature, PassTuning(n->live.tuning, k), in, mv, out, reset, exposure_scale);
-        if (k < last) GpuBarrier(cl, out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        in = out;
-    }
-    for (int i = 0; i < last; ++i) GpuBarrier(cl, n->mid[i], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    return r;
+    n->live = cfg;
+    int live = 0; for (auto* h : n->pass) live += h != nullptr;
+    Log("[ngx] feature 18 created %ux%u preset %d, %d pass%s (submit before evaluating)", cfg.work_w, cfg.work_h, cfg.tuning.preset, live, live > 1 ? "es" : "");
+    return true;
 }
 
 static unsigned EvaluateOne(Nr* n, ID3D12GraphicsCommandList* cl, NVSDK_NGX_Handle* f, const NrTuning& tuning, ID3D12Resource* color, ID3D12Resource* mv, ID3D12Resource* output, bool reset, float exposure_scale)
@@ -281,9 +235,8 @@ static unsigned EvaluateOne(Nr* n, ID3D12GraphicsCommandList* cl, NVSDK_NGX_Hand
     SetU(n, "DLSSNR.OutputSubrectBaseX", 0u); SetU(n, "DLSSNR.OutputSubrectBaseY", 0u);
     SetU(n, "DLSSNR.OutputSubrectWidth", w); SetU(n, "DLSSNR.OutputSubrectHeight", h);
     SetF(n, "DLSSNR.MVecScaleX", 1.0f); SetF(n, "DLSSNR.MVecScaleY", 1.0f);
-    SetU(n, "DLSSNR.Enabled", 1u); SetU(n, "DLSSNR.Reset", reset ? 1u : 0u);
-    SetU(n, "DLSSNR.Width", w); SetU(n, "DLSSNR.Height", h);
-    SetTuning(n, tuning);
+    SetU(n, "DLSSNR.Reset", reset ? 1u : 0u);
+    SetCommon(n, w, h, tuning);
     SetF(n, "DLSS.Pre.Exposure", 1.0f); SetF(n, "DLSS.Exposure.Scale", exposure_scale);
     DWORD code = 0; NVSDK_NGX_Result r = (NVSDK_NGX_Result)0x7FFFFFFF;
     NgxMutex().lock();
@@ -294,11 +247,35 @@ static unsigned EvaluateOne(Nr* n, ID3D12GraphicsCommandList* cl, NVSDK_NGX_Hand
     return (unsigned)r;
 }
 
+unsigned NrEvaluate(Nr* n, ID3D12GraphicsCommandList* cl, ID3D12Resource* color, ID3D12Resource* mv, ID3D12Resource* output, bool reset, float exposure_scale)
+{
+    if (!n->pass[0]) return NVSDK_NGX_Result_FAIL_FeatureNotFound;
+    const UINT w = n->live.work_w, h = n->live.work_h;
+    // Checked here, where every caller comes through: a feature larger than the textures fails every
+    // frame; a SMALLER one succeeds but writes only a top-left subrect (the rest composes dark).
+    // Refusing shows native until the rebuild brings them back in line.
+    const D3D12_RESOURCE_DESC oc = output->GetDesc(), ic = color->GetDesc();
+    if (oc.Width != w || oc.Height != h || ic.Width != w || ic.Height != h)
+    {
+        n->last_error = "work textures do not match the feature size";
+        return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    }
+    // pass k reads pass k-1's output: color -> mid[0] -> mid[1] -> output, as many as are live
+    int last = 0; while (last < Nr::kMaxPasses - 1 && n->pass[last + 1]) ++last;   // index of the last pass
+    ID3D12Resource* in = color; unsigned r = 1;
+    for (int k = 0; k <= last && r == 1; ++k)
+    {
+        ID3D12Resource* out = k == last ? output : n->mid[k];
+        r = EvaluateOne(n, cl, n->pass[k], PassTuning(n->live.tuning, k), in, mv, out, reset, exposure_scale);
+        if (k < last) GpuBarrier(cl, out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        in = out;
+    }
+    for (int i = 0; i < last; ++i) GpuBarrier(cl, n->mid[i], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    return r;
+}
+
 void NrRetireTick(Nr* n)
 {
-    for (size_t i = 0; i < n->retired.size();)
-    {
-        if (--n->retired[i].evals_left <= 0) { n->release(n->retired[i].h); n->retired.erase(n->retired.begin() + i); Log("[ngx] retired feature released"); }
-        else ++i;
-    }
+    auto& v = n->retired;
+    v.erase(std::remove_if(v.begin(), v.end(), [n](Retired& r) { if (--r.evals_left > 0) return false; n->release(r.h); Log("[ngx] retired feature released"); return true; }), v.end());
 }

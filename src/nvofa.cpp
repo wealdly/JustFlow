@@ -10,7 +10,7 @@
 
 #pragma comment(lib, "version.lib")
 
-static const int kIn = 5, kOut = 3;   // input slots (0/1 per frame, 2..4 held); reg[] = inputs[0..kIn-1], then flow[i]
+static const int kIn = 5, kOut = 3;   // res[] / reg[]: input slots (0/1 per frame, 2..4 held), then the flow outputs
 struct Ofa
 {
     Gpu* g = nullptr;
@@ -19,10 +19,9 @@ struct Ofa
     NvOFHandle session = nullptr;
     ID3D12Fence* fence = nullptr;
     UINT64 value = 0;
-    ID3D12Resource* inputs[kIn] = {};
-    ID3D12Resource* flow[kOut] = {};
+    ID3D12Resource* res[kIn + kOut] = {};
     NvOFGPUBufferHandle reg[kIn + kOut] = {};
-    UINT w = 0, h = 0, grid = 0, fw = 0, fh = 0;
+    UINT fw = 0, fh = 0;
     std::mutex mu;   // nvOFExecute + value from two threads (per-frame path, model track)
 };
 
@@ -103,7 +102,7 @@ static bool FormatSupported(Ofa* o, NV_OF_BUFFER_USAGE usage, DXGI_FORMAT want, 
 
 Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid, const wchar_t* dll_override, int perf)
 {
-    Ofa* o = new Ofa(); o->g = &g; o->w = w; o->h = h;
+    Ofa* o = new Ofa(); o->g = &g;
     o->lib = LoadNvofa(dll_override);
     if (!o->lib) { OfaDestroy(o); return nullptr; }
     auto create = (decltype(&NvOFAPICreateInstanceD3D12))GetProcAddress(o->lib, "NvOFAPICreateInstanceD3D12");
@@ -121,19 +120,14 @@ Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid, const wchar_t* dll_override, in
     const std::vector<uint32_t> grids = Caps(o, NV_OF_CAPS_SUPPORTED_OUTPUT_GRID_SIZES);
     if (grids.empty()) { Log("[ofa] no supported grid sizes"); OfaDestroy(o); return nullptr; }
     std::string gl; for (uint32_t x : grids) gl += std::to_string(x) + " ";
-    // auto = 2, not the smallest. Measured against a known split-motion pair (left half panning, right
-    // half static), 960x540 input, deterministic across runs:
-    //   grid 1   0.99 ms   84 columns of smeared boundary
-    //   grid 2   0.46 ms   12 columns          <- cheaper AND sharper
-    //   grid 4   0.40 ms   86 columns
-    // Grid 2 wins on both axes. The finest grid estimates each vector from the smallest window, so it
-    // is the noisiest, and the coarsest genuinely blurs the boundary - 2 is the bias/variance middle.
-    // Taking min_element picked the option that was neither stable nor cheap.
-    o->grid = 2;
-    if (std::find(grids.begin(), grids.end(), 2u) == grids.end()) o->grid = *std::min_element(grids.begin(), grids.end());
-    if (grid > 0 && std::find(grids.begin(), grids.end(), (uint32_t)grid) != grids.end()) o->grid = (UINT)grid;
+    // auto = 2, not the smallest. On a split-motion pair (960x540; smeared boundary columns): grid 1
+    // 0.99 ms / 84, grid 2 0.46 ms / 12, grid 4 0.40 ms / 86. The finest grid is the noisiest, the
+    // coarsest blurs the boundary.
+    auto has = [&](uint32_t x) { return std::find(grids.begin(), grids.end(), x) != grids.end(); };
+    UINT cell = has(2) ? 2 : *std::min_element(grids.begin(), grids.end());
+    if (grid > 0 && has((uint32_t)grid)) cell = (UINT)grid;
     else if (grid > 0) Log("[ofa] requested grid %d unsupported", grid);
-    Log("[ofa] supported grids: %s-> using %u", gl.c_str(), o->grid);
+    Log("[ofa] supported grids: %s-> using %u", gl.c_str(), cell);
     const std::vector<uint32_t> minw = Caps(o, NV_OF_CAPS_WIDTH_MIN), minh = Caps(o, NV_OF_CAPS_HEIGHT_MIN);
     const std::vector<uint32_t> maxw = Caps(o, NV_OF_CAPS_WIDTH_MAX), maxh = Caps(o, NV_OF_CAPS_HEIGHT_MAX);
     if (!minw.empty() && !minh.empty() && !maxw.empty() && !maxh.empty())
@@ -147,42 +141,36 @@ Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid, const wchar_t* dll_override, in
 
     NV_OF_INIT_PARAMS ip = {};
     ip.width = w; ip.height = h;
-    ip.outGridSize = (NV_OF_OUTPUT_VECTOR_GRID_SIZE)o->grid;
+    ip.outGridSize = (NV_OF_OUTPUT_VECTOR_GRID_SIZE)cell;
     ip.mode = NV_OF_MODE_OPTICALFLOW;
     ip.perfLevel = perf >= 2 ? NV_OF_PERF_LEVEL_SLOW : perf == 1 ? NV_OF_PERF_LEVEL_MEDIUM : NV_OF_PERF_LEVEL_FAST;
     ip.enableOutputCost = NV_OF_FALSE;   // a cost threshold rejects correct motion and misses low-cost errors (docs/)
-    // Measured on tools/scene (exact motion known): the 2-3 px of motion OFA invents in untextured sky costs
-    // 0.000 photometrically (flat warped onto flat), and beside moving geometry its vectors warp BETTER than
-    // the truth (1.6 vs 9.2 grey levels: they carry the edge instead of tearing at the disocclusion). A
-    // texture gate that catches the sky also rejects a third of real surfaces. Nothing to reject.
+    // No texture gate either: motion OFA invents in flat sky warps flat onto flat, beside moving geometry its
+    // vectors warp better than the truth (they carry the edge), and a gate that catches the sky rejects a
+    // third of real surfaces.
     ip.predDirection = NV_OF_PRED_DIRECTION_FORWARD;
     ip.inputBufferFormat = NV_OF_BUFFER_FORMAT_GRAYSCALE8;
     st = o->api.nvOFInit(o->session, &ip);
     if (st != NV_OF_SUCCESS) { Fail(o, "nvOFInit", st); OfaDestroy(o); return nullptr; }
 
     if (FAILED(g.dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), (void**)&o->fence))) { Log("[ofa] fence failed"); OfaDestroy(o); return nullptr; }
-    o->fw = (w + o->grid - 1) / o->grid; o->fh = (h + o->grid - 1) / o->grid;
-    const wchar_t* in_names[kIn] = { L"ofa_in0", L"ofa_in1", L"ofa_in2", L"ofa_in3", L"ofa_in4" };
-    const wchar_t* flow_names[kOut] = { L"ofa_flow", L"ofa_flow2", L"ofa_flow3" };
-    for (int i = 0; i < kIn; ++i)
-        o->inputs[i] = GpuMakeTex(g, w, h, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, in_names[i]);
-    for (int i = 0; i < kOut; ++i)
-        o->flow[i] = GpuMakeTex(g, o->fw, o->fh, DXGI_FORMAT_R16G16_SINT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, flow_names[i]);
-    ID3D12Resource* res[kIn + kOut];
-    for (int i = 0; i < kIn; ++i) res[i] = o->inputs[i];
-    for (int i = 0; i < kOut; ++i) res[kIn + i] = o->flow[i];
+    o->fw = (w + cell - 1) / cell; o->fh = (h + cell - 1) / cell;
+    const wchar_t* names[kIn + kOut] = { L"ofa_in0", L"ofa_in1", L"ofa_in2", L"ofa_in3", L"ofa_in4", L"ofa_flow", L"ofa_flow2", L"ofa_flow3" };
+    for (int i = 0; i < kIn + kOut; ++i)
+        o->res[i] = i < kIn ? GpuMakeTex(g, w, h, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, names[i])
+                            : GpuMakeTex(g, o->fw, o->fh, DXGI_FORMAT_R16G16_SINT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, names[i]);
     for (int i = 0; i < kIn + kOut; ++i)
     {
-        if (!res[i]) { OfaDestroy(o); return nullptr; }
+        if (!o->res[i]) { OfaDestroy(o); return nullptr; }
         NV_OF_REGISTER_RESOURCE_PARAMS_D3D12 rp = {};
-        rp.resource = res[i]; rp.hOFGpuBuffer = &o->reg[i];
+        rp.resource = o->res[i]; rp.hOFGpuBuffer = &o->reg[i];
         rp.inputFencePoint = { g.fence, g.fence_value };
         rp.outputFencePoint = { o->fence, ++o->value };
         st = o->api.nvOFRegisterResourceD3D12(o->session, &rp);
         if (st != NV_OF_SUCCESS) { --o->value; Fail(o, "nvOFRegisterResourceD3D12", st); OfaDestroy(o); return nullptr; }
         if (!GpuWait(g, o->fence, o->value, 30000)) { Log("[ofa] register fence timeout"); OfaDestroy(o); return nullptr; }
     }
-    Log("[ofa] active %ux%u grid=%u flow=%ux%u R16G16_SINT perf=%s", w, h, o->grid, o->fw, o->fh, perf >= 2 ? "SLOW" : perf == 1 ? "MEDIUM" : "FAST");
+    Log("[ofa] active %ux%u grid=%u flow=%ux%u R16G16_SINT perf=%s", w, h, cell, o->fw, o->fh, perf >= 2 ? "SLOW" : perf == 1 ? "MEDIUM" : "FAST");
     return o;
 }
 
@@ -194,26 +182,21 @@ void OfaDestroy(Ofa* o)
     if (g.queue && g.fence) GpuWaitIdle(g, 30000);
     if (o->fence) GpuWait(g, o->fence, o->value, 30000);
     if (o->session)
-        for (NvOFGPUBufferHandle& b : o->reg) if (b)
-        {
-            NV_OF_UNREGISTER_RESOURCE_PARAMS_D3D12 up = {}; up.hOFGpuBuffer = b;
-            o->api.nvOFUnregisterResourceD3D12(&up); b = nullptr;
-        }
-    for (ID3D12Resource*& r : o->inputs) if (r) { r->Release(); r = nullptr; }
-    for (ID3D12Resource*& r : o->flow) if (r) { r->Release(); r = nullptr; }
-    if (o->session) { o->api.nvOFDestroy(o->session); o->session = nullptr; }
-    if (o->fence) { o->fence->Release(); o->fence = nullptr; }
+        for (NvOFGPUBufferHandle b : o->reg) if (b) { NV_OF_UNREGISTER_RESOURCE_PARAMS_D3D12 up = {}; up.hOFGpuBuffer = b; o->api.nvOFUnregisterResourceD3D12(&up); }
+    for (ID3D12Resource* r : o->res) if (r) r->Release();
+    if (o->session) o->api.nvOFDestroy(o->session);
+    if (o->fence) o->fence->Release();
     if (o->lib) FreeLibrary(o->lib);
     delete o;
 }
 
-ID3D12Resource* OfaInput(Ofa* o, int which) { return o->inputs[std::clamp(which, 0, kIn - 1)]; }
+ID3D12Resource* OfaInput(Ofa* o, int which) { return o->res[std::clamp(which, 0, kIn - 1)]; }
 ID3D12Fence*    OfaFence(Ofa* o)            { return o->fence; }
-ID3D12Resource* OfaFlow(Ofa* o)             { return o->flow[0]; }
+ID3D12Resource* OfaFlow(Ofa* o)             { return o->res[kIn]; }
 UINT            OfaFlowWidth(Ofa* o)        { return o->fw; }
 UINT            OfaFlowHeight(Ofa* o)       { return o->fh; }
-ID3D12Resource* OfaFlow2(Ofa* o)            { return o->flow[1]; }
-ID3D12Resource* OfaFlow3(Ofa* o)            { return o->flow[2]; }
+ID3D12Resource* OfaFlow2(Ofa* o)            { return o->res[kIn + 1]; }
+ID3D12Resource* OfaFlow3(Ofa* o)            { return o->res[kIn + 2]; }
 
 UINT64 OfaExecuteRef(Ofa* o, ID3D12Fence* in_fence, UINT64 in_value, int input_idx, int ref_idx, int out_pair, bool reset)
 {
