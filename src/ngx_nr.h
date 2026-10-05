@@ -54,11 +54,11 @@ int  NrFloatSlot(const Nr* n);           // -1 if not found
 bool NrCreate(Nr* n, ID3D12GraphicsCommandList* cl, const NrConfig& cfg);
 bool NrReady(const Nr* n);                // a feature exists and its create list was submitted
 void NrMarkSubmitted(Nr* n);              // call after the create list's GpuEnd
+bool NrMatches(const Nr* n, UINT w, UINT h);   // the live feature was created at exactly w x h
 
 // Records EvaluateFeature on `cl` - once per pass, chained through intermediates of its own. color/mv must
 // be in NON_PIXEL_SHADER_RESOURCE, output in UNORDERED_ACCESS. color/output: RGBA8 work-size. mv: R16G16_FLOAT work-size, pixel units
 // (MVecScale is passed as 1.0). Wrapped in __try. Returns the NGX result (1 = success).
-bool NrMatches(const Nr* n, UINT w, UINT h);   // the live feature was created at exactly w x h
 unsigned NrEvaluate(Nr* n, ID3D12GraphicsCommandList* cl, ID3D12Resource* color, ID3D12Resource* mv,
                     ID3D12Resource* output, bool reset, float exposure_scale);
 // Tick the retire ring (call once per evaluate).
