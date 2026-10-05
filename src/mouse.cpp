@@ -23,6 +23,10 @@ bool held_l = false, held_r = false, held_m = false;   // input thread only
 
 LONGLONG Qpc() { LARGE_INTEGER q; QueryPerformanceCounter(&q); return q.QuadPart; }
 double QpcFreq() { static const double f = [] { LARGE_INTEGER q; QueryPerformanceFrequency(&q); return (double)q.QuadPart; }(); return f; }
+// caller holds mu
+void Push(const Sample& s) { ring[head] = s; head = (head + 1) % kRing; used = std::min(used + 1, kRing); }
+void AddObs(const Obs& o) { obs.push_back(o); if (obs.size() > kObs) obs.erase(obs.begin()); }
+void Clear() { head = used = 0; obs.clear(); fit[0] = fit[1] = Fit(); delay_ms = 0; }
 
 LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
@@ -38,8 +42,7 @@ LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
             if (!(r.usFlags & MOUSE_MOVE_ABSOLUTE) && (r.lLastX || r.lLastY))   // absolute = tablets / remote desktop: no counts
             {
                 std::lock_guard<std::mutex> lk(mu);
-                ring[head] = { Qpc(), (int)r.lLastX, (int)r.lLastY, held_l || held_r || held_m };
-                head = (head + 1) % kRing; used = std::min(used + 1, kRing);
+                Push({ Qpc(), (int)r.lLastX, (int)r.lLastY, held_l || held_r || held_m });
             }
         }
     }
@@ -117,22 +120,21 @@ bool MouseSelfTest()
 {
     std::lock_guard<std::mutex> lk(mu);
     const double qf = QpcFreq(); const LONGLONG ms = (LONGLONG)(qf / 1000.0);
-    head = used = 0; obs.clear(); fit[0] = fit[1] = Fit(); delay_ms = 0;
+    Clear();
     // 1 kHz mouse for 3 s: a button held for the first half (the camera turns, 0.5 px per count, seen
     // 20 ms later), none for the second (cursor only: the picture does not move).
     for (int i = 0; i < 3000; ++i)
-    { const int dx = (int)(20 * sin(i * 0.004)), dy = (int)(8 * cos(i * 0.003)); ring[head] = { (i + 1) * ms, dx, dy, i < 1500 }; head = (head + 1) % kRing; used = std::min(used + 1, kRing); }
+        Push({ (i + 1) * ms, (int)(20 * sin(i * 0.004)), (int)(8 * cos(i * 0.003)), i < 1500 });
     for (LONGLONG t = 30 * ms; t + 11 * ms < 3000 * ms; t += 11 * ms)
     {
         double c[2][2]; Sum(t - 20 * ms, t + 11 * ms - 20 * ms, c);
-        obs.push_back({ t, t + 11 * ms, (float)(0.5 * c[1][0]), (float)(0.5 * c[1][1]) });
-        if (obs.size() > kObs) obs.erase(obs.begin());
+        AddObs({ t, t + 11 * ms, (float)(0.5 * c[1][0]), (float)(0.5 * c[1][1]) });
         if (obs.size() == kObs && t > 2000 * ms) break;   // a window that holds both halves
     }
     Refit();
     const bool pass = fit[1].ok && std::fabs(fit[1].gx - 0.5) < 0.03 && std::fabs(fit[1].gy - 0.5) < 0.05 && std::fabs(delay_ms - 20) <= 4 && !fit[0].ok;
     Log("[mouse] self-test %s: button g=(%.3f,%.3f) r2 %.2f, free %s, delay %.0f ms (want 0.5, 0.5, off, 20)", pass ? "PASS" : "FAIL", fit[1].gx, fit[1].gy, fit[1].r2, fit[0].ok ? "ON" : "off", delay_ms);
-    head = used = 0; obs.clear(); fit[0] = fit[1] = Fit(); delay_ms = 0;
+    Clear();
     return pass;
 }
 
@@ -154,8 +156,7 @@ void MouseObserve(LONGLONG t0, LONGLONG t1, float mx, float my)
 {
     if (t1 <= t0) return;
     std::lock_guard<std::mutex> lk(mu);
-    obs.push_back({ t0, t1, mx, my });
-    if (obs.size() > kObs) obs.erase(obs.begin());
+    AddObs({ t0, t1, mx, my });
     if (++since_fit >= 30) { since_fit = 0; Refit(); }
 }
 

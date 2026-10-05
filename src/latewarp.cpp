@@ -39,14 +39,13 @@ Latewarp* LatewarpCreate(Gpu& g, const wchar_t* dir, UINT w, UINT h, UINT dw, UI
     l->w = w; l->h = h; l->dw = dw; l->dh = dh;
     auto fail = [&](const char* why) { Log("[latewarp] disabled: %s", why); LatewarpDestroy(l); return (Latewarp*)nullptr; };
     if (!(l->params = NgxCoreParams(g, dir, "[latewarp]"))) return fail("no NGX parameter block");
-    NVSDK_NGX_Result r;
 
     // flat depth, zero motion, no UI: what a capture can say about a frame it did not render
     l->depth = GpuMakeTex(g, dw, dh, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"lw_depth");
     l->mv = GpuMakeTex(g, dw, dh, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"lw_mv");
     l->no_ui = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, NPSR, L"lw_no_ui");
-    // Far, not mid: Frame Warp leaves pixels close to the camera unwarped (a first-person weapon), and
-    // 0.5 NDC with near 0.1 is 0.2 units away - it held 50-70% of the frame still. 0.9995 is ~170 units.
+    // Far: Frame Warp leaves pixels close to the camera unwarped (a first-person weapon); 0.5 NDC with
+    // near 0.1 is 0.2 units away and held 50-70% of the frame still. 0.9995 is ~170 units.
     const std::vector<float> flat((size_t)dw * dh, 0.9995f);
     const std::vector<uint32_t> zero_mv((size_t)dw * dh, 0), zero_ui((size_t)w * h, 0);
     if (!l->depth || !l->mv || !l->no_ui || !GpuUploadTex(g, l->depth, flat.data(), dw, dh, 4, NPSR) ||
@@ -54,6 +53,7 @@ Latewarp* LatewarpCreate(Gpu& g, const wchar_t* dir, UINT w, UINT h, UINT dw, UI
         return fail("guide textures");
 
     if (!GpuBegin(g)) return fail("create list");
+    NVSDK_NGX_Result r;
     l->params->Set("Latewarp.Output.Width", w); l->params->Set("Latewarp.Output.Height", h);
     { std::lock_guard<std::mutex> lk(NgxMutex()); r = NVSDK_NGX_D3D12_CreateFeature(g.list, NVSDK_NGX_Feature_Reserved15, l->params, &l->feature); }
     const UINT64 v = GpuEnd(g);
@@ -110,19 +110,11 @@ bool LatewarpEvaluate(Latewarp* l, ID3D12GraphicsCommandList* cl, ID3D12Resource
     p->Set("Latewarp.DepthInverted", 0u); p->Set("Latewarp.EvalFlags", 0u); p->Set("Latewarp.UsePremultiplyUIAlpha", 0u);
     DWORD code = 0; NVSDK_NGX_Result r = NVSDK_NGX_Result_Success;
     std::lock_guard<std::mutex> lk(NgxMutex());
+    auto eval = [&](unsigned is_rendered) { p->Set("Latewarp.IsRenderedFrame", is_rendered); p->Set("Latewarp.FrameID", ++l->frame_id); r = SafeEvaluate(cl, l->feature, p, &code); };
     // A rendered-frame evaluate registers the frame and ignores the target camera, so a new frame
     // takes two: register, then warp.
-    if (rendered)
-    {
-        p->Set("Latewarp.IsRenderedFrame", 1u); p->Set("Latewarp.FrameID", ++l->frame_id);
-        r = SafeEvaluate(cl, l->feature, p, &code);
-        D3D12_RESOURCE_BARRIER b = {}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; b.UAV.pResource = out; cl->ResourceBarrier(1, &b);
-    }
-    if (!code && !NVSDK_NGX_FAILED(r))
-    {
-        p->Set("Latewarp.IsRenderedFrame", 0u); p->Set("Latewarp.FrameID", ++l->frame_id);
-        r = SafeEvaluate(cl, l->feature, p, &code);
-    }
+    if (rendered) { eval(1u); GpuUavBarrier(cl, out); }
+    if (!code && !NVSDK_NGX_FAILED(r)) eval(0u);
     if (code || NVSDK_NGX_FAILED(r)) { Log("[latewarp] evaluate -> 0x%08X (%s) code 0x%08X", r, NgxResultName(r), code); return false; }
     return true;
 }
