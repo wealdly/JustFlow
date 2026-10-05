@@ -6,6 +6,8 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 #define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
 // Barrier/creation shorthands: every module's state transitions read as one line.
@@ -141,3 +143,13 @@ bool GpuCtxStampsMsSlot(GpuCtx& c, int slot, double* ms, int pairs);
 double NowMs();   // QPC milliseconds
 double QpcToMs(LONGLONG qpc_ticks);   // same clock as NowMs
 const char* NgxResultName(unsigned r);
+
+// ---- process (the exes' shared startup) ---------------------------------------------------------
+std::wstring ExeDir();   // the exe's folder, no trailing backslash
+// Windowed subsystem: when launched from a console, send stdout/stderr there.
+void AttachParentConsole();
+// __argv is NULL under a wide entry point (the UCRT only builds __wargv): a narrow copy of the command line,
+// argv null-terminated and pointing into args. Returns argc.
+int NarrowArgs(std::vector<std::string>& args, std::vector<char*>& argv);
+// One live instance: the held named mutex, or (another instance runs) nullptr after telling the user.
+HANDLE SingleInstance(const wchar_t* mutex_name, const wchar_t* message, const wchar_t* title);

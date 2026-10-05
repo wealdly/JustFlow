@@ -30,13 +30,6 @@ double StageStats::pct(double p) const
     return s[i];
 }
 
-std::wstring ExeDir()
-{
-    wchar_t p[MAX_PATH] = {}; GetModuleFileNameW(nullptr, p, MAX_PATH);
-    if (wchar_t* s = wcsrchr(p, L'\\')) *s = 0;
-    return p;
-}
-
 // [nr] work=auto: the divisor 1..4 of the capture nearest 1080 lines, rounded (ties go to the larger): 4K ->
 // 1920x1080, 1440p -> 2560x1440, 1080p -> 1920x1080. The model is scale-sensitive (by content, not monotonically;
 // the resampling is innocent). Against its own edit at native 4K, on two test frames:
@@ -1050,18 +1043,9 @@ static int RealMain(int argc, char** argv);
 // from a console (bench, spike, --dump), attach to it so stdout still lands there.
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
-    if (AttachConsole(ATTACH_PARENT_PROCESS))
-    {
-        FILE* f = nullptr;
-        freopen_s(&f, "CONOUT$", "w", stdout); freopen_s(&f, "CONOUT$", "w", stderr);
-    }
-    // __argv is NULL under a wide entry point (the UCRT only builds __wargv): make a narrow copy.
-    int argc = 0; wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    AttachParentConsole();
     std::vector<std::string> args; std::vector<char*> argv;
-    for (int i = 0; i < argc; ++i) { std::string a; for (const wchar_t* w = wargv[i]; *w; ++w) a.push_back((char)*w); args.push_back(a); }   // ponytail: ASCII args only
-    for (auto& a : args) argv.push_back(&a[0]);
-    argv.push_back(nullptr);
-    if (wargv) LocalFree(wargv);
+    const int argc = NarrowArgs(args, argv);
     return RealMain(argc, argv.data());
 }
 
@@ -1098,14 +1082,8 @@ static int RealMain(int argc, char** argv)
     if (settings_only) return SettingsDialog(nullptr, app_path.c_str(), ini_path.c_str(), L"JustFlow", FindTarget(cfg)) ? 0 : 1;
     // One LIVE instance only (two would fight over the capture, the overlay and the display). Held for the life
     // of the process; --settings / --preset / --bench are short-lived tools and return above this.
-    HANDLE only_one = CreateMutexW(nullptr, TRUE, L"Local\\JustFlow.SingleInstance");
-    if (!only_one || GetLastError() == ERROR_ALREADY_EXISTS)
-    {
-        MessageBoxW(nullptr, L"JustFlow is already running.\n\nUse its tray icon: right-click the icon to quit, "
-                             L"or press the quit hotkey (Ctrl+F12 by default).", L"JustFlow", MB_ICONINFORMATION | MB_OK);
-        if (only_one) CloseHandle(only_one);
-        return 1;
-    }
+    if (!SingleInstance(L"Local\\JustFlow.SingleInstance", L"JustFlow is already running.\n\nUse its tray icon: right-click the icon to quit, "
+                        L"or press the quit hotkey (Ctrl+F12 by default).", L"JustFlow")) return 1;
     std::wstring log_path = JoinPath(dir, cfg.log_file);
     LogInit(log_path.c_str());
     if (!timer_1ms) Log("[main] 1 ms timer resolution refused - condition_variable waits fall back to ~15.6 ms, so timer pacing will be coarse");

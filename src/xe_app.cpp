@@ -358,13 +358,8 @@ static bool Engage(Session& s, Gpu& g, const Settings& st, PowerMode mode)
 
 int RunTrayApp(const std::wstring& dir)
 {
-    HANDLE only_one = CreateMutexW(nullptr, TRUE, L"Local\\JustFlowXe.SingleInstance");
-    if (!only_one || GetLastError() == ERROR_ALREADY_EXISTS)
-    {
-        MessageBoxW(nullptr, L"JustFlow XE is already running - right-click its tray icon to quit.", L"JustFlow XE", MB_ICONINFORMATION | MB_OK);
-        if (only_one) CloseHandle(only_one);
-        return 1;
-    }
+    HANDLE only_one = SingleInstance(L"Local\\JustFlowXe.SingleInstance", L"JustFlow XE is already running - right-click its tray icon to quit.", L"JustFlow XE");
+    if (!only_one) return 1;
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const bool timer_1ms = timeBeginPeriod(1) == TIMERR_NOERROR;
     const std::wstring log_path = dir + L"\\xe_auto.log";

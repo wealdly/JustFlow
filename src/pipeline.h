@@ -137,7 +137,6 @@ struct Pipeline
     StageStats residual_age;                           // per composed frame: frame_index - residual's frame index
 };
 
-std::wstring ExeDir();
 // param_block from justflow.spike.ini; the work size is WorkAuto's (main.cpp), resolved once the capture size is known.
 void ResolveWork(Config& c, const std::wstring& dir);
 bool WorkSelfTest();   // the work-size rule against known answers (selftest)
