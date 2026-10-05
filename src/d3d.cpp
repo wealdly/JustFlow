@@ -193,6 +193,17 @@ void GpuShutdown(Gpu& g)
     REL(g.dev1); REL(g.dev); REL(g.adapter); REL(g.factory);
 }
 
+IDXGIOutput* GpuOutputFor(Gpu& g, HMONITOR mon, DXGI_OUTPUT_DESC* desc)
+{
+    IDXGIOutput* out = nullptr;
+    for (UINT i = 0; g.adapter->EnumOutputs(i, &out) != DXGI_ERROR_NOT_FOUND; ++i)
+    {
+        if (SUCCEEDED(out->GetDesc(desc)) && desc->Monitor == mon) return out;
+        out->Release(); out = nullptr;
+    }
+    return nullptr;
+}
+
 void GpuLogDeviceRemoved(Gpu& g, const char* where)
 {
     if (!g.dev) return;

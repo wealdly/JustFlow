@@ -66,6 +66,8 @@ bool GpuVram(Gpu& g, double& used_mb, double& budget_mb);
 // for reservation. Call after building and after releasing a pipeline. Returns the MB reserved, -1 on failure.
 double GpuReserveCurrentUsage(Gpu& g);
 void   GpuLogDeviceRemoved(Gpu& g, const char* where);
+// The adapter's output showing `mon` (caller releases) with its desc; nullptr when the monitor is on another adapter.
+IDXGIOutput* GpuOutputFor(Gpu& g, HMONITOR mon, DXGI_OUTPUT_DESC* desc);
 
 // ---- secondary context ------------------------------------------------------------------------
 // Direct-type queue (NGX evaluate wants a graphics list) at `priority`. Registers in g.ctx[].

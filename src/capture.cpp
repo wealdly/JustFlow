@@ -174,14 +174,10 @@ static bool SessionHas(const wchar_t* prop)
 static bool OpenDda(Gpu& g, Capture* c)
 {
     const HMONITOR mon = MonitorFromWindow(c->target, MONITOR_DEFAULTTONEAREST);
-    IDXGIOutput* out = nullptr;
-    for (UINT i = 0; g.adapter->EnumOutputs(i, &out) != DXGI_ERROR_NOT_FOUND; ++i)
-    {
-        DXGI_OUTPUT_DESC d = {}; out->GetDesc(&d);
-        if (d.Monitor == mon) { c->out_rect = d.DesktopCoordinates; break; }
-        out->Release(); out = nullptr;
-    }
+    DXGI_OUTPUT_DESC d = {};
+    IDXGIOutput* out = GpuOutputFor(g, mon, &d);
     if (!out) { Log("[cap] DDA: the game's monitor is not on adapter %d - plug the display into that card, or change [gpu] adapter in justflow.ini (the startup log lists them)", g.adapter_index); return false; }
+    c->out_rect = d.DesktopCoordinates;
     // An HDR desktop comes as FP16 scRGB, converted to 8-bit in our swizzle at the SDR white level
     // (capture_in.hlsli). Asking Windows for BGRA8 converts it at 80 nits = white: far too bright.
     HRESULT hr = E_NOINTERFACE;
@@ -429,6 +425,36 @@ bool            CaptureSeesOverlay(Capture* c) { return c->dup || c->target == G
 float           CaptureSdrWhite(Capture* c) { return c->sdr_white; }
 bool            CaptureIsDda(Capture* c)   { return c && c->dup != nullptr; }
 UINT            CaptureForeign(Capture* c) { return c ? (UINT)InterlockedExchange(&c->foreign, 0) : 0; }
+
+HWND FindLargestWindow(const wchar_t* title, const wchar_t* cls, HWND skip)
+{
+    HWND best = nullptr, h = nullptr; LONGLONG best_area = 0;
+    while ((h = FindWindowExW(nullptr, h, *cls ? cls : nullptr, nullptr)) != nullptr)
+    {
+        if (*title) { wchar_t t[256] = {}; GetWindowTextW(h, t, 256); if (!wcsstr(t, title)) continue; }
+        if (h == skip || !IsWindowVisible(h) || (GetWindowLongW(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)) continue;
+        DWORD cloaked = 0;
+        if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof cloaked)) && cloaked) continue;
+        RECT r = {}; WINDOWPLACEMENT wp = { sizeof wp };
+        if (IsIconic(h) && GetWindowPlacement(h, &wp)) r = wp.rcNormalPosition; else if (!GetWindowRect(h, &r)) continue;
+        const LONGLONG w = r.right - r.left, ht = r.bottom - r.top;
+        if (w < 320 || ht < 240) continue;
+        if (w * ht > best_area) { best_area = w * ht; best = h; }
+    }
+    return best;
+}
+
+LONGLONG CaptureQpc(Capture* c, LONGLONG sysrel, LONGLONG& last_sysrel, bool& reset)
+{
+    // DDA LastPresentTime already is QPC ticks; WGC SystemRelativeTime is 100 ns units (integer split
+    // keeps it exact: t * qpf overflows int64).
+    LARGE_INTEGER qpf; QueryPerformanceFrequency(&qpf);
+    const bool dda = CaptureIsDda(c);
+    if (last_sysrel && sysrel - last_sysrel > (dda ? qpf.QuadPart / 4 : 2500000)) reset = true;
+    last_sysrel = sysrel;
+    return dda ? sysrel : sysrel / 10000000 * qpf.QuadPart + (sysrel % 10000000) * qpf.QuadPart / 10000000;
+}
+
 bool CaptureWgcUncapped()
 {
     try { return SessionHas(L"MinUpdateInterval"); }

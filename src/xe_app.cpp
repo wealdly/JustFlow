@@ -386,7 +386,6 @@ int RunTrayApp(const std::wstring& dir)
 
     Gpu g; bool gpu_ok = GpuInit(g, -1, 0);
     int gpu_failures = 0; double gpu_retry_at = 0;
-    LARGE_INTEGER qpf; QueryPerformanceFrequency(&qpf);
     Session s; HWND rejected = nullptr;   // a window capture refused (or a "never" app): not retried until focus moves on
     std::wstring never_exe;               // the focused app is on the never list: the tray still offers to undo it
     std::wstring status = L"starting"; double status_t = 0;
@@ -498,11 +497,7 @@ int RunTrayApp(const std::wstring& dir)
             if (s.ov) OverlayFollow(s.ov, 300);
             if (got)
             {
-                const bool dda = CaptureIsDda(s.cap);
-                if (s.last_sysrel && sysrel - s.last_sysrel > (dda ? qpf.QuadPart / 4 : 2500000)) s.reset = true;
-                s.last_sysrel = sysrel;
-                const LONGLONG cap_qpc = dda ? sysrel : sysrel / 10000000 * qpf.QuadPart + (sysrel % 10000000) * qpf.QuadPart / 10000000;
-                const double cap_ms = QpcToMs(cap_qpc);
+                const double cap_ms = QpcToMs(CaptureQpc(s.cap, sysrel, s.last_sysrel, s.reset));   // > 250 ms gap: reset
                 bool ok = true;
                 if (s.fg && s.away_since < 0)
                 {

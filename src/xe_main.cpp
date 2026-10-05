@@ -690,27 +690,8 @@ static int RunInterpBench(int argc, char** argv)
 }
 
 // ---- live -------------------------------------------------------------------------------------------------
-// The largest visible, uncloaked top-level window whose title contains `title` (and whose class is
-// `cls`, when given) - the same rule as justflow.exe: launcher pages, thumbnails and tooltips carry
-// game titles too, and the game window is bigger than all of them.
-static HWND FindTarget(const std::wstring& title, const std::wstring& cls)
-{
-    HWND best = nullptr, h = nullptr; LONGLONG best_area = 0;
-    while ((h = FindWindowExW(nullptr, h, cls.empty() ? nullptr : cls.c_str(), nullptr)) != nullptr)
-    {
-        if (!title.empty()) { wchar_t t[256] = {}; GetWindowTextW(h, t, 256); if (!wcsstr(t, title.c_str())) continue; }
-        if (!IsWindowVisible(h) || (GetWindowLongW(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)) continue;
-        if (GetWindowThreadProcessId(h, nullptr) && GetConsoleWindow() == h) continue;   // not our own console
-        DWORD cloaked = 0;
-        if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof cloaked)) && cloaked) continue;
-        RECT r = {}; WINDOWPLACEMENT wp = { sizeof wp };
-        if (IsIconic(h) && GetWindowPlacement(h, &wp)) r = wp.rcNormalPosition; else if (!GetWindowRect(h, &r)) continue;
-        const LONGLONG w = r.right - r.left, ht = r.bottom - r.top;
-        if (w < 320 || ht < 240) continue;
-        if (w * ht > best_area) { best_area = w * ht; best = h; }
-    }
-    return best;
-}
+// The same rule as justflow.exe, never our own console (its title can carry the command line, --window text included).
+static HWND FindTarget(const std::wstring& title, const std::wstring& cls) { return FindLargestWindow(title.c_str(), cls.c_str(), GetConsoleWindow()); }
 
 // Every window FindTarget could pick with the right --window, largest first.
 static void LogWindows()
@@ -768,7 +749,6 @@ static int RunLive(int argc, char** argv)
     Log("[live] keys: F8 generation on/off, Ctrl+F12 quit (Ctrl+C in this console too)");
     Gpu g;
     if (!GpuInit(g, adapter, vendor)) return 1;
-    LARGE_INTEGER qpf; QueryPerformanceFrequency(&qpf);
     const HotkeyDef keys[] = { { 1, 0, VK_F8 }, { 2, MOD_CONTROL, VK_F12 } };
     int rc = 0;
     while (!g_quit)
@@ -803,10 +783,7 @@ static int RunLive(int argc, char** argv)
             if (XeFgFailed(fg)) { rc = 3; g_quit = true; break; }
             UINT64 fv = 0; LONGLONG sysrel = 0;
             if (!CaptureAcquire(cap, 50, fv, sysrel)) { OverlayFollow(ov, 300); continue; }   // a game that lost focus often stops rendering: still hide promptly
-            const bool dda = CaptureIsDda(cap);
-            if (last_sysrel && sysrel - last_sysrel > (dda ? qpf.QuadPart / 4 : 2500000)) reset = true;   // > 250 ms gap
-            last_sysrel = sysrel;
-            const LONGLONG cap_qpc = dda ? sysrel : sysrel / 10000000 * qpf.QuadPart + (sysrel % 10000000) * qpf.QuadPart / 10000000;
+            const LONGLONG cap_qpc = CaptureQpc(cap, sysrel, last_sysrel, reset);   // > 250 ms gap: reset
             if (!XeFgSubmit(fg, CaptureTexture(cap), CaptureFence(cap), fv, QpcToMs(cap_qpc), reset)) { GpuLogDeviceRemoved(g, "submit"); rc = 3; g_quit = true; break; }
             reset = false;
             OverlayFollow(ov, 300);
