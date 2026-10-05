@@ -10,7 +10,7 @@ struct Ofa;
 // gray input size (e.g. 960x540). Loads nvofapi64.dll (System32, then DriverStore by driver
 // version, then `dll_override`), queries supported grid sizes, picks the smallest (or `grid` if
 // > 0 and supported). Logs the DLL path/version, grid and formats. nullptr on failure.
-Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid /* 0 = smallest supported */, const wchar_t* dll_override);
+Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid /* 0 = smallest supported */, const wchar_t* dll_override, int perf = 0 /* 0 fast, 1 medium, 2 slow */);
 void OfaDestroy(Ofa* o);
 
 // Gray inputs: 5 R8_UNORM textures. Slots 0/1 are the per-frame ping-pong (the caller keeps which is

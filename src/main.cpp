@@ -362,7 +362,7 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
         if (!p->nr) { PipelineDestroy(p); return nullptr; }
         p->create_pending = true;
     }
-    p->ofa = OfaCreate(g, p->gw, p->gh, cfg.ofa_grid, cfg.ofa_dll.empty() ? nullptr : cfg.ofa_dll.c_str());
+    p->ofa = OfaCreate(g, p->gw, p->gh, cfg.ofa_grid, cfg.ofa_dll.empty() ? nullptr : cfg.ofa_dll.c_str(), cfg.ofa_perf);
     if (!p->ofa) { PipelineDestroy(p); return nullptr; }
     if (!AllocNative(p) || !AllocWork(p)) { PipelineDestroy(p); return nullptr; }
     for (auto& r : p->strip_rb)   // 9 KB each, always there so [ui] mask can be switched on by a reload
@@ -990,7 +990,9 @@ std::wstring PickProfile(const std::wstring& dir, const std::wstring& ini, std::
     if (h != INVALID_HANDLE_VALUE) { do names.push_back(Stem(fd.cFileName)); while (FindNextFileW(h, &fd)); FindClose(h); }
     std::sort(names.begin(), names.end());
     auto find = [&](const std::wstring& n) { for (size_t i = 0; i < names.size(); ++i) if (!_wcsicmp(names[i].c_str(), n.c_str())) return (int)i; return -1; };
-    if (!ini.empty()) { index = find(Stem(ini)); return ini.find(L'\\') != std::wstring::npos ? ini : dir + L"\\" + ini; }
+    // A path with either slash is a path: "C:/x/y.ini" used to be read as a name in dir, missed, and
+    // silently gave defaults.
+    if (!ini.empty()) { index = find(Stem(ini)); return ini.find_first_of(L"\\/") != std::wstring::npos ? ini : dir + L"\\" + ini; }
     if (names.empty()) return L"";
     Config a; ConfigLoad((dir + L"\\justflow.ini").c_str(), nullptr, a);   // [app] profile=<name> pins the startup profile
     // none = start attached to nothing. The tray picks one, or "New profile from window..."

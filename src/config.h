@@ -67,6 +67,7 @@ struct Config
     // [ofa]
     UINT  ofa_w = 960, ofa_h = 540;
     int   ofa_grid = 0;
+    int   ofa_perf = 0;   // [ofa] perf: 0 fast, 1 medium, 2 slow - NVOFA's accuracy/cost preset
     float zero_below = 0.5f;
     std::wstring ofa_dll;                  // [app layer]
     // [ui] (toast*/hud* are app layer, the rest profile)

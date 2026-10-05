@@ -136,6 +136,7 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     if (swscanf_s(in.c_str(), L"%ux%u", &c.ofa_w, &c.ofa_h) != 2) { c.ofa_w = 960; c.ofa_h = 540; }
     const std::wstring grid = S(L"ofa", L"grid", L"auto");
     c.ofa_grid = grid == L"auto" ? 0 : _wtoi(grid.c_str());
+    { const std::wstring pf = S(L"ofa", L"perf", L"fast"); c.ofa_perf = pf == L"slow" ? 2 : pf == L"medium" ? 1 : 0; }
     c.zero_below = F(L"ofa", L"zero_below", c.zero_below);
     c.ofa_dll = S(L"ofa", L"dll_path", L"");
 

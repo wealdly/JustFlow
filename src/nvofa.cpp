@@ -101,7 +101,7 @@ static bool FormatSupported(Ofa* o, NV_OF_BUFFER_USAGE usage, DXGI_FORMAT want, 
     return ok;
 }
 
-Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid, const wchar_t* dll_override)
+Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid, const wchar_t* dll_override, int perf)
 {
     Ofa* o = new Ofa(); o->g = &g; o->w = w; o->h = h;
     o->lib = LoadNvofa(dll_override);
@@ -149,7 +149,7 @@ Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid, const wchar_t* dll_override)
     ip.width = w; ip.height = h;
     ip.outGridSize = (NV_OF_OUTPUT_VECTOR_GRID_SIZE)o->grid;
     ip.mode = NV_OF_MODE_OPTICALFLOW;
-    ip.perfLevel = NV_OF_PERF_LEVEL_FAST;
+    ip.perfLevel = perf >= 2 ? NV_OF_PERF_LEVEL_SLOW : perf == 1 ? NV_OF_PERF_LEVEL_MEDIUM : NV_OF_PERF_LEVEL_FAST;
     ip.enableOutputCost = NV_OF_FALSE;   // a cost threshold rejects correct motion and misses low-cost errors (docs/)
     // Measured on tools/scene (exact motion known): the 2-3 px of motion OFA invents in untextured sky costs
     // 0.000 photometrically (flat warped onto flat), and beside moving geometry its vectors warp BETTER than
@@ -182,7 +182,7 @@ Ofa* OfaCreate(Gpu& g, UINT w, UINT h, int grid, const wchar_t* dll_override)
         if (st != NV_OF_SUCCESS) { --o->value; Fail(o, "nvOFRegisterResourceD3D12", st); OfaDestroy(o); return nullptr; }
         if (!GpuWait(g, o->fence, o->value, 30000)) { Log("[ofa] register fence timeout"); OfaDestroy(o); return nullptr; }
     }
-    Log("[ofa] active %ux%u grid=%u flow=%ux%u R16G16_SINT perf=FAST", w, h, o->grid, o->fw, o->fh);
+    Log("[ofa] active %ux%u grid=%u flow=%ux%u R16G16_SINT perf=%s", w, h, o->grid, o->fw, o->fh, perf >= 2 ? "SLOW" : perf == 1 ? "MEDIUM" : "FAST");
     return o;
 }
 
