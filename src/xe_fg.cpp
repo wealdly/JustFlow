@@ -287,11 +287,9 @@ static void Presenter(XeFg* f)
         const bool snap = f->snap_req && !f->snap_pending && use->flow && t > 0.0f && (x || t < 1.0f);
         if (snap)
         {
-            D3D12_TEXTURE_COPY_LOCATION from = {}, to = {};
-            from.pResource = dst; from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            to.pResource = f->snap_rb; to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; to.PlacedFootprint = f->snap_fp;
+            const D3D12_SUBRESOURCE_FOOTPRINT& fp = f->snap_fp.Footprint;   // offset 0
             GpuBarrier(cl, dst, PRESENT, CSRC);
-            cl->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+            GpuCopyToReadback(cl, dst, f->snap_rb, fp.Format, fp.Width, fp.Height, fp.RowPitch);
             GpuBarrier(cl, dst, CSRC, PRESENT);
         }
         const int slot = f->ctx.slot;

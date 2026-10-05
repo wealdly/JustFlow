@@ -236,10 +236,7 @@ struct Probe
         const GpuView sv = { src, DXGI_FORMAT_UNKNOWN }, uv = { tiny[s], DXGI_FORMAT_UNKNOWN };
         GpuDispatch(*g, cl, gray, &sv, &uv, c, GpuGroups(tw, 8), GpuGroups(th, 8));
         GpuBarrier(cl, tiny[s], UAV, CSRC);
-        D3D12_TEXTURE_COPY_LOCATION from = {}, to = {};
-        from.pResource = tiny[s]; from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        to.pResource = rb[s]; to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; to.PlacedFootprint = fp;
-        cl->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        GpuCopyToReadback(cl, tiny[s], rb[s], fp.Footprint.Format, fp.Footprint.Width, fp.Footprint.Height, fp.Footprint.RowPitch);   // fp.Offset is 0
         GpuBarrier(cl, tiny[s], CSRC, NPSR);
         if (capture) GpuBarrier(cl, capture, NPSR, COMMON);
         const UINT64 v = GpuEnd(*g);
