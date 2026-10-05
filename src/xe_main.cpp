@@ -4,7 +4,7 @@
 //   justflow_xe.exe                                      tray app: automatic, foreground window (xe_app)
 //   justflow_xe.exe --live --window <title substring>   frame generation over that window (xe_fg)
 //
-// This first cut is the optical-flow bench:
+// The optical-flow bench:
 //   justflow_xe.exe --bench <dir|png> [--size WxH] [--factor N] [--lambda X] [--refine N] [--frames N] [--pairs N]
 //                   [--dump] [--adapter I] [--vendor HEX]
 //   <dir>  a tools/scene export (frame_NNNN.png [+ mv_NNNN.f32 + manifest.json]) or any folder of
@@ -298,28 +298,47 @@ static bool ReadFile(const std::wstring& path, std::vector<char>& data)
     fclose(fp); return ok;
 }
 
-static int RunBench(int argc, char** argv)
+// The flags --bench and --interp share, and the flow they configure.
+struct FlowArgs
 {
-    std::wstring input; UINT size_w = 0, size_h = 0, factor = 2; int frames = 200, pairs = 1 << 30, adapter = -1, refine = 1, fine = 1, sub = 1; bool profile = false; UINT vendor = 0;
-    float lambda = 0.0f, zoom = 1.02f, shx = 23.0f, shy = -11.0f; bool dump = false;
-    for (int i = 1; i < argc; ++i)
+    UINT size_w = 0, size_h = 0, factor = 2, vendor = 0; int pairs = 1 << 30, adapter = -1, refine = 1, fine = 1, sub = 1; bool dump = false;
+    bool Parse(int& i, int argc, char** argv)   // false: argv[i] is not one of them
     {
         const bool more = i + 1 < argc;
-        if (!strcmp(argv[i], "--bench") && more) input = Widen(argv[++i]);
-        else if (!strcmp(argv[i], "--size") && more) sscanf_s(argv[++i], "%ux%u", &size_w, &size_h);
+        if (!strcmp(argv[i], "--size") && more) sscanf_s(argv[++i], "%ux%u", &size_w, &size_h);
         else if (!strcmp(argv[i], "--factor") && more) factor = (UINT)atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--lambda") && more) lambda = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--refine") && more) refine = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fine") && more) fine = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--sub") && more) sub = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--profile")) profile = true;
-        else if (!strcmp(argv[i], "--frames") && more) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pairs") && more) pairs = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--zoom") && more) zoom = (float)atof(argv[++i]);
-        else if (!strcmp(argv[i], "--shift") && more) sscanf_s(argv[++i], "%f,%f", &shx, &shy);
         else if (!strcmp(argv[i], "--adapter") && more) adapter = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--vendor") && more) vendor = (UINT)strtoul(argv[++i], nullptr, 16);
         else if (!strcmp(argv[i], "--dump")) dump = true;
+        else return false;
+        return true;
+    }
+    XeFlow* Flow(Gpu& g, UINT w, UINT h) const
+    {
+        XeFlow* xf = XeFlowCreate(g, w, h, factor);
+        if (xf) { XeFlowSetRefine(xf, refine); XeFlowSetFine(xf, fine); XeFlowSetSubsel(xf, sub != 0); }
+        return xf;
+    }
+};
+
+static int RunBench(int argc, char** argv)
+{
+    std::wstring input; FlowArgs o; int frames = 200; bool profile = false;
+    float lambda = 0.0f, zoom = 1.02f, shx = 23.0f, shy = -11.0f;
+    for (int i = 1; i < argc; ++i)
+    {
+        const bool more = i + 1 < argc;
+        if (o.Parse(i, argc, argv)) continue;
+        if (!strcmp(argv[i], "--bench") && more) input = Widen(argv[++i]);
+        else if (!strcmp(argv[i], "--lambda") && more) lambda = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--profile")) profile = true;
+        else if (!strcmp(argv[i], "--frames") && more) frames = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--zoom") && more) zoom = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--shift") && more) sscanf_s(argv[++i], "%f,%f", &shx, &shy);
     }
     const std::wstring dir = ExeDir();
     LogInit((dir + L"\\xe_bench.log").c_str());
@@ -339,13 +358,13 @@ static int RunBench(int argc, char** argv)
             const char* m = strstr(man.data(), "\"mv\":{");
             if (m) sscanf_s(m, "\"mv\":{\"w\":%u,\"h\":%u", &truth.mvw, &truth.mvh);
         }
-        if (!Load(seq_dir + L"\\" + names[0], first, size_w, size_h)) return 1;
+        if (!Load(seq_dir + L"\\" + names[0], first, o.size_w, o.size_h)) return 1;
         Log("[bench] sequence %ls: %zu frames of %ux%u%s", input.c_str(), names.size(), first.w, first.h,
             truth.mvw ? " with exact motion vectors" : " (no motion vectors: PSNR only)");
     }
     else
     {
-        if (!Load(input, first, size_w, size_h)) return 1;
+        if (!Load(input, first, o.size_w, o.size_h)) return 1;
         truth.synth = true; truth.zoom = zoom; truth.sx = shx; truth.sy = shy; truth.cx = first.w * 0.5f; truth.cy = first.h * 0.5f;
         Log("[bench] %ls %ux%u, synthetic second frame: shift (%.1f, %.1f) zoom %.3f", input.c_str(), first.w, first.h, shx, shy, zoom);
     }
@@ -365,12 +384,11 @@ static int RunBench(int argc, char** argv)
 
     // ---- GPU ----
     Gpu g;
-    if (!GpuInit(g, adapter, vendor)) return 1;
+    if (!GpuInit(g, o.adapter, o.vendor)) return 1;
     DXGI_ADAPTER_DESC1 ad = {}; { IDXGIAdapter1* a1 = nullptr; if (SUCCEEDED(g.adapter->QueryInterface(IID_PPV_ARGS(&a1)))) { a1->GetDesc1(&ad); a1->Release(); } }
-    XeFlow* xf = XeFlowCreate(g, w, h, factor);
+    XeFlow* xf = o.Flow(g, w, h);
     if (!xf) return 1;
     XeFlowSetLambda(xf, lambda);
-    XeFlowSetRefine(xf, refine); XeFlowSetFine(xf, fine); XeFlowSetSubsel(xf, sub != 0);
     const UINT gw = XeFlowGridW(xf), gh = XeFlowGridH(xf), f = XeFlowFactor(xf), cell = XeFlowCell(xf);
     ComputePso warp;
     ID3D12Resource* tex[2] = { GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, NPSR, L"bench_prev"),
@@ -393,8 +411,8 @@ static int RunBench(int argc, char** argv)
         if (truth.synth) { if (i > 1) break; cur = synth_cur(prev); }
         else
         {
-            if (i >= names.size() || npairs >= pairs) break;
-            if (!Load(seq_dir + L"\\" + names[i], cur, size_w, size_h) || cur.w != w || cur.h != h) { Log("[bench] %ls skipped", names[i].c_str()); continue; }
+            if (i >= names.size() || npairs >= o.pairs) break;
+            if (!Load(seq_dir + L"\\" + names[i], cur, o.size_w, o.size_h) || cur.w != w || cur.h != h) { Log("[bench] %ls skipped", names[i].c_str()); continue; }
             truth.mv.clear();
             if (truth.mvw)
             {
@@ -436,7 +454,7 @@ static int RunBench(int argc, char** argv)
             const double pg = Psnr(cur, gtw, 16, &mask), pm = Psnr(cur, rec, 16, &mask), pz = Psnr(cur, prev.px, 16, &mask);
             gt_sum += pg; ours_m_sum += pm; zero_m_sum += pz; ++ngt;
         }
-        if (dump)
+        if (o.dump)
         {
             wchar_t path[MAX_PATH];
             _snwprintf_s(path, _TRUNCATE, L"%ls\\xe_flow_%03zu.png", dir.c_str(), i); DumpFlow(path, grid[1], gw, gh, f, cell, 64.0f);
@@ -554,35 +572,26 @@ static int RunBench(int argc, char** argv)
 // real frame (what no frame generation shows) and a plain crossfade.
 static int RunInterpBench(int argc, char** argv)
 {
-    std::wstring input; UINT size_w = 0, size_h = 0, factor = 2; int n = 3, pairs = 1 << 30, adapter = -1, refine = 1, fine = 1, sub = 1; UINT vendor = 0;
+    std::wstring input; FlowArgs o; int n = 3; XeInterp xi;
     bool extrap = false;   // --extrap: predict the frames AFTER the pair (cur pushed ahead), truth = the real ones
     bool ui = false;       // --ui: a static synthetic HUD on every frame, and PSNR inside it reported apart
-    bool dump = false; XeInterp xi;
     for (int i = 1; i < argc; ++i)
     {
         const bool more = i + 1 < argc;
+        if (o.Parse(i, argc, argv)) continue;
         if (!strcmp(argv[i], "--interp") && more) n = std::clamp(atoi(argv[++i]), 2, 8);
         else if (!strcmp(argv[i], "--seq") && more) input = Widen(argv[++i]);
-        else if (!strcmp(argv[i], "--size") && more) sscanf_s(argv[++i], "%ux%u", &size_w, &size_h);
-        else if (!strcmp(argv[i], "--factor") && more) factor = (UINT)atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--refine") && more) refine = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--fine") && more) fine = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--sub") && more) sub = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--pairs") && more) pairs = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tol") && more) xi.tol = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--tolrel") && more) xi.tol_rel = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--extrap")) extrap = true;
         else if (!strcmp(argv[i], "--ui")) ui = true;
-        else if (!strcmp(argv[i], "--adapter") && more) adapter = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--vendor") && more) vendor = (UINT)strtoul(argv[++i], nullptr, 16);
-        else if (!strcmp(argv[i], "--dump")) dump = true;
     }
     const std::wstring dir = ExeDir();
     LogInit((dir + L"\\xe_bench.log").c_str());
     const std::vector<std::wstring> names = ListFrames(input);
     if (names.size() < (size_t)n + 1) { Log("[interp] %ls: need at least %d PNGs", input.c_str(), n + 1); return 1; }
     std::vector<Image> fr(n + 1);
-    if (!Load(input + L"\\" + names[0], fr[0], size_w, size_h)) return 1;
+    if (!Load(input + L"\\" + names[0], fr[0], o.size_w, o.size_h)) return 1;
     const UINT w = fr[0].w, h = fr[0].h;
     std::vector<uint8_t> ui_mask;   // --ui: pixels the HUD covers
     if (ui)
@@ -593,10 +602,9 @@ static int RunInterpBench(int argc, char** argv)
     }
 
     Gpu g;
-    if (!GpuInit(g, adapter, vendor)) return 1;
-    XeFlow* xf = XeFlowCreate(g, w, h, factor);
+    if (!GpuInit(g, o.adapter, o.vendor)) return 1;
+    XeFlow* xf = o.Flow(g, w, h);
     if (!xf || !XeInterpInit(g, xi)) return 1;
-    XeFlowSetRefine(xf, refine); XeFlowSetFine(xf, fine); XeFlowSetSubsel(xf, sub != 0);
     ID3D12Resource* tex[2] = { GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, NPSR, L"interp_a"),
                                GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, NPSR, L"interp_b") };
     ID3D12Resource* out = GpuMakeTex(g, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"interp_out");
@@ -609,11 +617,11 @@ static int RunInterpBench(int argc, char** argv)
     std::vector<double> ui_ours, ui_rep;                 // --ui: PSNR inside the HUD
     std::vector<uint8_t> px((size_t)w * h * 4), blend((size_t)w * h * 4);
     int done = 0;
-    for (size_t k = 0; (k + 1) * n < names.size() && done < pairs; ++k, ++done)
+    for (size_t k = 0; (k + 1) * n < names.size() && done < o.pairs; ++k, ++done)
     {
         if (k > 0) fr[0] = std::move(fr[n]);
         bool ok = true;
-        for (int j = 1; j <= n && ok; ++j) ok = Load(input + L"\\" + names[k * n + j], fr[j], size_w, size_h) && fr[j].w == w && fr[j].h == h;
+        for (int j = 1; j <= n && ok; ++j) ok = Load(input + L"\\" + names[k * n + j], fr[j], o.size_w, o.size_h) && fr[j].w == w && fr[j].h == h;
         if (!ok) { Log("[interp] pair %zu: frames did not load", k); break; }
         if (!GpuUploadTex(g, tex[0], fr[0].px.data(), w, h, 4, NPSR) || !GpuUploadTex(g, tex[1], fr[n].px.data(), w, h, 4, NPSR)) return 1;
         for (int j = 1; j < n; ++j)
@@ -628,7 +636,7 @@ static int RunInterpBench(int argc, char** argv)
             }
             GpuStamp(g, g.list, 0);
             XeInterpRecord(g, g.list, xi, tex[0], tex[1], XeFlowGrid(xf, 0), XeFlowGrid(xf, 1), stat, XeFlowGridW(xf), XeFlowGridH(xf), XeFlowFactor(xf), XeFlowCell(xf), out, w, h, t,
-                           false, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, extrap);
+                           false, NPSR, extrap);
             GpuStamp(g, g.list, 1);
             if (!GpuEnd(g) || !GpuWaitIdle(g) || !GpuReadbackTex(g, out, px.data(), w, h, 4, NPSR)) return 1;
             double ms; if (GpuStampsMsSlot(g, slot, &ms, 1) && ms >= 0) cost.push_back(ms);
@@ -636,13 +644,14 @@ static int RunInterpBench(int argc, char** argv)
             // Extrapolation is shown in place of the frame t intervals AFTER cur: that is its truth, and
             // repeating cur (what is on screen without frame generation) its baseline.
             Image future;
-            if (extrap && !(k * n + n + j < names.size() && Load(input + L"\\" + names[k * n + n + j], future, size_w, size_h) && future.w == w)) continue;
+            if (extrap && !(k * n + n + j < names.size() && Load(input + L"\\" + names[k * n + n + j], future, o.size_w, o.size_h) && future.w == w)) continue;
             const Image& truth = extrap ? future : fr[j];
+            const std::vector<uint8_t>& repeat = extrap || t > 0.5f ? fr[n].px : fr[0].px;
             ours[j].push_back(Psnr(truth, px, 16));
-            rep[j].push_back(Psnr(truth, extrap ? fr[n].px : t <= 0.5f ? fr[0].px : fr[n].px, 16));
+            rep[j].push_back(Psnr(truth, repeat, 16));
             mix[j].push_back(Psnr(truth, blend, 16));
-            if (ui) { ui_ours.push_back(Psnr(truth, px, 16, &ui_mask)); ui_rep.push_back(Psnr(truth, extrap ? fr[n].px : t <= 0.5f ? fr[0].px : fr[n].px, 16, &ui_mask)); }
-            if (dump)
+            if (ui) { ui_ours.push_back(Psnr(truth, px, 16, &ui_mask)); ui_rep.push_back(Psnr(truth, repeat, 16, &ui_mask)); }
+            if (o.dump)
             {
                 wchar_t path[MAX_PATH];
                 _snwprintf_s(path, _TRUNCATE, L"%ls\\xe_interp_%03zu_%d.png", dir.c_str(), k, j); SavePngRgba(path, px.data(), w, h);
@@ -839,12 +848,10 @@ static int RunLive(int argc, char** argv)
 
 static int CliMain(int argc, char** argv)
 {
-    for (int i = 1; i < argc; ++i)
-        if (!strcmp(argv[i], "--live")) return RunLive(argc, argv);
-    for (int i = 1; i < argc; ++i)
-        if (!strcmp(argv[i], "--interp")) return RunInterpBench(argc, argv);
-    for (int i = 1; i < argc; ++i)
-        if (!strcmp(argv[i], "--bench")) return RunBench(argc, argv);
+    auto has = [&](const char* flag) { for (int i = 1; i < argc; ++i) if (!strcmp(argv[i], flag)) return true; return false; };
+    if (has("--live")) return RunLive(argc, argv);
+    if (has("--interp")) return RunInterpBench(argc, argv);
+    if (has("--bench")) return RunBench(argc, argv);
     fprintf(stderr, "justflow_xe: frame generation for any D3D12 GPU (work in progress)\n"
                     "  --bench <dir|png> [--size WxH] [--factor N] [--lambda X] [--refine N] [--frames N] [--pairs N] [--dump]\n"
                     "          [--shift DX,DY] [--zoom Z] [--adapter I] [--vendor HEX]\n"

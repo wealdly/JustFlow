@@ -7,7 +7,7 @@
 
 #pragma comment(lib, "shell32.lib")
 
-enum { WM_TRAY = WM_APP + 1, ID_AUTO = 1, ID_LOCK, ID_EXTRAP, ID_SYNC, ID_BAT_FULL, ID_BAT_ECO, ID_BAT_OFF, ID_ALWAYS, ID_NEVER, ID_FORGET, ID_LOG, ID_QUIT };
+enum { WM_TRAY = WM_APP + 1 };   // menu item ids are the XeTrayEvent values
 
 struct XeTray
 {
@@ -48,47 +48,31 @@ static void ShowMenu(XeTray* t)
     AppendMenuW(m, MF_STRING | MF_GRAYED, 0, s.status.c_str());
     if (!s.advice.empty()) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, s.advice.c_str());
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (s.auto_on ? MF_CHECKED : 0), ID_AUTO, L"Automatic frame generation");
-    AppendMenuW(m, MF_STRING | (s.lock120 ? MF_CHECKED : 0), ID_LOCK, L"Lock output to the display rate");
-    AppendMenuW(m, MF_STRING | (s.extrap ? MF_CHECKED : 0), ID_EXTRAP, L"Low latency (extrapolate, no hold)");
-    AppendMenuW(m, MF_STRING | (s.vsync ? MF_CHECKED : 0), ID_SYNC, L"Vsync (no tearing; off = lowest latency)");
+    AppendMenuW(m, MF_STRING | (s.auto_on ? MF_CHECKED : 0), XeTrayToggleAuto, L"Automatic frame generation");
+    AppendMenuW(m, MF_STRING | (s.lock120 ? MF_CHECKED : 0), XeTrayToggleLock120, L"Lock output to the display rate");
+    AppendMenuW(m, MF_STRING | (s.extrap ? MF_CHECKED : 0), XeTrayToggleExtrap, L"Low latency (extrapolate, no hold)");
+    AppendMenuW(m, MF_STRING | (s.vsync ? MF_CHECKED : 0), XeTrayToggleSync, L"Vsync (no tearing; off = lowest latency)");
     HMENU bat = CreatePopupMenu();
-    AppendMenuW(bat, MF_STRING | (s.battery == 0 ? MF_CHECKED : 0), ID_BAT_FULL, L"Full");
-    AppendMenuW(bat, MF_STRING | (s.battery == 1 ? MF_CHECKED : 0), ID_BAT_ECO, L"Economy (lighter flow, 30 fps and up)");
-    AppendMenuW(bat, MF_STRING | (s.battery == 2 ? MF_CHECKED : 0), ID_BAT_OFF, L"Off (\"Always\" apps still run, in economy)");
+    AppendMenuW(bat, MF_STRING | (s.battery == 0 ? MF_CHECKED : 0), XeTrayBatteryFull, L"Full");
+    AppendMenuW(bat, MF_STRING | (s.battery == 1 ? MF_CHECKED : 0), XeTrayBatteryEconomy, L"Economy (lighter flow, 30 fps and up)");
+    AppendMenuW(bat, MF_STRING | (s.battery == 2 ? MF_CHECKED : 0), XeTrayBatteryOff, L"Off (\"Always\" apps still run, in economy)");
     AppendMenuW(m, MF_POPUP, (UINT_PTR)bat, L"On battery");
     if (!s.app.empty())
     {
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(m, MF_STRING | (s.app_rule == 1 ? MF_CHECKED : 0), ID_ALWAYS, (L"Always for " + s.app).c_str());
-        AppendMenuW(m, MF_STRING | (s.app_rule == 2 ? MF_CHECKED : 0), ID_NEVER, (L"Never for " + s.app).c_str());
-        AppendMenuW(m, MF_STRING | (s.app_rule == 0 ? MF_CHECKED : 0), ID_FORGET, (L"Automatic for " + s.app).c_str());
+        AppendMenuW(m, MF_STRING | (s.app_rule == 1 ? MF_CHECKED : 0), XeTrayAlways, (L"Always for " + s.app).c_str());
+        AppendMenuW(m, MF_STRING | (s.app_rule == 2 ? MF_CHECKED : 0), XeTrayNever, (L"Never for " + s.app).c_str());
+        AppendMenuW(m, MF_STRING | (s.app_rule == 0 ? MF_CHECKED : 0), XeTrayForget, (L"Automatic for " + s.app).c_str());
     }
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, ID_LOG, L"Open log");
-    AppendMenuW(m, MF_STRING, ID_QUIT, L"Quit");
+    AppendMenuW(m, MF_STRING, XeTrayOpenLog, L"Open log");
+    AppendMenuW(m, MF_STRING, XeTrayQuit, L"Quit");
     POINT p; GetCursorPos(&p);
     SetForegroundWindow(t->hwnd);   // required, or the menu does not close when clicking elsewhere
-    const int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, 0, t->hwnd, nullptr);
+    const int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, 0, t->hwnd, nullptr);   // 0 = dismissed (XeTrayNone)
     PostMessageW(t->hwnd, WM_NULL, 0, 0);
     DestroyMenu(m);
-    XeTrayEvent ev = XeTrayNone;
-    switch (cmd)
-    {
-    case ID_AUTO: ev = XeTrayToggleAuto; break;
-    case ID_LOCK: ev = XeTrayToggleLock120; break;
-    case ID_EXTRAP: ev = XeTrayToggleExtrap; break;
-    case ID_SYNC: ev = XeTrayToggleSync; break;
-    case ID_BAT_FULL: ev = XeTrayBatteryFull; break;
-    case ID_BAT_ECO: ev = XeTrayBatteryEconomy; break;
-    case ID_BAT_OFF: ev = XeTrayBatteryOff; break;
-    case ID_ALWAYS: ev = XeTrayAlways; break;
-    case ID_NEVER: ev = XeTrayNever; break;
-    case ID_FORGET: ev = XeTrayForget; break;
-    case ID_LOG: ev = XeTrayOpenLog; break;
-    case ID_QUIT: ev = XeTrayQuit; break;
-    }
-    if (ev != XeTrayNone) { std::lock_guard<std::mutex> lk(t->mu); t->events.push_back(ev); }
+    if (cmd != XeTrayNone) { std::lock_guard<std::mutex> lk(t->mu); t->events.push_back((XeTrayEvent)cmd); }
 }
 
 static LRESULT CALLBACK Proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
@@ -143,10 +127,10 @@ void XeTrayDestroy(XeTray* t)
 
 void XeTraySet(XeTray* t, const XeTrayState& s)
 {
-    bool changed;
+    bool changed;   // only the tooltip and icon are live; the menu is built from the state when opened
     {
         std::lock_guard<std::mutex> lk(t->mu);
-        changed = s.status != t->state.status || s.auto_on != t->state.auto_on || s.lock120 != t->state.lock120 || s.extrap != t->state.extrap || s.vsync != t->state.vsync || s.app != t->state.app || s.app_rule != t->state.app_rule || s.battery != t->state.battery || s.icon != t->state.icon;
+        changed = s.status != t->state.status || s.icon != t->state.icon;
         t->state = s;
     }
     if (changed && t->hwnd) PostMessageW(t->hwnd, WM_APP + 2, 0, 0);

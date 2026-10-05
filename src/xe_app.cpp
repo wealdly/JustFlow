@@ -9,12 +9,11 @@
 // without: at 60 Hz on battery, 60 fps content has nothing to gain) for kEngageMs, and releases
 // after kReleaseMs outside it (static, slower, faster).
 // Power: plugged in = full; on battery the tray's policy (default economy: flow at 1/3 resolution,
-// measured 0.85 ms instead of 1.64 for -0.9 dB at 45 fps x2, and at least 30 fps content); Battery Saver = off, except "always" apps,
-// which run economy. The battery's own discharge rate is logged, split by engaged / not, so the real
-// cost is measured rather than guessed. One window at a time;
-// losing the foreground hides the overlay at once (present.cpp) and releases the window after
-// kAwayMs. Per-app rules (always / never) live in justflow_xe.ini, keyed by the exe name, which
-// comes from the process list - never from opening the process (see README: no OpenProcess).
+// measured 0.85 ms instead of 1.64 for -0.9 dB at 45 fps x2, and at least 30 fps content); Battery
+// Saver = off, except "always" apps, which run economy. Battery drain is logged engaged vs not.
+// One window at a time; losing the foreground hides the overlay at once (present.cpp) and releases
+// the window after kAwayMs. Per-app rules (always / never) live in justflow_xe.ini, keyed by the exe
+// name, which comes from the process list - never from opening the process (README: no OpenProcess).
 // No global hotkeys in this mode: a global F8 would be stolen from every game. The tray is the UI.
 #include "xe_app.h"
 #include "xe_fg.h"
@@ -54,10 +53,14 @@ struct Settings
     int  battery = 1;                   // on battery: 0 full, 1 economy, 2 off
     // Upper bound of content worth generating for, from the display's current refresh.
     int  Upper(double hz) const { return (int)floor(hz * (lock120 ? 0.98 : 0.83)); }
+    bool Is(const wchar_t* sec, const wchar_t* key, const wchar_t* def, const wchar_t* want) const
+    {
+        wchar_t v[16] = {}; GetPrivateProfileStringW(sec, key, def, v, 16, path.c_str());
+        return !_wcsicmp(v, want);
+    }
     int  Rule(const std::wstring& exe) const   // 0 automatic, 1 always, 2 never
     {
-        wchar_t v[16] = {}; GetPrivateProfileStringW(L"apps", exe.c_str(), L"", v, 16, path.c_str());
-        return !_wcsicmp(v, L"always") ? 1 : !_wcsicmp(v, L"never") ? 2 : 0;
+        return Is(L"apps", exe.c_str(), L"", L"always") ? 1 : Is(L"apps", exe.c_str(), L"", L"never") ? 2 : 0;
     }
     void SetRule(const std::wstring& exe, int r)
     {
@@ -68,12 +71,9 @@ struct Settings
         auto I = [&](const wchar_t* k, int d) { return (int)GetPrivateProfileIntW(L"auto", k, d, path.c_str()); };
         auto_on = I(L"enabled", 1) != 0; lock120 = I(L"lock120", 1) != 0;
         min_fps = std::clamp(I(L"min_fps", 25), 10, 100);
-        wchar_t e[16] = {}; GetPrivateProfileStringW(L"auto", L"engine", L"interpolate", e, 16, path.c_str());
-        extrap = !_wcsicmp(e, L"extrapolate");
-        wchar_t sy[16] = {}; GetPrivateProfileStringW(L"auto", L"sync", L"vsync", sy, 16, path.c_str());
-        vsync = _wcsicmp(sy, L"off") != 0;
-        wchar_t b[16] = {}; GetPrivateProfileStringW(L"power", L"battery", L"economy", b, 16, path.c_str());
-        battery = !_wcsicmp(b, L"full") ? 0 : !_wcsicmp(b, L"off") ? 2 : 1;
+        extrap = Is(L"auto", L"engine", L"interpolate", L"extrapolate");
+        vsync = !Is(L"auto", L"sync", L"vsync", L"off");
+        battery = Is(L"power", L"battery", L"economy", L"full") ? 0 : Is(L"power", L"battery", L"economy", L"off") ? 2 : 1;
     }
     void Save() const
     {
@@ -113,11 +113,12 @@ static PowerState ReadPower()
     p.percent = s.BatteryLifePercent <= 100 ? s.BatteryLifePercent : -1;
     return p;
 }
+static void LogPower(const PowerState& p) { Log("[power] %s%s, battery %d%%", p.ac ? "plugged in" : "on battery", p.saver ? " (Battery Saver)" : "", p.percent); }
 static PowerMode Mode(const PowerState& p, const Settings& st, int rule)
 {
     if (p.ac) return PowerFull;
     if (p.saver || st.battery == 2) return rule == 1 ? PowerEconomy : PowerOff;
-    return st.battery == 0 ? PowerFull : PowerEconomy;
+    return (PowerMode)st.battery;   // Settings::battery uses the PowerMode values
 }
 static const char* ModeName(PowerMode m) { return m == PowerFull ? "full" : m == PowerEconomy ? "economy" : "off"; }
 // Battery power in watts, negative while discharging (0 = plugged in or unknown).
@@ -171,13 +172,9 @@ struct Probe
     {
         g = &gpu; w = w_; h = h_; tw = (w + kDiv - 1) / kDiv; th = (h + kDiv - 1) / kDiv;
         if (!GpuMakeCompute(gpu, g_cs_gray, sizeof g_cs_gray, 1, 1, 6, gray, L"probe_luma")) return false;
-        D3D12_RESOURCE_DESC d = {};
-        for (int i = 0; i < kSlots; ++i)
-        {
-            if (!(tiny[i] = GpuMakeTex(gpu, tw, th, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"probe_tiny"))) return false;
-            if (i == 0) { d = tiny[0]->GetDesc(); gpu.dev->GetCopyableFootprints(&d, 0, 1, 0, &fp, nullptr, nullptr, &rb_bytes);
-                          for (int k = 0; k < kSlots; ++k) if (!(rb[k] = GpuMakeBuffer(gpu, rb_bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE, L"probe_rb"))) return false; }
-        }
+        for (auto& t : tiny) if (!(t = GpuMakeTex(gpu, tw, th, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"probe_tiny"))) return false;
+        const D3D12_RESOURCE_DESC d = tiny[0]->GetDesc(); gpu.dev->GetCopyableFootprints(&d, 0, 1, 0, &fp, nullptr, nullptr, &rb_bytes);
+        for (auto& r : rb) if (!(r = GpuMakeBuffer(gpu, rb_bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE, L"probe_rb"))) return false;
         prev.resize((size_t)tw * th); cur.resize(prev.size());
         return true;
     }
@@ -201,7 +198,7 @@ struct Probe
             uint8_t* p = nullptr; const D3D12_RANGE rr = { 0, (SIZE_T)rb_bytes };
             const HRESULT mh = rb[s]->Map(0, &rr, (void**)&p);
             if (FAILED(mh)) { static bool once = false; if (!once) { once = true; Log("[auto] probe readback Map failed 0x%08X", (unsigned)mh); } }
-            if (SUCCEEDED(mh))
+            else
             {
                 for (UINT y = 0; y < th; ++y) memcpy(&cur[(size_t)y * tw], p + (size_t)y * fp.Footprint.RowPitch, tw);
                 const D3D12_RANGE none = { 0, 0 }; rb[s]->Unmap(0, &none);
@@ -239,10 +236,7 @@ struct Probe
         const GpuView sv = { src, DXGI_FORMAT_UNKNOWN }, uv = { tiny[s], DXGI_FORMAT_UNKNOWN };
         GpuDispatch(*g, cl, gray, &sv, &uv, c, GpuGroups(tw, 8), GpuGroups(th, 8));
         GpuBarrier(cl, tiny[s], UAV, CSRC);
-        D3D12_TEXTURE_COPY_LOCATION from = {}, to = {};
-        from.pResource = tiny[s]; from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        to.pResource = rb[s]; to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; to.PlacedFootprint = fp;
-        cl->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        GpuCopyToReadback(cl, tiny[s], rb[s], fp.Footprint.Format, fp.Footprint.Width, fp.Footprint.Height, fp.Footprint.RowPitch);   // fp.Offset is 0
         GpuBarrier(cl, tiny[s], CSRC, NPSR);
         if (capture) GpuBarrier(cl, capture, NPSR, COMMON);
         const UINT64 v = GpuEnd(*g);
@@ -383,8 +377,8 @@ int RunTrayApp(const std::wstring& dir)
     Settings st; st.path = dir + L"\\justflow_xe.ini"; st.Load(); st.Save();
     PowerState pw = ReadPower(); double pw_t = NowMs();
     Log("[auto] JustFlow XE tray app: automatic %s, content from %d fps up to %.0f%% of the refresh, on battery %s. Settings: %ls",
-        st.auto_on ? "on" : "off", st.min_fps, st.lock120 ? 98.0 : 83.0, st.battery == 0 ? "full" : st.battery == 2 ? "off" : "economy", st.path.c_str());
-    Log("[power] %s%s, battery %d%%", pw.ac ? "plugged in" : "on battery", pw.saver ? " (Battery Saver)" : "", pw.percent);
+        st.auto_on ? "on" : "off", st.min_fps, st.lock120 ? 98.0 : 83.0, ModeName((PowerMode)st.battery), st.path.c_str());
+    LogPower(pw);
     // Measured cost: battery watts averaged while engaged vs not, reported every minute on battery.
     double watts_sum[2] = {}, watts_n[2] = {}, watts_report_t = NowMs();
     XeTray* tray = XeTrayCreate();
@@ -416,8 +410,8 @@ int RunTrayApp(const std::wstring& dir)
                 Log("[auto] %s", st.extrap ? "low latency: extrapolating ahead of the newest frame" : "interpolating between the last two frames");
                 break;
             case XeTrayBatteryFull: case XeTrayBatteryEconomy: case XeTrayBatteryOff:
-                st.battery = ev == XeTrayBatteryFull ? 0 : ev == XeTrayBatteryOff ? 2 : 1; st.Save();
-                Log("[power] on battery: %s", st.battery == 0 ? "full" : st.battery == 2 ? "off" : "economy");
+                st.battery = ev - XeTrayBatteryFull; st.Save();   // Full, Economy, Off = 0, 1, 2
+                Log("[power] on battery: %s", ModeName((PowerMode)st.battery));
                 break;
             case XeTrayAlways: case XeTrayNever: case XeTrayForget:
                 if (const std::wstring app = !s.exe.empty() ? s.exe : never_exe; !app.empty())
@@ -442,7 +436,7 @@ int RunTrayApp(const std::wstring& dir)
             const double dt = (NowMs() - pw_t) / 1000.0; pw_t = NowMs();
             const PowerState p = ReadPower();
             if (p.ac != pw.ac || p.saver != pw.saver)
-                Log("[power] %s%s, battery %d%%", p.ac ? "plugged in" : "on battery", p.saver ? " (Battery Saver)" : "", p.percent);
+                LogPower(p);
             pw = p;
             const double wt = BatteryWatts();
             if (wt < 0) { const int k = s.fg ? 1 : 0; watts_sum[k] += -wt * dt; watts_n[k] += dt; }
@@ -600,7 +594,7 @@ int RunTrayApp(const std::wstring& dir)
                 if (rule != 1 && s.bad_since >= 0 && now - s.bad_since >= kReleaseMs)
                     Disengage(s, r.gap > 250 ? "content static" : r.fps > hi ? "content faster than the range" : "content slower than the range");
                 else swprintf_s(line, L"generating %ls - %.0f -> %.0f fps%ls%ls", s.exe.c_str(), r.fps, s.hz, st.extrap ? L" (low latency)" : L"", s.engaged_mode == PowerEconomy ? L" (economy)" : L"");
-                if (!s.fg) swprintf_s(line, L"watching %ls", s.exe.c_str());
+                if (!s.fg) swprintf_s(line, L"watching %ls", s.exe.c_str());   // released just above
             }
             status = line;
 

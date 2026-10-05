@@ -5,6 +5,8 @@
 #include <windows.h>
 #include <string>
 
+// The values double as the popup menu's command ids (0 = menu dismissed). Battery Full/Economy/Off stay
+// consecutive: xe_app maps them to Settings::battery 0..2.
 enum XeTrayEvent { XeTrayNone = 0, XeTrayToggleAuto, XeTrayToggleLock120, XeTrayToggleExtrap, XeTrayToggleSync, XeTrayBatteryFull, XeTrayBatteryEconomy, XeTrayBatteryOff,
                    XeTrayAlways, XeTrayNever, XeTrayForget, XeTrayOpenLog, XeTrayQuit };
 
