@@ -70,7 +70,6 @@ static const uint8_t kFont8x8[95][8] = {
 };
 static_assert(sizeof kFont8x8 == 760, "95 glyphs x 8 rows");
 
-
 Shaders* ShadersCreate(Gpu& g)
 {
     Shaders* s = new Shaders();
@@ -168,9 +167,7 @@ static UINT UploadRects(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, const
     GpuBarrier(cl, s->rect_tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
     D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
     src.pResource = up; src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R32_SINT;
-    src.PlacedFootprint.Footprint.Width = kRectInts; src.PlacedFootprint.Footprint.Height = 1; src.PlacedFootprint.Footprint.Depth = 1;
-    src.PlacedFootprint.Footprint.RowPitch = kRectBytes;
+    src.PlacedFootprint.Footprint = { DXGI_FORMAT_R32_SINT, kRectInts, 1, 1, kRectBytes };
     dst.pResource = s->rect_tex; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     GpuBarrier(cl, s->rect_tex, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -216,7 +213,7 @@ void CsComposeResidual(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12
 void CsWarp(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* mv, ID3D12Resource* out,
             UINT w, UINT h, UINT ww, UINT wh, float t, UINT nrects, ID3D12Resource* gray_cur, ID3D12Resource* gray_prev, UINT gw, UINT gh)
 {
-    struct { UINT w, h, ww, wh; float t; UINT nrects, gw, gh; } c = { w, h, ww, wh, t, std::min(nrects, 64u), gw, gh };
+    struct { UINT w, h, ww, wh; float t; UINT nrects, gw, gh; } c = { w, h, ww, wh, t, std::min(nrects, kMaxRects), gw, gh };
     const GpuView srv[5] = { { src, DXGI_FORMAT_R8G8B8A8_UNORM }, { mv, DXGI_FORMAT_R16G16_FLOAT }, { s->rect_tex, DXGI_FORMAT_R32_SINT },
                              { gray_cur, DXGI_FORMAT_UNKNOWN }, { gray_prev, DXGI_FORMAT_UNKNOWN } };
     const GpuView uav = { out, DXGI_FORMAT_R8G8B8A8_UNORM };
@@ -271,7 +268,7 @@ void CsText(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* d
 void CsDeband(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* dst, UINT w, UINT h, float strength, UINT nrects, UINT seed)
 {
     // strength 1: steps within 2.5 code values smoothed in two iterations reaching mpv's 16 px per 1080
-    // lines (32 at 4K - a wider reach measured no better on a 7-bit 4K gradient), +-0.5 code value of grain
+    // lines (a wider reach measured no better at 4K), +-0.5 code value of grain
     const float k = std::clamp(strength, 0.0f, 2.0f);
     struct { UINT w, h; float threshold, range, grain; UINT iterations, nrects, seed; } c = { w, h, k * 2.5f / 255.0f, 16.0f * h / 1080.0f, k * 1.0f / 255.0f, 2u, std::min(nrects, kMaxRects), seed };
     const GpuView srv[2] = { { src, DXGI_FORMAT_R8G8B8A8_UNORM }, { s->rect_tex, DXGI_FORMAT_R32_SINT } };

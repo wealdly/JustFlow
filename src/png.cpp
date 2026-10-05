@@ -1,4 +1,3 @@
-// WIC PNG load/save (RGBA8), shared by the benches and the frame dumps.
 #include "png.h"
 #include "log.h"
 #include <wincodec.h>

@@ -1,7 +1,7 @@
 // Duplicate-frame and scene-cut test, one texel per 64x64 tile: R = 1 where this capture differs from the
 // previous one at all, G = the tile's mean luma. Desktop apps (a browser playing video) present at the
-// display rate while the content changes at 24-30 fps, and every repaint is a byte-identical copy - counted
-// as a frame, it made "fps in" swing 30..240 and the FG governor toggle. The tile means feed the cut test
+// display rate while the content changes at 24-30 fps: the repaints are byte-identical copies, not frames.
+// The tile means feed the cut test
 // (main: each tile against its best 3x3 neighbour in the previous frame, mean > 0.03 = a cut).
 // a: this capture, converted as the swizzle will (capture_in.hlsli); b: color4k, still the previous frame
 // (the swizzle runs after).

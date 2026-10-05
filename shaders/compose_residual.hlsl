@@ -57,8 +57,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         res = saturate(nat + d);
     }
     {
-        // Vibrance is NOT here: it is the filter layer's job (shaders/sharpen.hlsl), which runs on
-        // whatever this produced, model or no model, and after the sharpen.
+        // no vibrance here: the filter layer (sharpen.hlsl) grades after the sharpen, model or no model
         const float2 p = float2(q);
         const float f = max(feather, 1);
         [loop] for (uint i = 0; i < min(nrects, 64u); ++i)

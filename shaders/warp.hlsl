@@ -9,8 +9,7 @@
 // it. Each pixel also gets the zero-motion hypothesis, scored on the OFA's own gray pair: luma
 // disagreement of the two frames at the same place (e0) vs along the flow (ef), over a +-1 gray px
 // cross. Where standing still is clearly better it stands still; ties go to the flow, since standing
-// still there freezes low-contrast moving texture. (From justflow_xe, where this took static UI from
-// 33.0 to 47.1 dB with extrapolation and cost the whole frame 0.18 dB.)
+// still there freezes low-contrast moving texture. (justflow_xe: static UI 33.0 -> 47.1 dB, whole frame -0.18 dB.)
 Texture2D<float4>   src   : register(t0);
 Texture2D<float2>   mv    : register(t1);
 Texture2D<int>      rects : register(t2);

@@ -39,7 +39,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // rounded box: inside when within `pad` of the deflated rectangle
     const int2 d = q - clamp(q, int2(pad, pad), int2(bw - 1 - pad, bh - 1 - pad));
     if (d.x * d.x + d.y * d.y > pad * pad) { if (layer) dst[p] = 0; return; }
-    // c over L: L * (1 - a) + (c * a, a). Onto the frame L.a stays 1 and this is the old lerp.
+    // c over L: L * (1 - a) + (c * a, a). Onto the frame L.a stays 1.
     float4 L = layer ? float4(0, 0, 0, 0) : float4(dst[p].rgb, 1);
     L = L * (1 - 0.6 * alpha) + float4(float3(0.04, 0.04, 0.05) * 0.6 * alpha, 0.6 * alpha);
     const int lx = q.x - pad, ly = q.y - pad;

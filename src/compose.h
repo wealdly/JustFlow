@@ -1,7 +1,6 @@
-// Compute passes (all cs_5_0, compiled by fxc at build time into gen/*.h, bound through
-// GpuDispatch): swizzle, gray, downscale, expand (flow -> motion vectors), compose (matched
-// residual + UI rects + wipe), text (toast / HUD), sharpen (CAS-style). Every function records into `cl`; the caller owns barriers:
-//   sources must be NON_PIXEL_SHADER_RESOURCE, destinations UNORDERED_ACCESS.
+// Compute passes (all cs_5_0, compiled by fxc at build time into gen/*.h, bound through GpuDispatch).
+// Every function records into `cl`; the caller owns barriers: sources must be NON_PIXEL_SHADER_RESOURCE,
+// destinations UNORDERED_ACCESS.
 #pragma once
 #include "d3d.h"
 
@@ -56,9 +55,6 @@ void CsComposeResidual(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12
 void CsWarp(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* mv, ID3D12Resource* out,
             UINT w, UINT h, UINT ww, UINT wh, float t, UINT nrects,
             ID3D12Resource* gray_cur, ID3D12Resource* gray_prev, UINT gw, UINT gh);
-// mv (ww x wh, NPSR) averaged into a kMvGridW x kMvGridH R32G32_FLOAT grid (UAV), for the latewarp mouse
-// model. The shader (mvgrid.hlsl) has the same two numbers.
-constexpr UINT kMvGridW = 32, kMvGridH = 18, kMvGridPitch = kMvGridW * 8;   // readback row pitch: 256, already aligned
 // Frame Warp's no-warp mask from mv (NPSR) and its median (gx, gy): R8 mw x mh (UAV), 1 = not the camera's motion.
 void CsNoWarpMask(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* mask, UINT mw, UINT mh, float gx, float gy);
 // Duplicate / scene-cut test: cap (converted as CsSwizzle does) vs prev (color4k before this frame's swizzle)
@@ -67,6 +63,9 @@ void CsSame(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* c
 // engine=video: the frame at t (0..1) between real frames a and b (RGBA8, NPSR), along b's backward flow mv
 // (R16G16_FLOAT ww x wh, NPSR) -> dst (RGBA8 w x h, UAV). vinterp.hlsl.
 void CsVideoInterp(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* a, ID3D12Resource* b, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* dst, UINT w, UINT h, float t);
+// mv (ww x wh, NPSR) averaged into a kMvGridW x kMvGridH R32G32_FLOAT grid (UAV), for the latewarp mouse
+// model. The shader (mvgrid.hlsl) has the same two numbers.
+constexpr UINT kMvGridW = 32, kMvGridH = 18, kMvGridPitch = kMvGridW * 8;   // readback row pitch: 256, already aligned
 void CsMvGrid(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* grid);
 // ---- on-screen text -------------------------------------------------------------------------
 // Draws `text` (ASCII 32..126, up to 64 chars, 8x8 font at `scale` px per font pixel) white with a
@@ -80,13 +79,12 @@ inline int TextBoxW(size_t len, int scale, int pad) { return (int)(len < kMaxTex
 inline int TextBoxH(int scale, int pad) { return 8 * scale + 2 * pad; }
 
 // ---- filter layer -------------------------------------------------------------------------------
-// The ordinary post filters, RGBA8 src (NPSR) -> dst (UAV), both w x h: contrast-adaptive sharpen
-// (CAS-style, strength 0..1) and THEN vibrance (saturation, 1 = untouched) - grading last, so the
-// sharpener never amplifies colour it just pushed. Pixels inside the first `nrects` rects of the
-// rect texture (as uploaded by the compose recorded earlier in the same list) pass through both.
-// Deband (deband.hlsl, haasn's mpv algorithm): src -> dst (RGBA8 w x h, UAV), strength 0..2 (1 = default),
-// UI rects (rect_tex, nrects) pass through. seed varies the grain per frame.
+// RGBA8 src (NPSR) -> dst (UAV), both w x h. Pixels inside the first `nrects` rects of the rect texture
+// (as uploaded by the compose recorded earlier in the same list) pass through.
+// Deband (deband.hlsl, haasn's mpv algorithm): strength 0..2 (1 = default); seed varies the grain per frame.
 void CsDeband(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* dst, UINT w, UINT h, float strength, UINT nrects, UINT seed);
+// RCAS sharpen (strength 0..1) and THEN vibrance (saturation, 1 = untouched) - grading last, so the
+// sharpener never amplifies colour it just pushed.
 void CsSharpen(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* dst, UINT w, UINT h,
                float strength, float saturation, UINT nrects);
 
