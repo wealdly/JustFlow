@@ -10,11 +10,6 @@
 #include <thread>
 #include <vector>
 
-static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-static const D3D12_RESOURCE_STATES CSRC = D3D12_RESOURCE_STATE_COPY_SOURCE;
-static const D3D12_RESOURCE_STATES CDST = D3D12_RESOURCE_STATE_COPY_DEST;
-static const D3D12_RESOURCE_STATES COMMON = D3D12_RESOURCE_STATE_COMMON;
-static const D3D12_RESOURCE_STATES PRESENT = D3D12_RESOURCE_STATE_PRESENT;
 static const int kFrames = 4, kPairs = 3;
 
 // Rest states: frame NPSR, pair grids NPSR, backbuffers PRESENT. Guarded by XeFg::mu: every field below except
@@ -60,8 +55,6 @@ struct XeFg
     ID3D12Resource* snap_rb = nullptr; D3D12_PLACED_SUBRESOURCE_FOOTPRINT snap_fp = {}; UINT64 snap_bytes = 0;
     bool snap_pending = false; UINT64 snap_fence = 0; float snap_t = 0;   // under mu
 };
-
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
 
 static bool Fail(XeFg* f, const char* why)
 {
@@ -442,7 +435,7 @@ ID3D12Resource* XeFgLastFrame(XeFg* f) { return f->last >= 0 ? f->fr[f->last].te
 
 void XeFgStats(XeFg* f, XeFgStatsOut& out)
 {
-    auto med = [](std::vector<double>& v) { if (v.empty()) return -1.0; std::sort(v.begin(), v.end()); const double m = v[v.size() / 2]; v.clear(); return m; };
+    auto med = [](std::vector<double>& v) { const double m = Pct(v, 0.5); v.clear(); return m; };
     out.flow_ms = med(f->flow_ms);   // main thread (the caller) owns it
     std::lock_guard<std::mutex> lk(f->mu);
     out.in = f->in; out.presented = f->presented; out.generated = f->generated; out.extrapolated = f->extrapolated; out.held = f->held; out.early = f->early;

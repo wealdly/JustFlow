@@ -1,12 +1,11 @@
 #include "png.h"
 #include "log.h"
+#include "d3d.h"     // REL
 #include <wincodec.h>
 #include <algorithm>
 
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "ole32.lib")
-
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
 
 static IWICImagingFactory* Wic()
 {

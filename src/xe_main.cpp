@@ -40,15 +40,6 @@
 #include <string>
 #include <vector>
 
-static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-static const D3D12_RESOURCE_STATES UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
-
-static std::wstring ExeDir()
-{
-    wchar_t p[MAX_PATH]; GetModuleFileNameW(nullptr, p, MAX_PATH);
-    std::wstring s(p); return s.substr(0, s.find_last_of(L"\\/"));
-}
 static std::wstring Widen(const char* s) { return std::wstring(s, s + strlen(s)); }
 
 static float Half(uint16_t h)
@@ -803,8 +794,8 @@ static int RunLive(int argc, char** argv)
             {
                 XeFgStatsOut s; XeFgStats(fg, s);
                 const double dt = (now - stats_t) / 1000.0; stats_t = now;
-                std::vector<double>& sp = s.spacing_ms; std::sort(sp.begin(), sp.end());
-                auto q = [&](double p) { return sp.empty() ? -1.0 : sp[std::min(sp.size() - 1, (size_t)(sp.size() * p))]; };
+                const std::vector<double>& sp = s.spacing_ms;
+                auto q = [&](double p) { return Pct(sp, p); };
                 const double vbm = OverlayVBlankMs(ov); size_t late = 0;
                 for (double x : sp) late += x > vbm * 1.5;
                 std::vector<double>& av = s.after_vblank_ms; std::sort(av.begin(), av.end());
@@ -850,18 +841,10 @@ int main(int argc, char** argv)
 // the CLI modes, attached to the parent console (justflow_xe_cli.exe is the one to script).
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
-    int argc = 0; wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (argc <= 1) { if (wargv) LocalFree(wargv); return RunTrayApp(ExeDir()); }
-    if (AttachConsole(ATTACH_PARENT_PROCESS))
-    {
-        FILE* f = nullptr;
-        freopen_s(&f, "CONOUT$", "w", stdout); freopen_s(&f, "CONOUT$", "w", stderr);
-    }
-    std::vector<std::string> args; std::vector<char*> argv;   // ASCII arguments, like justflow.exe
-    for (int i = 0; i < argc; ++i) { std::string a; for (const wchar_t* w = wargv[i]; *w; ++w) a.push_back((char)*w); args.push_back(a); }
-    for (auto& a : args) argv.push_back(&a[0]);
-    argv.push_back(nullptr);
-    LocalFree(wargv);
+    std::vector<std::string> args; std::vector<char*> argv;
+    const int argc = NarrowArgs(args, argv);
+    if (argc <= 1) return RunTrayApp(ExeDir());
+    AttachParentConsole();
     return CliMain(argc, argv.data());
 }
 #endif

@@ -6,6 +6,15 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <cstdint>
+#include <string>
+#include <vector>
+
+#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
+// Barrier/creation shorthands: every module's state transitions read as one line.
+static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+static const D3D12_RESOURCE_STATES CSRC = D3D12_RESOURCE_STATE_COPY_SOURCE, CDST = D3D12_RESOURCE_STATE_COPY_DEST;
+static const D3D12_RESOURCE_STATES COMMON = D3D12_RESOURCE_STATE_COMMON, PRESENT = D3D12_RESOURCE_STATE_PRESENT;
+static const D3D12_RESOURCE_FLAGS FUAV = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
 // One queue's recording ring: a 3-deep allocator ring behind one fence + its own event (so another thread
 // can wait without sharing one), a shader-visible descriptor heap and a timestamp heap, both split into
@@ -135,4 +144,15 @@ bool GpuCtxStampsMsSlot(GpuCtx& c, int slot, double* ms, int pairs);
 // ---- misc ------------------------------------------------------------------------------------
 double NowMs();   // QPC milliseconds
 double QpcToMs(LONGLONG qpc_ticks);   // same clock as NowMs
+double Pct(std::vector<double> v, double p);   // sorted v[(size_t)(p * n)], clamped to the last; -1 when empty
 const char* NgxResultName(unsigned r);
+
+// ---- process (the exes' shared startup) ---------------------------------------------------------
+std::wstring ExeDir();   // the exe's folder, no trailing backslash
+// Windowed subsystem: when launched from a console, send stdout/stderr there.
+void AttachParentConsole();
+// __argv is NULL under a wide entry point (the UCRT only builds __wargv): a narrow copy of the command line,
+// argv null-terminated and pointing into args. Returns argc.
+int NarrowArgs(std::vector<std::string>& args, std::vector<char*>& argv);
+// One live instance: the held named mutex, or (another instance runs) nullptr after telling the user.
+HANDLE SingleInstance(const wchar_t* mutex_name, const wchar_t* message, const wchar_t* title);

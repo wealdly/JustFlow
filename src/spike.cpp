@@ -15,13 +15,6 @@
 #include <string>
 #include <vector>
 
-static std::wstring ExeDir()
-{
-    wchar_t p[MAX_PATH] = {}; GetModuleFileNameW(nullptr, p, MAX_PATH);
-    if (wchar_t* s = wcsrchr(p, L'\\')) *s = 0;
-    return p;
-}
-
 // Synthetic frame: smooth gradients + hard edges + a text-like grid, shifted by `shift` pixels so
 // the temporal path is exercised. RGBA8.
 static void Synth(std::vector<uint8_t>& px, UINT w, UINT h, int shift)

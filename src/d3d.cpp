@@ -2,11 +2,10 @@
 #include "log.h"
 #include <algorithm>
 #include <cstring>
+#include <shellapi.h>
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
-
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
 
 double QpcToMs(LONGLONG qpc)
 {
@@ -14,10 +13,50 @@ double QpcToMs(LONGLONG qpc)
     return (double)qpc * 1000.0 / (double)f.QuadPart;
 }
 
+double Pct(std::vector<double> v, double p)
+{
+    if (v.empty()) return -1;
+    std::sort(v.begin(), v.end());
+    return v[std::min(v.size() - 1, (size_t)(p * (double)v.size()))];
+}
+
 double NowMs()
 {
     LARGE_INTEGER c; QueryPerformanceCounter(&c);
     return QpcToMs(c.QuadPart);
+}
+
+std::wstring ExeDir()
+{
+    wchar_t p[MAX_PATH] = {}; GetModuleFileNameW(nullptr, p, MAX_PATH);
+    if (wchar_t* s = wcsrchr(p, L'\\')) *s = 0;
+    return p;
+}
+
+void AttachParentConsole()
+{
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;
+    FILE* f = nullptr;
+    freopen_s(&f, "CONOUT$", "w", stdout); freopen_s(&f, "CONOUT$", "w", stderr);
+}
+
+int NarrowArgs(std::vector<std::string>& args, std::vector<char*>& argv)
+{
+    int argc = 0; wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    for (int i = 0; i < argc; ++i) { std::string a; for (const wchar_t* w = wargv[i]; *w; ++w) a.push_back((char)*w); args.push_back(a); }   // ponytail: ASCII args only
+    for (auto& a : args) argv.push_back(&a[0]);
+    argv.push_back(nullptr);
+    if (wargv) LocalFree(wargv);
+    return argc;
+}
+
+HANDLE SingleInstance(const wchar_t* mutex_name, const wchar_t* message, const wchar_t* title)
+{
+    HANDLE m = CreateMutexW(nullptr, TRUE, mutex_name);
+    if (m && GetLastError() != ERROR_ALREADY_EXISTS) return m;
+    MessageBoxW(nullptr, message, title, MB_ICONINFORMATION | MB_OK);
+    if (m) CloseHandle(m);
+    return nullptr;
 }
 
 const char* NgxResultName(unsigned r)

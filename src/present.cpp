@@ -69,8 +69,6 @@ struct Overlay
     ID3D12Fence* ui_fence = nullptr; UINT64 ui_value = 0;
 };
 
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
-
 static D3D12_CPU_DESCRIPTOR_HANDLE Slot(Overlay* o, ID3D12DescriptorHeap* heap, D3D12_DESCRIPTOR_HEAP_TYPE type, UINT i)
 {
     D3D12_CPU_DESCRIPTOR_HANDLE h = heap->GetCPUDescriptorHandleForHeapStart();
