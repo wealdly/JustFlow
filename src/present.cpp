@@ -1,8 +1,12 @@
 // Click-through overlay window on its own thread + flip-model swapchain on the Gpu queue.
 #include "present.h"
 #include "log.h"
+#include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <dwmapi.h>
+#include "vs_uiblend.h"
+#include "ps_uiblend.h"
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "user32.lib")
@@ -56,6 +60,15 @@ struct Overlay
     int    short_waits = 0;        // consecutive wake-ups far closer together than a refresh
     double last_wake = 0, dwm_since = 0;   // OverlayWaitVBlank: the last return; when DwmFlush took over
     bool   dwm_logged = false;
+    // Our UI over every presented frame (uiblend.hlsl): two premultiplied layers the main thread draws
+    // into, the one being shown and the one being drawn; a present switches once the drawing's fence passed.
+    ID3D12RootSignature* ui_root = nullptr; ID3D12PipelineState* ui_pso = nullptr;
+    ID3D12DescriptorHeap *ui_srv = nullptr, *ui_rtv = nullptr;   // 2 layer SRVs; kBuffers backbuffer RTVs
+    ID3D12Resource* ui_tex[2] = {};
+    std::mutex ui_mu;
+    RECT   ui_box[2][8] = {}; int ui_n[2] = {};
+    int    ui_active = -1, ui_pending = -1, ui_writing = -1;
+    ID3D12Fence* ui_fence = nullptr; UINT64 ui_value = 0;
 };
 
 static bool WaitPq(Overlay* o, UINT64 v, DWORD ms)
@@ -208,6 +221,12 @@ static bool GetBuffers(Overlay* o)
         if (FAILED(o->swap->GetBuffer(i, __uuidof(ID3D12Resource), (void**)&o->bb[i]))) { Log("[present] GetBuffer %d failed", i); return false; }
         wchar_t name[16]; swprintf_s(name, L"backbuffer%d", i);
         o->bb[i]->SetName(name);
+        if (o->ui_rtv)
+        {
+            D3D12_CPU_DESCRIPTOR_HANDLE h = o->ui_rtv->GetCPUDescriptorHandleForHeapStart();
+            h.ptr += (SIZE_T)i * o->g->dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+            o->g->dev->CreateRenderTargetView(o->bb[i], nullptr, h);
+        }
     }
     return true;
 }
@@ -218,6 +237,64 @@ static void ReleaseBuffers(Overlay* o)
 }
 
 static Overlay* Create(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, int mode, ID3D12CommandQueue* queue);
+
+// uiblend.hlsl: a pixel shader reading the layer (t0, one table), premultiplied "over" into the backbuffer.
+static bool UiInit(Overlay* o)
+{
+    ID3D12Device* dev = o->g->dev;
+    D3D12_DESCRIPTOR_RANGE range = {}; range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; range.NumDescriptors = 1;
+    D3D12_ROOT_PARAMETER param = {}; param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    param.DescriptorTable.NumDescriptorRanges = 1; param.DescriptorTable.pDescriptorRanges = &range; param.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 1; rs.pParameters = &param;
+    ID3DBlob *blob = nullptr, *err = nullptr;
+    if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err))) { if (err) err->Release(); return false; }
+    const HRESULT hr = dev->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), __uuidof(ID3D12RootSignature), (void**)&o->ui_root);
+    blob->Release();
+    if (FAILED(hr)) return false;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {};
+    pd.pRootSignature = o->ui_root;
+    pd.VS = { g_vs_uiblend, sizeof g_vs_uiblend }; pd.PS = { g_ps_uiblend, sizeof g_ps_uiblend };
+    D3D12_RENDER_TARGET_BLEND_DESC& b = pd.BlendState.RenderTarget[0];
+    b.BlendEnable = TRUE; b.SrcBlend = D3D12_BLEND_ONE; b.DestBlend = D3D12_BLEND_INV_SRC_ALPHA; b.BlendOp = D3D12_BLEND_OP_ADD;
+    b.SrcBlendAlpha = D3D12_BLEND_ONE; b.DestBlendAlpha = D3D12_BLEND_ZERO; b.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    b.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pd.SampleMask = UINT_MAX;
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; pd.RasterizerState.DepthClipEnable = TRUE;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM; pd.SampleDesc.Count = 1;
+    if (FAILED(dev->CreateGraphicsPipelineState(&pd, __uuidof(ID3D12PipelineState), (void**)&o->ui_pso))) return false;
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {}; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = 2; hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(dev->CreateDescriptorHeap(&hd, __uuidof(ID3D12DescriptorHeap), (void**)&o->ui_srv))) return false;
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; hd.NumDescriptors = kBuffers; hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    return SUCCEEDED(dev->CreateDescriptorHeap(&hd, __uuidof(ID3D12DescriptorHeap), (void**)&o->ui_rtv));
+}
+
+ID3D12Resource* OverlayUiLayer(Overlay* o)
+{
+    if (!o || !o->ui_pso) return nullptr;
+    std::lock_guard<std::mutex> lk(o->ui_mu);
+    if (o->ui_pending >= 0) return nullptr;   // the last drawing is not on screen yet
+    const int k = o->ui_active == 0 ? 1 : 0;
+    if (!o->ui_tex[k])
+    {
+        if (!(o->ui_tex[k] = GpuMakeTex(*o->g, o->w, o->h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, L"ui_layer"))) return nullptr;
+        D3D12_CPU_DESCRIPTOR_HANDLE h = o->ui_srv->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += (SIZE_T)k * o->g->dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        o->g->dev->CreateShaderResourceView(o->ui_tex[k], nullptr, h);
+    }
+    o->ui_writing = k;
+    return o->ui_tex[k];
+}
+
+void OverlayUiCommit(Overlay* o, const RECT* boxes, int n, ID3D12Fence* f, UINT64 v)
+{
+    if (!o) return;
+    std::lock_guard<std::mutex> lk(o->ui_mu);
+    const int k = o->ui_writing; if (k < 0) return;
+    o->ui_n[k] = std::clamp(n, 0, 8);
+    for (int i = 0; i < o->ui_n[k]; ++i) o->ui_box[k][i] = boxes[i];
+    o->ui_pending = k; o->ui_fence = f; o->ui_value = v; o->ui_writing = -1;
+}
 
 Overlay* OverlayCreate(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* keys, int nkeys, bool exclude_from_capture, int mode)
 {
@@ -288,6 +365,7 @@ static Overlay* Create(Gpu& g, HWND target, UINT w, UINT h, const HotkeyDef* key
         o->latency_wait = o->swap->GetFrameLatencyWaitableObject();
     }
     if (FAILED(hr) || !o->swap) { Log("[present] IDXGISwapChain3 unavailable 0x%08X", hr); OverlayDestroy(o); return nullptr; }
+    if (!UiInit(o)) Log("[present] UI layer pipeline unavailable - HUD and toasts will not show");
     if (!GetBuffers(o)) { OverlayDestroy(o); return nullptr; }
 
     if (o->layered)
@@ -311,6 +389,9 @@ void OverlayDestroy(Overlay* o)
     if (!o) return;
     Drain(o);
     ReleaseBuffers(o);
+    for (auto*& t : o->ui_tex) if (t) { t->Release(); t = nullptr; }
+    if (o->ui_pso) o->ui_pso->Release(); if (o->ui_root) o->ui_root->Release();
+    if (o->ui_srv) o->ui_srv->Release(); if (o->ui_rtv) o->ui_rtv->Release();
     if (o->latency_wait) { CloseHandle(o->latency_wait); o->latency_wait = nullptr; }
     if (o->swap) { o->swap->Release(); o->swap = nullptr; }
     if (o->output) { o->output->Release(); o->output = nullptr; }
@@ -373,10 +454,40 @@ bool OverlayPresent(Overlay* o, ID3D12Resource* src, ID3D12Fence* after, UINT64 
     if (!WaitPq(o, o->fence_value, 2000)) { Log("[present] previous copy did not retire"); return false; }
     o->pres_prev_us += (UINT64)UsSince(t0);
     if (FAILED(o->alloc->Reset()) || FAILED(o->list->Reset(o->alloc, nullptr))) { Log("[present] list reset failed"); return false; }
-    ID3D12Resource* bb = o->bb[o->swap->GetCurrentBackBufferIndex()];
+    const UINT bi = o->swap->GetCurrentBackBufferIndex();
+    ID3D12Resource* bb = o->bb[bi];
     GpuBarrier(o->list, bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
     o->list->CopyResource(bb, src);
-    GpuBarrier(o->list, bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+    // our UI over this frame, whatever it is - real, generated or re-projected (uiblend.hlsl)
+    int L = -1, nb = 0; RECT box[8];
+    {
+        std::lock_guard<std::mutex> lk(o->ui_mu);
+        if (o->ui_pending >= 0 && o->ui_fence && o->ui_fence->GetCompletedValue() >= o->ui_value) { o->ui_active = o->ui_pending; o->ui_pending = -1; }
+        if ((L = o->ui_active) >= 0) { nb = o->ui_n[L]; for (int i = 0; i < nb; ++i) box[i] = o->ui_box[L][i]; }
+    }
+    if (L >= 0 && nb > 0)
+    {
+        GpuBarrier(o->list, bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        ID3D12DescriptorHeap* heaps[] = { o->ui_srv }; o->list->SetDescriptorHeaps(1, heaps);
+        o->list->SetGraphicsRootSignature(o->ui_root); o->list->SetPipelineState(o->ui_pso);
+        D3D12_GPU_DESCRIPTOR_HANDLE table = o->ui_srv->GetGPUDescriptorHandleForHeapStart();
+        table.ptr += (UINT64)L * o->g->dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        o->list->SetGraphicsRootDescriptorTable(0, table);
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv = o->ui_rtv->GetCPUDescriptorHandleForHeapStart();
+        rtv.ptr += (SIZE_T)bi * o->g->dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        o->list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        const D3D12_VIEWPORT vp = { 0, 0, (float)o->w, (float)o->h, 0, 1 }; o->list->RSSetViewports(1, &vp);
+        o->list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (int i = 0; i < nb; ++i)
+        {
+            const D3D12_RECT sc = { std::max(0L, box[i].left), std::max(0L, box[i].top), std::min((LONG)o->w, box[i].right), std::min((LONG)o->h, box[i].bottom) };
+            if (sc.right <= sc.left || sc.bottom <= sc.top) continue;
+            o->list->RSSetScissorRects(1, &sc);
+            o->list->DrawInstanced(3, 1, 0, 0);
+        }
+        GpuBarrier(o->list, bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+    }
+    else GpuBarrier(o->list, bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
     if (FAILED(o->list->Close())) { Log("[present] list close failed"); return false; }
     if (after) o->pq->Wait(after, after_value);
     ID3D12CommandList* ls[] = { o->list };
@@ -545,6 +656,7 @@ bool OverlayResize(Overlay* o, UINT w, UINT h)
     const HRESULT hr = o->swap->ResizeBuffers(kBuffers, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, o->flags);
     if (FAILED(hr)) { Log("[present] ResizeBuffers %ux%u failed 0x%08X", w, h, (unsigned)hr); return false; }
     o->w = w; o->h = h; o->last = RECT{};
+    { std::lock_guard<std::mutex> lk(o->ui_mu); for (auto*& t : o->ui_tex) if (t) { t->Release(); t = nullptr; } o->ui_active = o->ui_pending = o->ui_writing = -1; }
     if (!GetBuffers(o)) return false;
     Log("[present] overlay resized to %ux%u", w, h);
     if (o->direct && ((int)w != o->mon.right - o->mon.left || (int)h != o->mon.bottom - o->mon.top))

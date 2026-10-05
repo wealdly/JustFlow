@@ -88,7 +88,7 @@ Shaders* ShadersCreate(Gpu& g)
     ok &= GpuMakeCompute(g, g_cs_same, sizeof g_cs_same, 2, 1, 3, s->same, L"cs_same");
     ok &= GpuMakeCompute(g, g_cs_vinterp, sizeof g_cs_vinterp, 3, 1, 5, s->vinterp, L"cs_vinterp");
     ok &= GpuMakeCompute(g, g_cs_deband, sizeof g_cs_deband, 2, 1, 8, s->deband, L"cs_deband");
-    ok &= GpuMakeCompute(g, g_cs_text,      sizeof g_cs_text,      1, 1, 24, s->text,      L"cs_text");
+    ok &= GpuMakeCompute(g, g_cs_text,      sizeof g_cs_text,      1, 1, 25, s->text,      L"cs_text");
     ok &= GpuMakeCompute(g, g_cs_sharpen,   sizeof g_cs_sharpen,   2, 1, 5,  s->sharpen,   L"cs_sharpen");
     s->rect_tex = GpuMakeTex(g, kRectInts, 1, DXGI_FORMAT_R32_SINT, D3D12_RESOURCE_FLAG_NONE,
                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"ui_rects");
@@ -253,16 +253,17 @@ void CsMvGrid(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource*
 
 // ---------------------------------------------------------------------------------------------
 void CsText(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* dst, UINT w, UINT h, const char* text,
-            int x, int y, int scale, float alpha, int box_pad)
+            int x, int y, int scale, float alpha, int box_pad, bool layer, RECT* box)
 {
-    struct { int x0, y0; UINT scale; float alpha; int pad; UINT len, w, h; UINT chars[16]; } c = {};
+    struct { int x0, y0; UINT scale; float alpha; int pad; UINT len, w, h; UINT chars[16]; UINT layer; } c = {};
     const size_t n = std::min(strlen(text), kMaxText);
     if (!n) return;
     memcpy(c.chars, text, n);   // 4 chars per DWORD, little-endian = char i at byte i
     scale = std::max(1, scale); box_pad = std::max(0, box_pad);
     const int bw = TextBoxW(n, scale, box_pad), bh = TextBoxH(scale, box_pad);
     c.x0 = x < 0 ? ((int)w - bw) / 2 : x; c.y0 = y < 0 ? 48 : y;
-    c.scale = (UINT)scale; c.alpha = alpha < 0 ? 0 : alpha > 1 ? 1 : alpha; c.pad = box_pad; c.len = (UINT)n; c.w = w; c.h = h;
+    c.scale = (UINT)scale; c.alpha = alpha < 0 ? 0 : alpha > 1 ? 1 : alpha; c.pad = box_pad; c.len = (UINT)n; c.w = w; c.h = h; c.layer = layer ? 1u : 0u;
+    if (box) *box = { c.x0, c.y0, c.x0 + bw, c.y0 + bh };
     const GpuView srv = { s->font_tex, DXGI_FORMAT_R8_UINT }, uav = { dst, DXGI_FORMAT_R8G8B8A8_UNORM };
     GpuDispatch(g, cl, s->text, &srv, &uav, &c, GpuGroups((UINT)bw, 8), GpuGroups((UINT)bh, 8));
 }

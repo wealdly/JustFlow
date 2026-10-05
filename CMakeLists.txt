@@ -31,18 +31,22 @@ foreach(s ${SHADERS})
         COMMENT "fxc ${s}.hlsl")
     list(APPEND SHADER_HEADERS ${out})
 endforeach()
-# xe_interp_gfx: the interpolation as a vertex + pixel shader pair (render target = the backbuffer)
-foreach(stage vs ps)
-    set(src ${CMAKE_SOURCE_DIR}/shaders/xe_interp_gfx.hlsl)
-    set(out ${CMAKE_BINARY_DIR}/gen/${stage}_xe_interp_gfx.h)
+# vertex + pixel shader pairs drawn into a render target (the backbuffer): xe_interp_gfx (the interpolation),
+# uiblend (our HUD / toasts over every presented frame)
+set(SHADER_DEPS_xe_interp_gfx ${CMAKE_SOURCE_DIR}/shaders/xe_interp.hlsl)
+foreach(gfx xe_interp_gfx uiblend)
+  foreach(stage vs ps)
+    set(src ${CMAKE_SOURCE_DIR}/shaders/${gfx}.hlsl)
+    set(out ${CMAKE_BINARY_DIR}/gen/${stage}_${gfx}.h)
     string(TOUPPER ${stage} STAGE)
     add_custom_command(
         OUTPUT ${out}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/gen
-        COMMAND "${FXC}" /nologo /T ${stage}_5_0 /E ${STAGE}Main /O3 /Fh ${out} /Vn g_${stage}_xe_interp_gfx ${src}
-        DEPENDS ${src} ${CMAKE_SOURCE_DIR}/shaders/xe_interp.hlsl
-        COMMENT "fxc xe_interp_gfx.hlsl (${stage})")
+        COMMAND "${FXC}" /nologo /T ${stage}_5_0 /E ${STAGE}Main /O3 /Fh ${out} /Vn g_${stage}_${gfx} ${src}
+        DEPENDS ${src} ${SHADER_DEPS_${gfx}}
+        COMMENT "fxc ${gfx}.hlsl (${stage})")
     list(APPEND SHADER_HEADERS ${out})
+  endforeach()
 endforeach()
 add_custom_target(shaders DEPENDS ${SHADER_HEADERS})
 

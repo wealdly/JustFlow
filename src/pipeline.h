@@ -90,6 +90,7 @@ struct Pipeline
     double     toast_t0 = 0, toast_until_ms = 0;
     bool       model_toast_pending = false;      // "Model ready" once a rebuilt model composes
     bool       hud = false;                      // [ui] hud, F7
+    std::string ui_key;                          // PipelineUi: what the UI layer shows now (redrawn when it changes)
     char       hud_line[3][65] = {};             // filled by main every 250 ms (empty line = nothing drawn); 64 = what CsText draws
 
     // ---- decoupled model track ([nr] mode=async) --------------------------------------------------
@@ -154,6 +155,9 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
 // (nullptr = no wait). Returns false on a GPU failure. p->last_evaluated tells whether NR ran (a
 // create-only frame does not present).
 bool PipelineFrame(Pipeline* p, ID3D12Resource* capture_bgra, ID3D12Fence* wait_fence, UINT64 wait_value, bool reset);
+// The HUD and the toast into the overlay's UI layer, drawn over every presented frame (uiblend.hlsl) - only
+// when what they show changed. Call on every pass of the capture loop, frames or not.
+void PipelineUi(Pipeline* p);
 // New native size: reallocates the 4K textures and the overlay buffers (waits for idle).
 bool PipelineResize(Pipeline* p, UINT w, UINT h);
 // Hot reload: compose params apply next frame; a create-latched change schedules a debounced rebuild.

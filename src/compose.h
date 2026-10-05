@@ -72,8 +72,9 @@ void CsMvGrid(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource*
 // Draws `text` (ASCII 32..126, up to 64 chars, 8x8 font at `scale` px per font pixel) white with a
 // 1 px dark outline on a rounded dark box (padding box_pad) into an RGBA8 UAV (w x h). x/y = box
 // top-left; x < 0 centres horizontally, y < 0 puts it 48 px from the top. Dispatch covers the box only.
+// layer: dst is the overlay's premultiplied UI layer (uiblend.hlsl), not a frame. box: where it drew (dst px).
 void CsText(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* dst, UINT w, UINT h, const char* text,
-            int x, int y, int scale, float alpha, int box_pad);
+            int x, int y, int scale, float alpha, int box_pad, bool layer = false, RECT* box = nullptr);
 static const size_t kMaxText = 64;
 inline int TextBoxW(size_t len, int scale, int pad) { return (int)(len < kMaxText ? len : kMaxText) * 8 * scale + 2 * pad; }
 inline int TextBoxH(int scale, int pad) { return 8 * scale + 2 * pad; }

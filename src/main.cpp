@@ -492,6 +492,45 @@ static void SameTest(Pipeline* p, UINT64 f1, bool& dup, bool& cut)
     p->same_prev.swap(cur);
 }
 
+void PipelineUi(Pipeline* p)
+{
+    if (!p || !p->ov || p->cfg.selftest) return;
+    Gpu& g = *p->g; const Config& c = p->cfg; const double now = NowMs();
+    const bool toast_on = c.toast && p->toast[0] && now < p->toast_until_ms, hud_on = p->hud && p->hud_line[0][0];
+    const float toast_a = toast_on ? (float)std::min(1.0, (p->toast_until_ms - now) / 400.0) : 0.0f;
+    std::string key;
+    if (toast_on) { key = p->toast; key += '\x01'; key += (char)(1 + (int)(toast_a * 32)); key += (char)c.toast_scale; }
+    if (hud_on) { key += '\x02'; key += (char)c.hud_corner; key += (char)c.hud_scale; for (const char* line : p->hud_line) { key += line; key += '\x03'; } }
+    if (key == p->ui_key) return;
+    ID3D12Resource* layer = OverlayUiLayer(p->ov);
+    if (!layer) return;   // the last drawing is not on screen yet: next pass
+    RECT box[8]; int nb = 0;
+    if (!toast_on && !hud_on) { OverlayUiCommit(p->ov, box, 0, g.fence, 0); p->ui_key = key; return; }
+    if (!GpuBegin(g)) return;
+    ID3D12GraphicsCommandList* cl = g.list;
+    OverlayGuard(p->ov, g.queue);   // no present still reading this layer (it was shown before the last switch)
+    GpuBarrier(cl, layer, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, UAV);
+    if (toast_on) CsText(g, p->sh, cl, layer, p->w, p->h, p->toast, -1, -1, c.toast_scale, toast_a, 2 * c.toast_scale, true, &box[nb++]);
+    if (hud_on)
+    {
+        const int sc = std::max(1, c.hud_scale), pad = 2 * sc, margin = 24, gap = sc, bh = TextBoxH(sc, pad);
+        const bool right = c.hud_corner & 1, bottom = c.hud_corner & 2;
+        const int nlines = (int)(sizeof p->hud_line / sizeof p->hud_line[0]);
+        int y = bottom ? (int)p->h - margin - nlines * bh - (nlines - 1) * gap : margin;
+        for (const char* line : p->hud_line)
+        {
+            const int bw = TextBoxW(strlen(line), sc, pad);
+            if (*line) { GpuUavBarrier(cl, layer); CsText(g, p->sh, cl, layer, p->w, p->h, line, right ? (int)p->w - margin - bw : margin, y, sc, 1.0f, pad, true, &box[nb++]); }
+            y += bh + gap;
+        }
+    }
+    GpuBarrier(cl, layer, UAV, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+    const UINT64 v = GpuEnd(g);
+    if (!v) return;
+    OverlayUiCommit(p->ov, box, nb, g.fence, v);
+    p->ui_key = key;
+}
+
 bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UINT64 wait_value, bool reset)
 {
     Gpu& g = *p->g; const Config& c = p->cfg; ID3D12GraphicsCommandList* cl = g.list;
@@ -670,7 +709,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // The model is not handed a duplicate it has already seen (a published residual feeding the next
     // duplicate back to it kept it evaluating one still picture forever).
     if (dup && handoff && !p->shown_native) { p->model_reset_pending |= mf.reset; p->model_wants_frame = true; handoff = false; }
-    if (dup && (wait_pub || p->shown_native)) dup = false;
+    if (dup && (wait_pub || p->shown_native || c.selftest)) dup = false;   // selftest: the toast test composes one still frame twice
     if (dup) { ++p->dups; return true; }
     if (cut) { reset = true; ++p->cuts; }
     if (reset) p->reset_frame = p->frame_index;
@@ -870,7 +909,9 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // toast (2 s, the last 0.4 s fade) top-centre; status HUD in its corner (also in bypass)
     const double now = NowMs();
     const bool toast_on = c.toast && p->toast[0] && now < p->toast_until_ms, hud_on = p->hud && p->hud_line[0][0];
-    if (toast_on || hud_on)
+    // With an overlay the HUD and toast are drawn over every PRESENTED frame instead (PipelineUi): baked in
+    // here, frame generation interpolated our text and the HUD froze while frames were skipped.
+    if ((toast_on || hud_on) && (!p->ov || c.selftest))
     {
         GpuUavBarrier(cl, shown);
         if (toast_on)
@@ -1440,6 +1481,7 @@ static int RealMain(int argc, char** argv)
                 // Every empty wait: a game that lost the foreground often stops rendering, and the
                 // overlay must hide promptly (OverlayFollow throttles its own geometry query to 50 ms).
                 OverlayFollow(p->ov, cfg.reassert_topmost_every);
+                PipelineUi(p);   // the HUD and toasts keep updating with no new frame (a paused video)
                 // No sleep here. CaptureAcquire already blocks on its own timeout (AcquireNextFrame /
                 // the frame event), and every early return runs after that wait, so this cannot spin.
                 // The Sleep(1) that was here stalled the capture loop on every MOUSE MOVE: Desktop
@@ -1475,6 +1517,7 @@ static int RealMain(int argc, char** argv)
             p->acq_qpc = acq.QuadPart;
             acq_ms.add(acq_acc); hud_acq.add(acq_acc); acq_acc = 0;
             if (!PipelineFrame(p, CaptureTexture(cap), CaptureFence(cap), fv, reset)) { Log("[main] frame failed - exiting"); GpuLogDeviceRemoved(g, "frame"); quit = true; rc = 3; break; }
+            PipelineUi(p);
             reset = false;
             OverlayFollow(p->ov, cfg.reassert_topmost_every);
             if (cfg.stats_every > 0) cpu_ms.push_back(NowMs() - t0);   // only the [stats] tick reads it, and only that tick clears it

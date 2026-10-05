@@ -51,7 +51,13 @@ void OverlayDrain(Overlay* o);
 // WaitForVBlank nor its DwmFlush fallback actually waits): pace on a CPU timer instead.
 bool   OverlayWaitVBlank(Overlay* o);
 double OverlayVBlankMs(Overlay* o);   // refresh period of that monitor (1000/60 if unknown)
-bool   OverlayVBlankIsDwm(Overlay* o);   // the wait is DwmFlush for now (it wakes on desktop compositions, not on every refresh)
+bool   OverlayVBlankIsDwm(Overlay* o);
+// Our UI (HUD, toasts) over every presented frame. OverlayUiLayer: the layer to draw now (premultiplied RGBA8,
+// the overlay's size, ALL_SHADER_RESOURCE at rest; nullptr = the last drawing is not on screen yet, skip).
+// Draw it (CsText layer mode) after OverlayGuard on that queue, then OverlayUiCommit with its text boxes and
+// the fence value that completes the drawing; presents switch to it once that fence has passed.
+ID3D12Resource* OverlayUiLayer(Overlay* o);
+void OverlayUiCommit(Overlay* o, const RECT* boxes, int n, ID3D12Fence* f, UINT64 v);   // the wait is DwmFlush for now (it wakes on desktop compositions, not on every refresh)
 // Reposition over the target's DWMWA_EXTENDED_FRAME_BOUNDS, hide while the target is iconic,
 // re-assert topmost every `reassert_every` calls. Call once per frame (or per second when idle).
 void OverlayFollow(Overlay* o, int reassert_every);
