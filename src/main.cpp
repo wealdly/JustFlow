@@ -663,6 +663,17 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     GpuBarrier(cl, p->color4k, NPSR, UAV);
     stamp(2 * PS_SWIZZLE); CsSwizzle(g, p->sh, cl, cap, p->color4k, p->w, p->h, p->hdr_white); stamp(2 * PS_SWIZZLE + 1);
     GpuBarrier(cl, p->color4k, UAV, NPSR);
+    // Deband the capture itself, before the model: compressed video's steps were fed to the model, which
+    // sharpened them into detail, and debanded after it. color4k stays the raw capture (CsSame compares it).
+    // ponytail: the UI rects are the last compose's (rect_tex is uploaded in list 2) - one frame behind.
+    ID3D12Resource* src4k = p->color4k;
+    if (c.filters_enabled && c.deband > 0)
+    {
+        GpuBarrier(cl, p->deb4k, NPSR, UAV);
+        CsDeband(g, p->sh, cl, p->color4k, p->deb4k, p->w, p->h, c.deband, (UINT)p->rect_n, p->frame_index * 0x9E3779B9u);
+        GpuBarrier(cl, p->deb4k, UAV, NPSR);
+        src4k = p->deb4k;
+    }
     // addon mask: the top-left strip of this frame -> this slot's readback buffer (decoded once retired)
     int strip_slot = -1;
     if (c.mask && p->w >= kStripW && p->h >= 2 * kStripH && p->frame_index % (UINT)std::max(1, c.mask_every) == 0)
@@ -679,7 +690,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // Only the model reads nr_in. Without it (FG-only, the default), the compose takes the native
     // path and never samples it, so this area filter would be dead work - and none of it while the
     // layer is switched off (F9), when the compose shows native.
-    if (!async && model_on) CsDownscale(g, p->sh, cl, p->color4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
+    if (!async && model_on) CsDownscale(g, p->sh, cl, src4k, p->w, p->h, p->nr_in, p->ww, p->wh);   // async: the model thread downscales its own copy
     stamp(2 * PS_GRAYDS + 1);
     GpuBarrier(cl, p->nr_in, UAV, NPSR);
     if (need_mv)
@@ -705,7 +716,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         mf.index = p->frame_index; mf.reset = p->model_reset_pending; p->model_reset_pending = false;
         ID3D12Resource* hin = OfaInput(p->ofa, mf.held);
         GpuBarrier(cl, hin, COMMON, CDST); cl->CopyResource(hin, p->gray); GpuBarrier(cl, hin, CDST, COMMON);
-        GpuBarrier(cl, p->color4k, NPSR, CSRC); cl->CopyResource(p->model_src, p->color4k); GpuBarrier(cl, p->color4k, CSRC, NPSR);
+        GpuBarrier(cl, src4k, NPSR, CSRC); cl->CopyResource(p->model_src, src4k); GpuBarrier(cl, src4k, CSRC, NPSR);
     }
     if (need_mv) GpuBarrier(cl, p->gray, CSRC, UAV);   // pairs with the UAV->CSRC above (async implies need_mv)
     GpuBarrier(cl, cap, NPSR, COMMON);
@@ -861,6 +872,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         cp.strip_w = (int)kStripW; cp.strip_h = (int)kStripH;
     }
     for (int i = 0; i < c.nrects && cp.nrects < 64; ++i) cp.rects[cp.nrects++] = c.rects[i];
+    p->rect_n = cp.nrects;
     const bool native = async ? (p->cmp_idx < 0 || residual_frame < p->reset_frame) : (!evaluated || p->evals_since_create <= (UINT)std::max(0, c.warmup));
     p->shown_native = model_on && native;
     if (native) cp.wipe_mode = 2;
@@ -873,7 +885,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // has the same format, size and resting state (COPY_SOURCE) as the targets it replaces.
     // A duplicate (above) is not handed to FG: the overlay keeps showing the last frame.
     ID3D12Resource* const fg_dst = (p->fg && !dup) ? FgAcquire(p->fg) : nullptr;
-    const bool filt = FiltersLive(c);
+    const bool filt = c.filters_enabled && (c.sharpen > 0 || c.saturation != 1.0f);   // deband ran in list 1
     ID3D12Resource* const compose_dst = filt ? p->out4k : (fg_dst ? fg_dst : p->out4k);
     GpuBarrier(cl, compose_dst, CSRC, UAV);
     if (async)
@@ -881,7 +893,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         // The residual is from model frame M; mv_res is this frame's motion current -> M (the flow
         // against M's held gray), scaled by [nr] warp. mv (current -> previous) stays with FG.
         stamp(2 * PS_COMPOSE);
-        CsComposeResidual(g, p->sh, cl, p->color4k, p->residual[std::max(p->cmp_idx, 0)], p->ww, p->wh, p->mv_res, compose_dst, p->w, p->h, cp);
+        CsComposeResidual(g, p->sh, cl, src4k, p->residual[std::max(p->cmp_idx, 0)], p->ww, p->wh, p->mv_res, compose_dst, p->w, p->h, cp);
         stamp(2 * PS_COMPOSE + 1);
         if (!native) { evaluated = true; p->residual_age.add((double)(p->frame_index - residual_frame)); }
     }
@@ -889,7 +901,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     {
         GpuBarrier(cl, p->nr_out, UAV, NPSR);
         stamp(2 * PS_COMPOSE);
-        CsCompose(g, p->sh, cl, p->color4k, p->nr_in, p->nr_out, p->ww, p->wh, compose_dst, p->w, p->h, cp);
+        CsCompose(g, p->sh, cl, src4k, p->nr_in, p->nr_out, p->ww, p->wh, compose_dst, p->w, p->h, cp);
         stamp(2 * PS_COMPOSE + 1);
         GpuBarrier(cl, p->nr_out, NPSR, UAV);
     }
@@ -897,7 +909,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // ---- the order of application, in one place ------------------------------------------------
     // Three layers, three independent switches, and none of them reaches into another:
     //
-    //   capture -> NEURAL ([nr] enabled, F9)      the DLSS model, at work resolution,
+    //   capture -> deband ([filters] deband, F6)   compression steps, before the model sees them.
+//           -> NEURAL ([nr] enabled, F9)      the DLSS model, at work resolution,
     //                                             composed back as a residual at native resolution.
     //           -> FILTERS ([filters] enabled, F6) sharpen then vibrance, at native resolution.
     //           -> UI rects + text                the addon mask and the HUD/toasts.
@@ -917,15 +930,7 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         GpuBarrier(cl, p->out4k, UAV, NPSR);
         GpuBarrier(cl, filt_dst, CSRC, UAV);
         stamp(2 * PS_FILTER);
-        ID3D12Resource* sharp_src = p->out4k;   // deband first: sharpening would harden the bands
-        if (c.deband > 0)
-        {
-            GpuBarrier(cl, p->deb4k, NPSR, UAV);
-            CsDeband(g, p->sh, cl, p->out4k, p->deb4k, p->w, p->h, c.deband, (UINT)cp.nrects, p->frame_index * 0x9E3779B9u);
-            GpuBarrier(cl, p->deb4k, UAV, NPSR);
-            sharp_src = p->deb4k;
-        }
-        CsSharpen(g, p->sh, cl, sharp_src, filt_dst, p->w, p->h, c.sharpen, c.saturation, (UINT)cp.nrects); stamp(2 * PS_FILTER + 1);   // rect_tex holds this frame's rects (compose above)
+        CsSharpen(g, p->sh, cl, p->out4k, filt_dst, p->w, p->h, c.sharpen, c.saturation, (UINT)cp.nrects); stamp(2 * PS_FILTER + 1);   // rect_tex holds this frame's rects (compose above)
         GpuBarrier(cl, p->out4k, NPSR, CSRC);
         shown = filt_dst;
     }

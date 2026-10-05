@@ -122,7 +122,8 @@ struct Pipeline
     ID3D12Resource* same = nullptr; ID3D12Resource* same_rb = nullptr; UINT same_w = 0, same_h = 0, same_pitch = 0;
     float    hdr_white = 0;   // the capture is FP16 (HDR desktop): its SDR white in scRGB units (main sets it per frame)
     bool     shown_native = false;   // the last composed frame was native with the model on: duplicates are not skipped until it is not
-    ID3D12Resource* deb4k = nullptr;   // the filter layer's deband output (RGBA8, NPSR at rest)
+    ID3D12Resource* deb4k = nullptr;   // the debanded capture, what the model and the compose see (RGBA8, NPSR at rest)
+    int      rect_n = 0;   // UI rects in rect_tex since the last compose (the deband in list 1 runs before this frame's upload)
     UINT     dups = 0;   // stats: captures identical to the previous one, not handed to FG
     UINT     cuts = 0;   // stats: scene cuts (the model and FG were reset)
     UINT     reset_frame = 0;   // frame_index of the last reset (cut, gap, resize): async residuals from before it are not composed
