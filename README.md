@@ -29,8 +29,14 @@ no injection, no input. The same mechanisms OBS and overlay apps use, nothing mo
   video's own clock calls for (24 fps on 240 Hz = 10 even steps; 23.976 drifts smoothly), interpolated
   along our flow with fallbacks to the nearer frame where the flow fails and exact copies of unchanged
   pixels (subtitles). It shows the video one frame late - fine for video, not for games. The `desktop`
-  profile uses it. Against the true middle frame: 2.3 / 7.2 grey levels (normal / fast motion), vs
+  profile uses it. A repeated capture (a browser repainting the same video frame) is not a frame, and a
+  scene cut resets the model and frame generation instead of smearing the old shot into the new one. Against the true middle frame: 2.3 / 7.2 grey levels (normal / fast motion), vs
   5.8 / 14.1 for holding the frame.
+- **Full desktop**: the `desktop` profile captures the whole primary monitor (browsers, video players,
+  desktop apps) instead of one window; HDR desktops are converted at Windows' SDR white level. With the
+  neural layer on it runs the model at full resolution, once per distinct video frame - the GPU is mostly
+  idle during video, so the ~15 ms a 4K model costs fits between 24 or 30 fps frames. DRM-protected
+  video is blacked out by Windows in every capture, so it shows black.
 - **Capture** by Windows.Graphics.Capture, uncapped on Windows 11 24H2+ (`MinUpdateInterval`), or DXGI
   Desktop Duplication where that is unavailable (`[capture] mode=auto|wgc|dda`).
 - **Per-game profiles**, global hotkeys, a tray menu, a live before/after wipe.
@@ -101,9 +107,14 @@ differently (45-89% of the native edit, depending on content). Measured on a mov
 
 | tier | setting | native edit reproduced | average model cost |
 |---|---|---|---|
-| Performance | `work=auto` (1080p on 4K), every frame | 57% | 3.8 ms |
-| Balanced | `work=native`, `model_every=6` | 76% | 2.0 ms |
-| Quality | `work=native`, `model_every=3` | 80% | 4.1 ms |
+| Performance | `work=auto` (50% = 1080p on 4K), every frame | 57% | 3.8 ms |
+| Balanced | `work=100%`, `model_every=6` | 76% | 2.0 ms |
+| Quality | `work=100%`, `model_every=3` | 80% | 4.1 ms |
+
+`[nr] work` is the **model resolution**, a share of the screen: `100%`, `67%`, `50%`, `33%` or `auto`
+(nearest 1080p). It never upscales: the model's result is always applied to the full-resolution
+frame. `[nr] passes=1..3` runs the model that many times per frame, each pass refining the last, at
+that many times the cost (4K: 14 ms, 29 ms with 2 passes).
 
 Performance remains the small per-frame evaluate because it cannot hitch a game sharing the GPU; a
 native evaluate is one ~12 ms block at 4K. If Balanced or Quality shows a rhythmic stutter, use Performance.
@@ -115,13 +126,14 @@ The pipeline is three independent layers, each with one on/off that reaches into
 | Layer | Switch | Key | What it does |
 |---|---|---|---|
 | Neural | `[nr] enabled` | F9 | the DLSS model, at work resolution, composed back as a residual |
-| Filters | `[filters] enabled` | F6 | sharpen then vibrance, at native resolution, UI rects untouched |
+| Filters | `[filters] enabled` | F6 | deband (on the capture, before the model), then RCAS sharpen and vibrance, at native resolution, UI rects untouched |
 | Frame gen | `[fg] enabled` | F8 | frames between the game's: DLSS-G, warp, latewarp or video (`[fg] engine`); the UI is copied back onto every one |
 
-They apply in that order, with the UI mask and the HUD between filters and frame generation. The
-order is not arbitrary: sharpening has to see what the model produced, vibrance grades after the
-sharpen rather than feeding it exaggerated contrast, text goes on after both so it stays crisp,
-and frame generation runs last because it works on the frame as the viewer sees it.
+They apply in that order, with the UI mask between filters and frame generation. The order is not
+arbitrary: deband runs first so the model never sees compression steps as detail, sharpening has to
+see what the model produced, vibrance grades after the sharpen rather than feeding it exaggerated
+contrast, and frame generation runs last because it works on the frame as the viewer sees it. The
+HUD and toasts are drawn over every presented frame, generated or real, so they are never interpolated.
 
 All eight combinations are valid — a layer that is off passes its input straight through. Turning
 a layer off keeps its tuned values, so an A/B costs nothing. The HUD names the live layers.
@@ -133,11 +145,13 @@ Two ini files, both next to the exe:
   `gpu_timestamps` / `selftest`, `[app] profile` (startup profile: `auto` or a profile name),
   `[ofa] dll_path`, `[nr] param_block`.
 - `profiles\<game>.ini` — **game settings**: `[capture]` (mode, window match, cursor, border),
-  `[nr]` (work size, look, mode, warp, caps, sharpen...), `[ofa]` input/grid/zero_below,
+  `[nr]` (model resolution, passes, look, mode, warp, caps...), `[filters]` (deband, sharpen,
+  saturation), `[ofa]` input/grid/zero_below,
   `[ui]` mask/mask_every/feather/rectN, `[fg]`, and `[log] file`.
 
 Each key is read from its own file only; an app key left in a profile is ignored and the log names
-it. Profiles `wow`, `valheim`, `dawnwalker` ship. Without `--ini` (and with `[app] profile=auto`),
+it. Profiles hold quality dials only; the layer switches are app-wide. Profiles `wow`, `wow-4k`,
+`valheim`, `dawnwalker` and `desktop` ship (`desktop` is never auto-picked). Without `--ini` (and with `[app] profile=auto`),
 the first profile whose game window is open right now is used, else `wow`, else the first one.
 The tray menu switches profiles live, toggles the effect and frame generation, sets the FG
 multiplier and the quality preset, opens the settings and hotkey windows, and opens either ini
@@ -152,8 +166,8 @@ mode, FG and mask state. The look defaults keep the game's own art and spend the
 (Standard, the least restyling of the three), `local_tone=0.20` (it remaps tone and colour) and
 `local_structure=1.00` (it adds detail). Raise `local_tone`, or `style` to 1 (Natural) or 2
 (Cinematic), only when a shift in look is actually wanted - the Look tab in the settings window
-has all of them. `[nr] sharpen=0.3..0.5` in the profile adds a contrast-adaptive sharpen
-after the effect (UI rects excluded), live on F11.
+has all of them, and every row has a tooltip. `[filters] sharpen=0.3..0.5` in the profile adds an
+RCAS sharpen after the effect (UI rects excluded), live on F11.
 
 The `[stats]` lines in the log report capture rate, model cost, generation cadence, dropped
 frames, and the age of the frame on screen relative to the game's own present.
