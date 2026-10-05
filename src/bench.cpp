@@ -146,7 +146,7 @@ int RunBench(int argc, char** argv)
     // async: the feature is created on the model thread (~0.5 s) while frames keep flowing, and a bench
     // frame takes a millisecond - the whole run used to end before the first residual existed. Hold on
     // input 0 until the model is live (10 s cap), then play the sequence from its start.
-    int seq = 0;
+    int seq = 0; double pace_due = 0;
     for (int i = 0; evaluated < frames && (cfg.nr_async && evaluated == 0 ? NowMs() - t0 < 10000 : seq < frames + slack); ++i)
     {
         last_in = seq % (int)tex.size();
@@ -166,7 +166,11 @@ int RunBench(int argc, char** argv)
             PipelineReload(p, nc);
         }
         if (toast_test && i == 6) p->toast_until_ms = 0;
-        if (pace > 0) { const double due = t0 + i * 1000.0 / pace; while (NowMs() < due) Sleep(1); }
+        // Paced like a game: a frame that is late is late, and the schedule starts again from it. Pacing
+        // against the start time made every stall (DLSS-G's ~1 s feature create on frame 0) come out as a
+        // back-to-back burst of the frames "owed", which FG drops - read for a day as a DLSS-G slowdown in
+        // FG-only mode (a model evaluate per frame happened to spread the burst).
+        if (pace > 0) { if (NowMs() > pace_due + 1000.0 / pace) pace_due = NowMs(); while (NowMs() < pace_due) Sleep(1); pace_due += 1000.0 / pace; }
         if (!PipelineFrame(p, tex[last_in], nullptr, 0, i == 0)) { Log("[bench] frame %d failed", i); GpuLogDeviceRemoved(g, "bench"); rc = 2; break; }
         // ponytail: idle after each frame so both lists of the frame retire and get sampled (the
         // stamp reader only sees the most recently retired slot). Per-stage GPU times are unaffected;
