@@ -347,6 +347,13 @@ static void StopModel(Pipeline* p)
     Log("[model] thread stopped");
 }
 
+// The model object, loaded once (the first time the neural layer is on); its feature is created next frame.
+static bool LoadNr(Pipeline* p, int param_block)
+{
+    if (!p->nr && (p->nr = NrInit(*p->g, ExeDir().c_str(), (NrParamBlock)param_block))) p->create_pending = true;
+    return p->nr != nullptr;
+}
+
 Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_overlay, HWND target)
 {
     Pipeline* p = new Pipeline();
@@ -369,12 +376,7 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
     if (!p->sh) return fail();
     // The model loads when the neural layer is ON, not at startup regardless: with the layer off (the
     // default) it would hold its feature - hundreds of MB of VRAM - for nothing. F9 brings it up.
-    if (cfg.nr_enabled)
-    {
-        p->nr = NrInit(g, ExeDir().c_str(), (NrParamBlock)cfg.param_block);
-        if (!p->nr) return fail();
-        p->create_pending = true;
-    }
+    if (cfg.nr_enabled && !LoadNr(p, cfg.param_block)) return fail();
     p->ofa = OfaCreate(g, p->gw, p->gh, cfg.ofa_grid, cfg.ofa_dll.empty() ? nullptr : cfg.ofa_dll.c_str(), cfg.ofa_perf);
     if (!p->ofa) return fail();
     if (!AllocNative(p) || !AllocWork(p)) return fail();
@@ -423,11 +425,7 @@ void PipelineReload(Pipeline* p, const Config& c_in)
     // recreated next frame (a multiplier change is caught there: the presenter is rebuilt only when it differs)
     if (c.fg_pacing_vblank != p->cfg.fg_pacing_vblank || c.fg_engine != p->cfg.fg_engine || c.fg_lw_vfov != p->cfg.fg_lw_vfov) DropFg(p);
     if (c.nr_enabled && !p->cfg.nr_enabled) p->force_reset = true;
-    if (c.nr_enabled && !p->nr)
-    {
-        p->nr = NrInit(*p->g, ExeDir().c_str(), (NrParamBlock)c.param_block);
-        if (p->nr) p->create_pending = true; else Log("[nr] init failed on reload");
-    }
+    if (c.nr_enabled && !LoadNr(p, c.param_block)) Log("[nr] init failed on reload");
     if (c.nr_async != p->cfg.nr_async) { StopModel(p); p->model_failed = false; p->force_reset = true; Log("[nr] mode=%s", c.nr_async ? "async" : "sync"); }
     p->cfg = c;
     SetModelParams(p, c);   // live keys for the model thread (zero_below, exposure, model_max_fps, warmup)
@@ -1174,12 +1172,7 @@ static int RealMain(int argc, char** argv)
         if (flip(p->cfg.nr_enabled, cfg.nr_enabled, L"nr", L"enabled"))
         {
             p->force_reset = true;
-            // First time on this session: the model loads now (see PipelineCreate).
-            if (!p->nr)
-            {
-                p->nr = NrInit(g, ExeDir().c_str(), (NrParamBlock)p->cfg.param_block);
-                if (p->nr) p->create_pending = true; else Log("[nr] init failed while enabling");
-            }
+            if (!LoadNr(p, p->cfg.param_block)) Log("[nr] init failed while enabling");
         }
         if (!p->cfg.nr_enabled) PipelineToast(p, "Neural layer OFF");
         else if (p->nr) PipelineToast(p, "Neural layer ON");
@@ -1276,9 +1269,8 @@ static int RealMain(int argc, char** argv)
         case TrayRescanProfiles:
         {
             // PickProfile honours [app] profile, which the picker just pointed at the new file.
-            std::vector<std::wstring> names; int idx = -1;
-            PickProfile(dir, L"", names, idx);
-            profiles = names;
+            int idx = -1;
+            PickProfile(dir, L"", profiles, idx);
             tray_profiles();
             if (idx >= 0 && idx != profile) pending_profile = idx;
             else if (idx < 0 && profile >= 0) go_idle = true;   // [app] profile=none now (the active one was removed)
