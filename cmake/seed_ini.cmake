@@ -1,12 +1,9 @@
-# Seed the run directory's ini files, but NEVER overwrite one that is already there.
+# Seed the run directory's ini files, but NEVER overwrite one that is already there: they are live
+# config (the Settings dialog, the quality presets and the tray write to the copies next to the exe),
+# and copying the repo versions over them would revert whatever the user had just set.
 #
-# These files are live config, not build output: the Settings dialog, the quality presets and the
-# tray all write to the copies next to the exe. Copying the repo versions over them on every build
-# silently reverted whatever the user had just set - including, for a while, the settings they were
-# reporting bugs against.
-#
-# Consequence worth knowing: editing a shipped profile in the repo no longer reaches an existing
-# build directory. Delete the file there (or the whole profiles folder) to re-seed it.
+# So editing a shipped profile in the repo does not reach an existing build directory: delete the file
+# there (or the whole profiles folder) to re-seed it.
 file(GLOB _seed "${SRC}/*.ini")
 foreach(_f ${_seed})
     get_filename_component(_n "${_f}" NAME)
