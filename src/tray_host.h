@@ -24,15 +24,15 @@ struct TrayHost
     virtual void AddIcon() = 0;                                  // tray thread: NIM_ADD, at start and after an Explorer restart
     virtual bool OnMessage(UINT msg, WPARAM wp, LPARAM lp) = 0;  // tray thread: the product's messages; true = handled
 
-    // A message-only window never receives broadcasts, so TaskbarCreated reaches only the top-level one,
-    // which is also made topmost: a popup menu is drawn above its OWNER, and under an ordinary hidden
-    // window it comes up behind the (topmost) taskbar where its bottom entries cannot be clicked.
-    bool Start(const wchar_t* window_class, bool message_only);   // false = no window (the thread has ended)
+    // A hidden top-level window, not a message-only one: those never receive broadcasts (TaskbarCreated,
+    // the Explorer-restart re-add). It is topmost: a popup menu is drawn above its OWNER, and under an
+    // ordinary hidden window it comes up behind the (topmost) taskbar where its bottom entries cannot be clicked.
+    bool Start(const wchar_t* window_class);   // false = no window (the thread has ended)
     void Stop();                                                  // removes the icon and joins; call before deleting
     NOTIFYICONDATAW Nid() const { NOTIFYICONDATAW n = { sizeof n }; n.hWnd = hwnd; n.uID = 1; return n; }
-    // Pops `m` at the cursor and destroys it; 0 = dismissed. avoid_taskbar flips it to the far side of the
-    // taskbar rather than letting it open underneath.
-    int TrackMenu(HMENU m, bool avoid_taskbar);
+    // Pops `m` at the cursor, kept clear of the taskbar rather than opening underneath it, and destroys it;
+    // 0 = dismissed.
+    int TrackMenu(HMENU m);
 };
 
 template <class T> class TrayQueue

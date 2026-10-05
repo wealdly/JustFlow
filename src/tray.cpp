@@ -178,7 +178,7 @@ static HMENU BuildMenu(Tray* t)
 static void ShowMenu(Tray* t)
 {
     t->in_menu = true;    // the menu loop pumps messages: a second click must not nest another menu inside this one
-    const int cmd = t->TrackMenu(BuildMenu(t), true);
+    const int cmd = t->TrackMenu(BuildMenu(t));
     t->in_menu = false;
     switch (cmd)
     {
@@ -262,7 +262,7 @@ Tray* TrayCreate(const wchar_t* app_name)
     Tray* t = new Tray;
     t->app = app_name;
     t->icon = TrayLoadIcon(1);   // the exe's icon (src/justflow.rc, art/justflow.ico)
-    if (!t->Start(L"JustFlowTray", false)) { if (t->icon) DestroyIcon(t->icon); delete t; return nullptr; }
+    if (!t->Start(L"JustFlowTray")) { if (t->icon) DestroyIcon(t->icon); delete t; return nullptr; }
     return t;
 }
 

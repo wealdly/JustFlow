@@ -22,7 +22,7 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW(h, msg, wp, lp);
 }
 
-bool TrayHost::Start(const wchar_t* window_class, bool message_only)
+bool TrayHost::Start(const wchar_t* window_class)
 {
     const HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     thread = std::thread([=] {
@@ -30,8 +30,8 @@ bool TrayHost::Start(const wchar_t* window_class, bool message_only)
         WNDCLASSW wc = {}; wc.lpfnWndProc = HostProc; wc.hInstance = inst; wc.lpszClassName = window_class;
         RegisterClassW(&wc);   // second registration in-process just fails; CreateWindow still works
         taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
-        hwnd = CreateWindowExW(0, window_class, nullptr, WS_OVERLAPPED, 0, 0, 0, 0, message_only ? HWND_MESSAGE : nullptr, nullptr, inst, this);
-        if (hwnd && !message_only) SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        hwnd = CreateWindowExW(0, window_class, nullptr, WS_OVERLAPPED, 0, 0, 0, 0, nullptr, nullptr, inst, this);
+        if (hwnd) SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         if (hwnd) AddIcon();
         SetEvent(ready);
         if (!hwnd) return;
@@ -50,13 +50,13 @@ void TrayHost::Stop()
     if (thread.joinable()) thread.join();
 }
 
-int TrayHost::TrackMenu(HMENU m, bool avoid_taskbar)
+int TrayHost::TrackMenu(HMENU m)
 {
     POINT p; GetCursorPos(&p);
     SetForegroundWindow(hwnd);   // so the menu closes when the user clicks elsewhere
     TPMPARAMS tp = { sizeof tp };
     APPBARDATA ab = { sizeof ab };
-    const bool have_bar = avoid_taskbar && SHAppBarMessage(ABM_GETTASKBARPOS, &ab) != 0;
+    const bool have_bar = SHAppBarMessage(ABM_GETTASKBARPOS, &ab) != 0;
     if (have_bar) tp.rcExclude = ab.rc;
     const int cmd = TrackPopupMenuEx(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, hwnd, have_bar ? &tp : nullptr);
     PostMessageW(hwnd, WM_NULL, 0, 0);

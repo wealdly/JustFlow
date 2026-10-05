@@ -55,7 +55,7 @@ static void ShowMenu(XeTray* t)
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, XeTrayOpenLog, L"Open log");
     AppendMenuW(m, MF_STRING, XeTrayQuit, L"Quit");
-    const int cmd = t->TrackMenu(m, false);   // 0 = dismissed (XeTrayNone); menu ids are the XeTrayEvent values
+    const int cmd = t->TrackMenu(m);   // 0 = dismissed (XeTrayNone); menu ids are the XeTrayEvent values
     if (cmd != XeTrayNone) t->events.Push((XeTrayEvent)cmd);
 }
 
@@ -71,7 +71,7 @@ XeTray* XeTrayCreate()
     XeTray* t = new XeTray;
     t->state.status = L"starting";
     for (int i = 0; i < 3; ++i) if (!(t->icons[i] = TrayLoadIcon(i + 1))) Log("[tray] icon resource %d did not load (err %lu) - stock icon instead", i + 1, GetLastError());
-    if (!t->Start(L"JustFlowXeTray", true)) { XeTrayDestroy(t); return nullptr; }
+    if (!t->Start(L"JustFlowXeTray")) { XeTrayDestroy(t); return nullptr; }
     return t;
 }
 
