@@ -14,8 +14,10 @@ struct HotkeySpec { UINT mods = 0; UINT vk = 0; };
 //   FG_DLSSG     NVIDIA DLSS-G interpolates between real frames (+ half a frame of latency).
 //   FG_WARP      extrapolates the newest frame along our optical flow (no added latency).
 //   FG_LATEWARP  NVIDIA Frame Warp to the mouse at every refresh (fg.cpp Reproject).
-enum FgEngine { FG_DLSSG, FG_WARP, FG_LATEWARP, FG_ENGINE_COUNT };
-inline const wchar_t* FgEngineName(int e) { static const wchar_t* const k[FG_ENGINE_COUNT] = { L"dlssg", L"warp", L"latewarp" }; return k[e >= 0 && e < FG_ENGINE_COUNT ? e : 0]; }
+//   FG_VIDEO     2D video: every refresh shows the instant between the two newest frames that the
+//                video's own clock says is due, one frame late (fg.cpp VideoPresent).
+enum FgEngine { FG_DLSSG, FG_WARP, FG_LATEWARP, FG_VIDEO, FG_ENGINE_COUNT };
+inline const wchar_t* FgEngineName(int e) { static const wchar_t* const k[FG_ENGINE_COUNT] = { L"dlssg", L"warp", L"latewarp", L"video" }; return k[e >= 0 && e < FG_ENGINE_COUNT ? e : 0]; }
 
 struct Config
 {

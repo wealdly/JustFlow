@@ -20,7 +20,7 @@ const UINT WM_TRAY_STATE = WM_APP + 2;   // TraySetState -> refresh tooltip on t
 const UINT WM_TRAY_SETTINGS = WM_APP + 3;   // double-click: open Settings once the menu loop has unwound
 const UINT ICON_ID = 1;
 
-enum { IDM_STATUS = 1, IDM_NR, IDM_FILTERS, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM_MULT3, IDM_MULT4, IDM_ENG0, IDM_ENG1, IDM_ENG2, IDM_WIPE, IDM_RELOAD,
+enum { IDM_STATUS = 1, IDM_NR, IDM_FILTERS, IDM_FG, IDM_FG_POPUP, IDM_MULT2, IDM_MULT3, IDM_MULT4, IDM_ENG0, IDM_ENG1, IDM_ENG2, IDM_ENG3, IDM_WIPE, IDM_RELOAD,
        IDM_SETTINGS, IDM_NEWPROFILE, IDM_PROFILE_RESET, IDM_PROFILE_REMOVE, IDM_CONFIG, IDM_APPCONFIG, IDM_LOG, IDM_QUIT,
        IDM_PRESET0 = 60, IDM_PROFILE0 = 100 };
 }
@@ -172,9 +172,10 @@ static HMENU BuildMenu(Tray* t)
     AppendMenuW(fg, MF_STRING, IDM_ENG0, L"DLSS-G (interpolate)");
     AppendMenuW(fg, MF_STRING, IDM_ENG1, L"Warp (extrapolate, no added latency)");
     AppendMenuW(fg, MF_STRING, IDM_ENG2, L"Latewarp (Frame Warp to the mouse)");
-    CheckMenuRadioItem(fg, IDM_ENG0, IDM_ENG2, IDM_ENG0 + std::clamp(t->engine, 0, FG_ENGINE_COUNT - 1), MF_BYCOMMAND);
+    AppendMenuW(fg, MF_STRING, IDM_ENG3, L"Video (smooth playback, one frame late)");
+    CheckMenuRadioItem(fg, IDM_ENG0, IDM_ENG3, IDM_ENG0 + std::clamp(t->engine, 0, FG_ENGINE_COUNT - 1), MF_BYCOMMAND);
     AppendMenuW(fg, MF_SEPARATOR, 0, nullptr);
-    const UINT per_frame = t->engine == FG_LATEWARP ? MF_GRAYED : 0;   // latewarp runs at the display's refresh, not a multiple
+    const UINT per_frame = t->engine == FG_LATEWARP || t->engine == FG_VIDEO ? MF_GRAYED : 0;   // both run at the display's refresh, not a multiple
     AppendMenuW(fg, MF_STRING | per_frame, IDM_MULT2, L"2X");
     AppendMenuW(fg, MF_STRING | per_frame, IDM_MULT3, L"3X");
     AppendMenuW(fg, MF_STRING | per_frame, IDM_MULT4, L"4X");
@@ -248,7 +249,7 @@ static void ShowMenu(Tray* t)
     case IDM_FILTERS: Push(t, TrayToggleFilters); break;
     case IDM_FG:      Push(t, TrayToggleFg); break;
     case IDM_MULT2: case IDM_MULT3: case IDM_MULT4: Push(t, TrayFgMultiplier, cmd - IDM_MULT2 + 2); break;
-    case IDM_ENG0: case IDM_ENG1: case IDM_ENG2: Push(t, TrayFgEngine, cmd - IDM_ENG0); break;
+    case IDM_ENG0: case IDM_ENG1: case IDM_ENG2: case IDM_ENG3: Push(t, TrayFgEngine, cmd - IDM_ENG0); break;
     case IDM_WIPE:    Push(t, TrayWipe); break;
     case IDM_RELOAD:  Push(t, TrayReload); break;
     case IDM_CONFIG:  Push(t, TrayOpenConfig); break;

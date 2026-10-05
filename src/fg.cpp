@@ -1,5 +1,6 @@
 #include "fg.h"
 #include "config.h"   // FgEngine
+#include "compose.h"   // CsVideoInterp
 #include "latewarp.h"
 #include "mouse.h"
 #include <cmath>
@@ -36,7 +37,7 @@ static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_
 static const D3D12_RESOURCE_STATES UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 static const D3D12_RESOURCE_STATES CSRC = D3D12_RESOURCE_STATE_COPY_SOURCE;
 static const D3D12_RESOURCE_STATES CDST = D3D12_RESOURCE_STATE_COPY_DEST;
-static const int kSlots = 3, kMaxGen = 3;
+static const int kSlots = 4, kMaxGen = 3;   // 4: engine=video holds three real frames while the pipeline writes a fourth
 
 // Rest states: real CSRC, gen[] CSRC, mv/depth NPSR, disable UAV. state: 0 free, 1 writing
 // (producer), 2 ready, 3 presenting; guarded by Fg::mu.
@@ -50,6 +51,7 @@ struct FgSlot
     bool     gen_ok = false;   // engine=warp: the pipeline wrote gen[] for THIS frame (not while paused)
     ID3D12Resource* mask = nullptr;   // engine=latewarp: Frame Warp's no-warp mask for this frame (R8, NPSR)
     bool     mask_ok = false;  // the pipeline wrote it for THIS frame
+    ID3D12Resource* flow = nullptr;   // engine=video: this frame's backward flow to the previous one (R16G16_FLOAT, NPSR)
     int    state = 0;
     UINT64 seq = 0, fence = 0, eval_fence = 0;
     int    eval_slot = -1;    // ctx ring slot the evaluate stamped, read back when the fence lands
@@ -72,6 +74,8 @@ struct Fg
     bool     warp = false;                   // engine=warp: the pipeline extrapolates into s->gen, no DLSS-G
     bool     lw = false;                     // engine=latewarp: every refresh re-projects the newest frame to the mouse (Reproject)
     Latewarp* lwf = nullptr; ID3D12Resource* lw_final[2] = {}; float lw_vfov = 1.0472f; ID3D12Resource* lw_last = nullptr;   // lw_last: bench
+    bool     video = false;                  // engine=video: VideoPresent; lw_final/lw_last hold its interpolated frames
+    Shaders* sh = nullptr;                   // engine=video: CsVideoInterp on the FG queue
     bool     vblank = true;
     std::atomic<double> phase{ 0.0 };        // FgSetTiming (main) -> Presenter
     std::atomic<double> min_gain{ 1.5 };     // governor threshold: presented / submitted (0 = governor off)
@@ -558,6 +562,92 @@ static void Reproject(Fg* f)
     f->cv.notify_all();
 }
 
+// engine=video: frame interpolation for 2D video, timed by the video's own clock. Every refresh shows the
+// content instant due now minus one source period (plus the pipeline's lag): the two newest real frames
+// A and B bracket it, so the refresh gets A and B blended along B's flow at t = (instant - A) / (B - A).
+// 24 fps on 240 Hz becomes ten evenly spaced steps per frame and 23.976 drifts smoothly instead of
+// stuttering - DLSS-G's fixed 2-4x cannot land on either. The timeline is the capture timestamps
+// (the browser's presents, quantised to the desktop's refresh), smoothed: each frame lands one period
+// after the last, pulled a tenth of the way to where it was observed, and re-synced on a jump.
+// Duplicates never get here (main drops them), so the period is the video's. Costs one source frame of
+// latency - fine for video, wrong for a game (it would also lag the audio by that much).
+static void VideoPresent(Fg* f)
+{
+    Gpu& g = *f->g; bool vb = f->vblank; const double vbms = OverlayVBlankMs(f->ov);
+    // The real frames in hand, oldest first, each with its place on the smoothed content timeline (ms):
+    // [A, B] is the pair being shown, a third is the next one, waiting until the shown instant passes B.
+    // Moving on the moment it arrived jumped t from ~0.6 back to 0 - a skip in every frame.
+    struct Held { FgSlot* s; double t; }; Held held[3]; int nheld = 0;
+    double ob = 0, period = 0, lag = 0;   // the newest frame's observed time; source period; arrival lag behind content time
+    const FgSlot* shown = nullptr; float shown_t = -1; int k = 0;
+    char ev[16]; const float forced = GetEnvironmentVariableA("JF_VID_T", ev, sizeof ev) ? (float)atof(ev) : -1.0f;   // TEST: a fixed t (bench)
+    auto release = [&] { { std::lock_guard<std::mutex> lk(f->mu); held[0].s->state = 0; } held[0] = held[1]; held[1] = held[2]; --nheld; f->cv.notify_all(); };
+    while (!f->stop && !f->failed)
+    {
+        if (vb) { if (!OverlayWaitVBlank(f->ov)) { Log("[fg] no usable vblank wait under the overlay - video paced on the CPU timer"); vb = false; } }
+        else Sleep((DWORD)std::max(1.0, vbms));
+        if (f->hold) continue;
+        FgSlot* n = nullptr;
+        { std::lock_guard<std::mutex> lk(f->mu); n = TakeNewestLocked(f); }
+        f->cv.notify_all();   // FgAcquire may be waiting for a free slot
+        const double now = NowMs();
+        if (n)
+        {
+            if (!WaitRendered(f, n)) break;
+            const double o = n->cap_qpc ? QpcToMs(n->cap_qpc) : now, gap = o - ob;
+            double tn = o;
+            if (nheld && n->interpolate && gap > 2.0 && gap < 250.0)
+            {
+                period = period > 0 ? period + 0.1 * (gap - period) : gap;
+                const double due = held[nheld - 1].t + period;
+                tn = fabs(o - due) < 0.5 * period ? due + 0.1 * (o - due) : o;   // locked; re-synced on a jump
+            }
+            ob = o;
+            if (nheld == 3) release();   // a burst: the oldest goes
+            held[nheld++] = { n, tn };
+            lag = std::max(now - tn, lag - 0.05);   // the worst recent arrival lag, decaying slowly
+        }
+        if (!nheld) continue;
+        // the shown instant: one period plus the arrival lag plus a refresh behind now, so the frame after
+        // B is normally in hand by the time it is needed
+        const double c = now - (period + lag + vbms);
+        while (nheld == 3 && c >= held[1].t) release();
+        FgSlot* a = nheld >= 2 ? held[0].s : nullptr;
+        FgSlot* b = nheld >= 2 ? held[1].s : held[0].s;
+        // where the instant falls between A and B; across a cut (B not interpolable) A, then B
+        float t = 1.0f;
+        if (a && period > 0)
+        {
+            const double ta = held[0].t, tb = held[1].t;
+            t = b->interpolate ? (float)std::clamp((c - ta) / std::max(tb - ta, 1.0), 0.0, 1.0) : (c < tb ? 0.0f : 1.0f);
+        }
+        if (forced >= 0 && a) t = forced;
+        const FgSlot* src = t <= 0.02f ? a : t >= 0.98f ? b : nullptr;   // an end: that real frame as it is
+        if (src)
+        {
+            if (src == shown && shown_t < 0) continue;   // already on screen
+            if (!PresentAfter(f, src->real, src, src == b, g.fence, src->fence)) break;
+            shown = src; shown_t = -1; f->dbg = b;
+            continue;
+        }
+        if (shown == b && fabsf(t - shown_t) < 0.005f) continue;
+        if (!GpuCtxBegin(g, f->ctx)) { Fail(f, "FG queue begin (device removed?)"); break; }
+        ID3D12GraphicsCommandList* cl = f->ctx.list;
+        ID3D12Resource* dst = f->lw_final[k];
+        OverlayGuard(f->ov, f->ctx.queue);   // the last present copy has finished reading its source
+        GpuBarrier(cl, a->real, CSRC, NPSR); GpuBarrier(cl, b->real, CSRC, NPSR); GpuBarrier(cl, dst, CSRC, UAV);
+        CsVideoInterp(g, f->sh, cl, a->real, b->real, b->flow, f->mw, f->mh, dst, f->w, f->h, t);
+        GpuBarrier(cl, dst, UAV, CSRC); GpuBarrier(cl, a->real, NPSR, CSRC); GpuBarrier(cl, b->real, NPSR, CSRC);
+        CopyRects(f, cl, b, b->real, dst);
+        const UINT64 v = GpuCtxEnd(f->ctx);   // A and B were CPU-waited on arrival (WaitRendered)
+        if (!v) { Fail(f, "video submit"); break; }
+        if (!PresentAfter(f, dst, b, false, f->ctx.fence, v)) break;
+        ++f->gen_shown; f->lw_last = dst; f->dbg = b; shown = b; shown_t = t; k ^= 1;
+    }
+    { std::lock_guard<std::mutex> lk(f->mu); for (int i = 0; i < nheld; ++i) held[i].s->state = 0; }
+    f->cv.notify_all();
+}
+
 // ---- lifecycle ---------------------------------------------------------------------------------------
 #define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
 
@@ -593,12 +683,12 @@ static void RaisePresenterPriority(std::thread& t)
         Log("[fg] presenter priority unchanged (err %lu) - normal priority is fine, just jitterier", GetLastError());
 }
 
-Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier, bool vblank_pacing, int engine, float lw_vfov)
+Fg* FgCreate(Gpu& g, Shaders* sh, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier, bool vblank_pacing, int engine, float lw_vfov)
 {
     Fg* f = new Fg;
-    f->g = &g; f->ov = ov; f->dir = dir; f->w = out_w; f->h = out_h; f->mw = mv_w; f->mh = mv_h;
+    f->g = &g; f->sh = sh; f->ov = ov; f->dir = dir; f->w = out_w; f->h = out_h; f->mw = mv_w; f->mh = mv_h;
     f->count = std::clamp(multiplier, 1, 4) - 1;
-    f->vblank = vblank_pacing; f->warp = engine == FG_WARP; f->lw = engine == FG_LATEWARP; f->lw_vfov = lw_vfov;
+    f->vblank = vblank_pacing; f->warp = engine == FG_WARP; f->lw = engine == FG_LATEWARP; f->video = engine == FG_VIDEO; f->lw_vfov = lw_vfov;
     auto fail = [&](const char* why) { Fail(f, why); FgDestroy(f); return (Fg*)nullptr; };
 
     // ponytail: passthrough keeps the ctx too (its event is what the presenter waits on) - one code path.
@@ -613,7 +703,7 @@ Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UI
         return f;
     }
 
-    if (!f->warp && !f->lw)   // extrapolation and Frame Warp need no DLSS-G
+    if (!f->warp && !f->lw && !f->video)   // extrapolation, Frame Warp and video need no DLSS-G
     {
         if (!(f->params = NgxCoreParams(g, dir, "[fg]"))) return fail("no NGX parameter block");
         NVSDK_NGX_Result r;
@@ -650,8 +740,14 @@ Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UI
     {
         s.real = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_real");
         if (!s.real) return fail("slot textures");
-        for (int i = 0; i < (f->lw ? 0 : f->count); ++i)
+        if (f->video && !(s.flow = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_flow"))) return fail("video flow textures");
+        for (int i = 0; i < (f->lw || f->video ? 0 : f->count); ++i)
             if (!(s.gen[i] = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_gen"))) return fail("slot textures");
+    }
+    if (f->video)
+    {
+        for (auto& t : f->lw_final) t = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"video_out");
+        if (!f->lw_final[0] || !f->lw_final[1]) return fail("video textures");
     }
     if (f->lw)
     {
@@ -661,9 +757,9 @@ Fg* FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UI
             if (!(s.mask = GpuMakeTex(g, (mv_w + 3) / 4, (mv_h + 3) / 4, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"lw_mask"))) return fail("latewarp mask");
         if (!f->lw_final[0] || !f->lw_final[1]) return fail("latewarp textures");
     }
-    f->thread = std::thread(f->lw ? Reproject : Presenter, f);
+    f->thread = std::thread(f->lw ? Reproject : f->video ? VideoPresent : Presenter, f);
     RaisePresenterPriority(f->thread);
-    Log("[fg] %s %ux%u multiplier %d pacing=%s", f->lw ? "latewarp engine (Frame Warp to the mouse)" : f->warp ? "warp engine (extrapolation)" : "feature created", out_w, out_h, f->count + 1, vblank_pacing ? "vblank" : "timer");
+    Log("[fg] %s %ux%u multiplier %d pacing=%s", f->lw ? "latewarp engine (Frame Warp to the mouse)" : f->video ? "video engine (interpolation on the content clock)" : f->warp ? "warp engine (extrapolation)" : "feature created", out_w, out_h, f->count + 1, vblank_pacing ? "vblank" : "timer");
     return f;
 }
 
@@ -679,7 +775,7 @@ void FgDestroy(Fg* f)
     if (f->feature) { std::lock_guard<std::mutex> lk(NgxMutex()); f->release(f->feature); f->feature = nullptr; }
     // ponytail: no Shutdown1 - NR's parameter block lives in the same core; the refcount leaks until exit.
     if (f->params) NVSDK_NGX_D3D12_DestroyParameters(f->params);
-    for (auto& s : f->slots) { REL(s.real); REL(s.mask); for (auto& t : s.gen) REL(t); }
+    for (auto& s : f->slots) { REL(s.real); REL(s.mask); REL(s.flow); for (auto& t : s.gen) REL(t); }
     REL(f->mv); REL(f->depth); REL(f->disable); REL(f->disable_rb);
     LatewarpDestroy(f->lwf); for (auto& t : f->lw_final) REL(t);
     GpuCtxShutdown(*f->g, f->ctx);
@@ -720,7 +816,7 @@ void FgStats(Fg* f, FgStatsOut& out)
 
 ID3D12Resource* FgDebugGen(Fg* f, int i)
 {
-    if (f && f->lw) return i == 0 ? f->lw_last : nullptr;   // latewarp: the last warped refresh
+    if (f && (f->lw || f->video)) return i == 0 ? f->lw_last : nullptr;   // latewarp / video: the last generated refresh
     return (f && f->dbg && i >= 0 && i < f->count) ? f->dbg->gen[i] : nullptr;
 }
 
@@ -735,8 +831,10 @@ ID3D12Resource* FgMaskTarget(Fg* f)
     return f->pending->mask;
 }
 
-void FgDebugHold(Fg* f) { if (f && f->lw) { f->hold = true; Sleep(100); } }   // one in-flight refresh finishes
+void FgDebugHold(Fg* f) { if (f && (f->lw || f->video)) { f->hold = true; Sleep(100); } }   // one in-flight refresh finishes
 ID3D12Resource* FgDebugMask(Fg* f) { return (f && f->dbg) ? f->dbg->mask : nullptr; }
+
+ID3D12Resource* FgFlowTarget(Fg* f) { return (f->video && f->pending) ? f->pending->flow : nullptr; }
 
 ID3D12Resource* FgWarpTarget(Fg* f, int i)
 {
@@ -766,7 +864,7 @@ ID3D12Resource* FgAcquire(Fg* f)
         if (!s)
         {
             // Nothing free and nothing ready: every slot is mid-record or mid-present. One presenter
-            // and one recorder cannot hold three slots, so this is unreachable today - it stays as a
+            // and one recorder cannot hold every slot (engine=video holds three of four), so this is unreachable today - it stays as a
             // bounded wait rather than a silent dropped frame, and rec_us still reports it if the
             // slot count or the thread model ever changes.
             const double t_block = NowMs();

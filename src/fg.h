@@ -48,8 +48,8 @@
 struct Fg;
 
 // vblank_pacing: false = CPU timer schedule.
-Fg*  FgCreate(Gpu& g, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier /* 1 = passthrough, 2..4 */,
-              bool vblank_pacing, int engine /* 0 DLSS-G, 1 warp (CsWarp extrapolation), 2 latewarp (Frame Warp to the mouse) */,
+Fg*  FgCreate(Gpu& g, Shaders* sh, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier /* 1 = passthrough, 2..4 */,
+              bool vblank_pacing, int engine /* 0 DLSS-G, 1 warp (CsWarp extrapolation), 2 latewarp (Frame Warp to the mouse), 3 video */,
               float lw_vfov = 1.0472f /* radians, engine 2 */);
 void FgDestroy(Fg* f);   // stops the presenter (drains the GPU), releases the feature and textures
 int  FgMultiplier(const Fg* f);   // as created (1 = passthrough)
@@ -65,6 +65,9 @@ ID3D12Resource* FgWarpTarget(Fg* f, int i);
 // engine=latewarp only: the no-warp mask of the slot FgAcquire took (R8, NPSR at rest), for the pipeline to
 // write in the same list (CsNoWarpMask). nullptr for the other engines. FgDebugMask: bench.
 ID3D12Resource* FgMaskTarget(Fg* f);
+// engine=video only: the acquired slot's flow texture (R16G16_FLOAT mv size, NPSR at rest) - the pipeline copies
+// this frame's backward flow into it in the same list. nullptr for the other engines.
+ID3D12Resource* FgFlowTarget(Fg* f);
 ID3D12Resource* FgDebugMask(Fg* f);
 void FgDebugHold(Fg* f);   // bench: freeze the latewarp presenter before reading the debug textures
 // rects/nrects: the addon UI mask for THIS frame, in output pixels, restored onto every generated

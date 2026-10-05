@@ -98,8 +98,8 @@ const Setting kSettings[] = {
       L"Turns frame generation on or off, for every profile: extra frames are shown between the ones the game draws, for smoother motion." },
     // engine first: it decides what the rows under it mean. latewarp runs at the display's refresh,
     // so the multiplier and the governor mean nothing to it: they grey out (SyncFgRows).
-    { 2, L"fg", L"engine",            L"Engine",             Enum,  L"dlssg|warp|latewarp", L"dlssg",
-      L"dlssg = NVIDIA DLSS frame generation: interpolates between two frames - the smoothest, adds about half a frame of latency. warp = pushes the newest frame ahead along its motion: no added latency, more artefacts in fast motion. latewarp = NVIDIA Frame Warp re-aims the newest frame to your mouse at every refresh: lowest latency (needs nvngx_latewarp.dll)." },
+    { 2, L"fg", L"engine",            L"Engine",             Enum,  L"dlssg|warp|latewarp|video", L"dlssg",
+      L"dlssg = NVIDIA DLSS frame generation: interpolates between two frames - the smoothest, adds about half a frame of latency. warp = pushes the newest frame ahead along its motion: no added latency, more artefacts in fast motion. latewarp = NVIDIA Frame Warp re-aims the newest frame to your mouse at every refresh: lowest latency (needs nvngx_latewarp.dll). video = for video and other 2D content: every refresh shows the exact in-between moment the video's own clock calls for (24 fps on 240 Hz = 10 steps per frame), one frame late - smooth, no stutter at 23.976, but not for games." },
     { 2, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4", L"2",
       L"Frames shown per frame the game draws: 2 = double. The display has to keep up: 60 fps x4 needs 240 Hz." },
     { 2, L"fg", L"min_gain",          L"Pause below gain",   Float, nullptr, L"1.5",
@@ -296,14 +296,14 @@ std::vector<WORD> BuildTemplate()
     return w;
 }
 
-// latewarp runs at the display's refresh: the multiplier and the governor mean nothing to it, so their
+// latewarp and video run at the display's refresh: the multiplier and the governor mean nothing to them, so their
 // rows grey out while it is the engine - clearer than a label saying so, and the values are kept.
 void SyncFgRows(HWND h)
 {
     auto row = [](const wchar_t* key) { for (int i = 0; i < kCount; ++i) if (!wcscmp(kSettings[i].sec, L"fg") && !wcscmp(kSettings[i].key, key)) return i; return -1; };
     const int eng = row(L"engine"); if (eng < 0) return;
     wchar_t v[32] = {}; GetDlgItemTextW(h, ID_CTL0 + eng, v, 32);
-    const BOOL on = wcscmp(v, FgEngineName(FG_LATEWARP)) != 0;
+    const BOOL on = wcscmp(v, FgEngineName(FG_LATEWARP)) != 0 && wcscmp(v, FgEngineName(FG_VIDEO)) != 0;   // both run at the refresh
     for (const wchar_t* k : { L"multiplier", L"min_gain", L"max_input_fps" })
         if (const int i = row(k); i >= 0) { EnableWindow(GetDlgItem(h, ID_CTL0 + i), on); EnableWindow(GetDlgItem(h, ID_LBL0 + i), on); }
 }

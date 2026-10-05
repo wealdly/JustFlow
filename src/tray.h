@@ -10,7 +10,7 @@ enum TrayEvent
     TrayToggleFilters,
     TrayToggleFg,
     TrayFgMultiplier,   // arg = 2..4
-    TrayFgEngine,       // arg = 0 dlssg, 1 warp, 2 latewarp
+    TrayFgEngine,       // arg = 0 dlssg, 1 warp, 2 latewarp, 3 video
     TrayWipe,           // cycle wipe mode
     TrayReload,
     TraySelectProfile,  // arg = index into TraySetProfiles

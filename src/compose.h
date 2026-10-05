@@ -64,6 +64,9 @@ void CsNoWarpMask(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resou
 // Duplicate / scene-cut test: cap (converted as CsSwizzle does) vs prev (color4k before this frame's swizzle)
 // -> tiles, (w+63)/64 x (h+63)/64 R8G8 (UAV): R = 1 where the 64x64 tile changed at all, G = its mean luma.
 void CsSame(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* cap, ID3D12Resource* prev, UINT w, UINT h, float white, ID3D12Resource* tiles);
+// engine=video: the frame at t (0..1) between real frames a and b (RGBA8, NPSR), along b's backward flow mv
+// (R16G16_FLOAT ww x wh, NPSR) -> dst (RGBA8 w x h, UAV). vinterp.hlsl.
+void CsVideoInterp(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* a, ID3D12Resource* b, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* dst, UINT w, UINT h, float t);
 void CsMvGrid(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource* mv, UINT ww, UINT wh, ID3D12Resource* grid);
 // ---- on-screen text -------------------------------------------------------------------------
 // Draws `text` (ASCII 32..126, up to 64 chars, 8x8 font at `scale` px per font pixel) white with a

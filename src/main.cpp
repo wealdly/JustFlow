@@ -522,14 +522,15 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
     // identically). Without either, the gray pass, the OFA execute, the queue wait on it and the
     // expand ran for nobody, and they were 82-93% of an FG-only frame.
     const bool warp_fg = c.fg_enabled && c.fg_engine == FG_WARP, lw_fg = c.fg_enabled && c.fg_engine == FG_LATEWARP;   // lw: the mouse model learns from the flow
+    const bool vid_fg = c.fg_enabled && c.fg_engine == FG_VIDEO;   // video: interpolates along the flow
     if (lw_fg) MouseStart(); else MouseStop();
-    const bool need_mv = model_on || warp_fg || lw_fg;
+    const bool need_mv = model_on || warp_fg || lw_fg || vid_fg;
     if (need_mv && !p->had_mv) reset = true;   // the previous gray is stale: no flow across the gap
     p->had_mv = need_mv;
     // The per-frame flow (pair 0, current -> previous -> p->mv) has two readers: the SYNC evaluate and
     // the warp engine. The async track warps its residual with a different flow (pair 2, current ->
     // the residual's own frame), so it needs no pair 0 for itself.
-    const bool need_pair0 = (model_on && !async) || warp_fg || lw_fg;
+    const bool need_pair0 = (model_on && !async) || warp_fg || lw_fg || vid_fg;
     if (!async && p->model_thread.joinable()) StopModel(p);   // layer off or mode changed: the thread stops paying
     if (async && !p->model_thread.joinable() && !StartModel(p)) return false;
     // The presenter is always on while an overlay exists: passthrough (multiplier 1) with FG off,
@@ -546,8 +547,8 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
         if (p->fg && (FgFailed(p->fg) || FgMultiplier(p->fg) != want)) DropFg(p);
         if (!p->fg)
         {
-            p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, want, c.fg_pacing_vblank, c.fg_engine, c.fg_lw_vfov * 3.14159265f / 180.0f);
-            if (!p->fg && want > 1) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); p->fg = FgCreate(g, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, 1, c.fg_pacing_vblank, 0); }
+            p->fg = FgCreate(g, p->sh, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, want, c.fg_pacing_vblank, c.fg_engine, c.fg_lw_vfov * 3.14159265f / 180.0f);
+            if (!p->fg && want > 1) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); p->fg = FgCreate(g, p->sh, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, 1, c.fg_pacing_vblank, 0); }
             if (!p->fg) { Log("[fg] passthrough presenter create failed"); return false; }
         }
         FgSetTiming(p->fg, c.fg_phase_ms, c.fg_min_gain, c.fg_max_in_fps);   // ponytail: one atomic store per frame, no reload plumbing
@@ -880,6 +881,15 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
             CsNoWarpMask(g, p->sh, cl, p->mv, p->ww, p->wh, m, (UINT)md.Width, md.Height, p->lw_g[0], p->lw_g[1]);
             GpuBarrier(cl, m, UAV, NPSR);
         }
+    // engine=video: the presenter interpolates between this frame and the last along this flow, at
+    // every refresh - it gets its own copy (mv is rewritten next frame, the presenter reads it for a period).
+    if (fg_dst && vid_fg && need_pair0)
+        if (ID3D12Resource* fl = FgFlowTarget(p->fg))
+        {
+            GpuBarrier(cl, p->mv, NPSR, CSRC); GpuBarrier(cl, fl, NPSR, CDST);
+            cl->CopyResource(fl, p->mv);
+            GpuBarrier(cl, fl, CDST, NPSR); GpuBarrier(cl, p->mv, CSRC, NPSR);
+        }
     // engine=warp: the generated frames are this one pushed ahead along its own flow, (i+1)/multiplier
     // of an interval each, written straight into the slot. Not while the governor has FG paused.
     if (fg_dst && warp_fg && !FgPaused(p->fg) && FgWarpTarget(p->fg, 0))
@@ -1152,7 +1162,7 @@ static int RealMain(int argc, char** argv)
     {
         if (!p) return;
         if (!flip(p->cfg.fg_enabled, cfg.fg_enabled, L"fg", L"enabled")) PipelineToast(p, "Frame generation OFF");
-        else if (p->cfg.fg_engine == FG_LATEWARP) PipelineToast(p, "Frame generation ON: latewarp");
+        else if (p->cfg.fg_engine == FG_LATEWARP || p->cfg.fg_engine == FG_VIDEO) PipelineToast(p, "Frame generation ON: %ls", FgEngineName(p->cfg.fg_engine));
         else PipelineToast(p, "Frame generation ON %dX (%ls)", p->cfg.fg_multiplier, FgEngineName(p->cfg.fg_engine));
         tray_state();
     };

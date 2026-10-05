@@ -25,6 +25,12 @@ no injection, no input. The same mechanisms OBS and overlay apps use, nothing mo
   a button held (WoW turns only with a button held, so cursor movement never warps). It warps nothing
   until that fit is reliable. The warp is a camera rotation: exact for first-person mouse-look; for
   third-person cameras, what our flow shows pinned to the camera (the character) is held still.
+  `[fg] engine=video` is for video and other 2D content: every refresh shows the in-between moment the
+  video's own clock calls for (24 fps on 240 Hz = 10 even steps; 23.976 drifts smoothly), interpolated
+  along our flow with fallbacks to the nearer frame where the flow fails and exact copies of unchanged
+  pixels (subtitles). It shows the video one frame late - fine for video, not for games. The `desktop`
+  profile uses it. Against the true middle frame: 2.3 / 7.2 grey levels (normal / fast motion), vs
+  5.8 / 14.1 for holding the frame.
 - **Capture** by Windows.Graphics.Capture, uncapped on Windows 11 24H2+ (`MinUpdateInterval`), or DXGI
   Desktop Duplication where that is unavailable (`[capture] mode=auto|wgc|dda`).
 - **Per-game profiles**, global hotkeys, a tray menu, a live before/after wipe.
@@ -110,7 +116,7 @@ The pipeline is three independent layers, each with one on/off that reaches into
 |---|---|---|---|
 | Neural | `[nr] enabled` | F9 | the DLSS model, at work resolution, composed back as a residual |
 | Filters | `[filters] enabled` | F6 | sharpen then vibrance, at native resolution, UI rects untouched |
-| Frame gen | `[fg] enabled` | F8 | frames between the game's: DLSS-G, warp or latewarp (`[fg] engine`); the UI is copied back onto every one |
+| Frame gen | `[fg] enabled` | F8 | frames between the game's: DLSS-G, warp, latewarp or video (`[fg] engine`); the UI is copied back onto every one |
 
 They apply in that order, with the UI mask and the HUD between filters and frame generation. The
 order is not arbitrary: sharpening has to see what the model produced, vibrance grades after the
