@@ -13,38 +13,32 @@ set(WINSDK_ROOT "C:/Program Files (x86)/Windows Kits/10")
 set(FXC "${WINSDK_ROOT}/bin/${WINSDK_VER}/x64/fxc.exe")
 set(CPPWINRT_INC "${WINSDK_ROOT}/Include/${WINSDK_VER}/cppwinrt")
 
-# ---- shaders: fxc -> gen/<name>.h with g_cs_<name> byte array ----------------------------------
+# ---- shaders: fxc -> gen/<stage>_<name>.h with g_<stage>_<name> byte array (entry point <STAGE>Main) --
 set(SHADERS swizzle gray downscale expand compose residual compose_residual text sharpen warp mvgrid nowarp same vinterp deband
     xe_down xe_flow xe_flow_r2 xe_median xe_refine xe_warp xe_interp xe_static xe_subsel)
+# vertex + pixel shader pairs drawn into a render target (the backbuffer): xe_interp_gfx (the interpolation),
+# uiblend (our HUD / toasts over every presented frame)
+set(GFX_SHADERS xe_interp_gfx uiblend)
 set(SHADER_DEPS_swizzle ${CMAKE_SOURCE_DIR}/shaders/capture_in.hlsli)
 set(SHADER_DEPS_same ${CMAKE_SOURCE_DIR}/shaders/capture_in.hlsli)
 set(SHADER_DEPS_xe_flow_r2 ${CMAKE_SOURCE_DIR}/shaders/xe_flow.hlsl)   # it #includes xe_flow.hlsl
-set(SHADER_HEADERS)
-foreach(s ${SHADERS})
-    set(src ${CMAKE_SOURCE_DIR}/shaders/${s}.hlsl)
-    set(out ${CMAKE_BINARY_DIR}/gen/cs_${s}.h)
-    add_custom_command(
-        OUTPUT ${out}
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/gen
-        COMMAND "${FXC}" /nologo /T cs_5_0 /E CSMain /O3 /Fh ${out} /Vn g_cs_${s} ${src}
-        DEPENDS ${src} ${SHADER_DEPS_${s}}
-        COMMENT "fxc ${s}.hlsl")
-    list(APPEND SHADER_HEADERS ${out})
-endforeach()
-# vertex + pixel shader pairs drawn into a render target (the backbuffer): xe_interp_gfx (the interpolation),
-# uiblend (our HUD / toasts over every presented frame)
 set(SHADER_DEPS_xe_interp_gfx ${CMAKE_SOURCE_DIR}/shaders/xe_interp.hlsl)
-foreach(gfx xe_interp_gfx uiblend)
-  foreach(stage vs ps)
-    set(src ${CMAKE_SOURCE_DIR}/shaders/${gfx}.hlsl)
-    set(out ${CMAKE_BINARY_DIR}/gen/${stage}_${gfx}.h)
+set(SHADER_HEADERS)
+foreach(s ${SHADERS} ${GFX_SHADERS})
+  set(stages cs)
+  if(s IN_LIST GFX_SHADERS)
+    set(stages vs ps)
+  endif()
+  foreach(stage ${stages})
+    set(src ${CMAKE_SOURCE_DIR}/shaders/${s}.hlsl)
+    set(out ${CMAKE_BINARY_DIR}/gen/${stage}_${s}.h)
     string(TOUPPER ${stage} STAGE)
     add_custom_command(
         OUTPUT ${out}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/gen
-        COMMAND "${FXC}" /nologo /T ${stage}_5_0 /E ${STAGE}Main /O3 /Fh ${out} /Vn g_${stage}_${gfx} ${src}
-        DEPENDS ${src} ${SHADER_DEPS_${gfx}}
-        COMMENT "fxc ${gfx}.hlsl (${stage})")
+        COMMAND "${FXC}" /nologo /T ${stage}_5_0 /E ${STAGE}Main /O3 /Fh ${out} /Vn g_${stage}_${s} ${src}
+        DEPENDS ${src} ${SHADER_DEPS_${s}}
+        COMMENT "fxc ${s}.hlsl (${stage})")
     list(APPEND SHADER_HEADERS ${out})
   endforeach()
 endforeach()
@@ -66,8 +60,7 @@ add_custom_command(TARGET justflow_spike POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:nvngx_dll_justflow> $<TARGET_FILE_DIR:justflow_spike>
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll $<TARGET_FILE_DIR:justflow_spike>)
 
-# ---- the app (only once every module exists) ---------------------------------------------------
-if(EXISTS ${CMAKE_SOURCE_DIR}/src/main.cpp AND EXISTS ${CMAKE_SOURCE_DIR}/src/compose.cpp)
+# ---- the app ------------------------------------------------------------------------------------
 add_executable(justflow
     src/main.cpp src/d3d.cpp src/capture.cpp src/present.cpp src/ngx_nr.cpp
     src/nvofa.cpp src/compose.cpp src/bench.cpp src/png.cpp src/config.cpp src/fg.cpp src/tray.cpp src/settings.cpp src/latewarp.cpp src/mouse.cpp
@@ -89,7 +82,6 @@ add_custom_command(TARGET justflow POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssg.dll $<TARGET_FILE_DIR:justflow>)
 if(EXISTS ${CMAKE_SOURCE_DIR}/runtime/nvngx_latewarp.dll)   # optional: Frame Warp (not redistributable, see NOTICE)
     add_custom_command(TARGET justflow POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_latewarp.dll $<TARGET_FILE_DIR:justflow>)
-endif()
 endif()
 
 # ---- justflow_xe: frame generation only, any D3D12 GPU (written for Intel Arc iGPUs) --------------
