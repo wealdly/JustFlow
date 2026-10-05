@@ -2,8 +2,8 @@
 // 2021 Advanced Micro Devices, MIT; see NOTICE), ported to plain HLSL with its noise detection on
 // (FSR_RCAS_DENOISE): a 5-tap cross whose negative lobe is solved per pixel as the most it can be
 // before the result would clip, limited to 0.25 - 1/16 and scaled by `strength` (0 = off, 1 = AMD's
-// maximum). It replaced our CAS: the clip solve keeps edges from haloing, and the noise term keeps it
-// off grain and compression noise in video. Pixels inside a UI rect pass through.
+// maximum). The clip solve keeps edges from haloing, and the noise term keeps it off grain and
+// compression noise in video. Pixels inside a UI rect pass through.
 // This is the filter layer's last pass, and the order inside the layer is deliberate: deband first
 // (deband.hlsl - sharpening would harden the bands), sharpen the image the neural layer produced, THEN
 // saturation. Grading before sharpening would have the sharpener amplify colour it had just pushed.

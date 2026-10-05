@@ -1,15 +1,12 @@
 // Matched residual compose at output resolution:
-//   res = native + (nr_out^ - nr_in^) * strength      (^ = bilinear to w x h; sRGB space as-is,
-//   like NeuralScreen kResidualHlsl)
+//   res = native + (nr_out^ - nr_in^) * strength      (^ = bilinear to w x h; sRGB space as-is)
 // then UI rects (blend back to native inside, feathered outside), then the wipe.
 // `chroma` scales only the colour part of the model's edit (1 = as the model made it, 0 = keep the
 // game's colour exactly and take only its luminance). The model pulls saturation toward photoreal,
 // which fights a deliberately stylised palette; the detail and lighting it adds live in the luma.
-// Tried and dropped (2026-09-22): the edit as an OkLab lightness RATIO + chroma offset (what Valheim
-// Universal Upscaler does). Measured on three frames: 0% clipping either way, identical hue shift,
-// edit size within 6% - and a ratio from a dark work pixel that lands on a bright native pixel
-// (a footprint edge, or a wrong warp) doubles it: p99 boundary error 88 vs 31 with the ghost guard
-// off. The additive difference is bounded by the model's own edit and needs no guard.
+// Additive, not an OkLab lightness ratio: a ratio from a dark work pixel that lands on a bright native
+// pixel (a footprint edge, a wrong warp) blows up (p99 boundary error 88 vs 31, no other gain measured);
+// the difference is bounded by the model's own edit.
 // Rects live in a 256x1 R32_SINT texture (x0,y0,x1,y1 per rect, up to 64): root constants cap at 64 DWORDs.
 // Addon mask strip (strip_w x strip_h at the top-left, 0 = off): those output pixels take the
 // composed value of the pixel strip_h rows below, so the strip never shows.
@@ -50,8 +47,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         res = saturate(nat + d);
     }
     {
-        // Vibrance is NOT here: it is the filter layer's job (shaders/sharpen.hlsl), which runs on
-        // whatever this produced, model or no model, and after the sharpen.
+        // no vibrance here: the filter layer (sharpen.hlsl) grades after the sharpen, model or no model
         const float2 p = float2(q);
         const float f = max(feather, 1);
         [loop] for (uint i = 0; i < min(nrects, 64u); ++i)

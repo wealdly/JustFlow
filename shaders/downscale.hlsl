@@ -1,5 +1,5 @@
 // RGBA8 (w x h) -> RGBA8 (dw x dh): exact area box filter over the fractional source footprint
-// (partial pixels weighted by coverage). NeuralScreen quality_shaders.h kScaleHlsl4 area branch.
+// (partial pixels weighted by coverage).
 Texture2D<float4>   src : register(t0);
 RWTexture2D<float4> dst : register(u0);
 cbuffer C : register(b0) { uint w, h, dw, dh; };

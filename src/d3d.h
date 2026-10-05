@@ -7,13 +7,36 @@
 #include <dxgi1_6.h>
 #include <cstdint>
 
-struct GpuCtx;
-
-struct Gpu
+// One queue's recording ring: a 3-deep allocator ring behind one fence + its own event (so another thread
+// can wait without sharing one), a shader-visible descriptor heap and a timestamp heap, both split into
+// kFrames slots. Gpu is the main queue's; a GpuCtx is a secondary queue's.
+struct GpuRing
 {
     static const int kFrames = 3;
     static const int kStamps = 32;             // timestamp slots per frame (pairs: even=begin, odd=end)
     static const UINT kDescPerSlot = 1024;     // shader-visible CBV/SRV/UAV descriptors per ring slot
+
+    ID3D12CommandQueue*        queue = nullptr;
+    ID3D12GraphicsCommandList* list = nullptr;
+    ID3D12CommandAllocator*    alloc[kFrames] = {};
+    UINT64                     alloc_fence[kFrames] = {};
+    int                        slot = 0;         // current ring slot (valid between Begin/End)
+    ID3D12Fence*               fence = nullptr;
+    HANDLE                     event = nullptr;
+    UINT64                     fence_value = 0;
+    bool                       failed = false;   // a submission failed or the device was removed
+    ID3D12DescriptorHeap*      desc_heap = nullptr;     // kFrames * kDescPerSlot
+    UINT                       desc_used = 0;           // within the current slot
+    ID3D12QueryHeap*           ts_heap = nullptr;       // kFrames * kStamps
+    ID3D12Resource*            ts_readback = nullptr;   // kFrames * kStamps * 8 bytes
+    UINT64                     ts_freq = 0;
+    bool                       ts_written[kFrames][kStamps] = {};
+};
+
+struct GpuCtx : GpuRing {};
+
+struct Gpu : GpuRing
+{
     static const int kCtx = 4;                 // secondary contexts (GpuCtxInit registers here)
 
     IDXGIFactory4*             factory = nullptr;
@@ -22,50 +45,8 @@ struct Gpu
     int                        adapter_index = -1;
     ID3D12Device*              dev = nullptr;
     ID3D12Device1*             dev1 = nullptr;          // SetResidencyPriority (null if the runtime lacks it)
-    ID3D12CommandQueue*        queue = nullptr;
-    ID3D12GraphicsCommandList* list = nullptr;
-    ID3D12CommandAllocator*    alloc[kFrames] = {};
-    UINT64                     alloc_fence[kFrames] = {};
-    int                        slot = 0;         // current ring slot (valid between GpuBegin/GpuEnd)
-    ID3D12Fence*               fence = nullptr;
-    HANDLE                     fence_event = nullptr;
-    UINT64                     fence_value = 0;
-    bool                       failed = false;   // a submission failed or the device was removed
-
-    // descriptors
-    ID3D12DescriptorHeap*      desc_heap = nullptr;     // shader visible, kFrames * kDescPerSlot
     UINT                       desc_size = 0;
-    UINT                       desc_used = 0;           // within the current slot
-
-    // timestamps
-    ID3D12QueryHeap*           ts_heap = nullptr;       // kFrames * kStamps
-    ID3D12Resource*            ts_readback = nullptr;   // kFrames * kStamps * 8 bytes
-    UINT64                     ts_freq = 0;
-    bool                       ts_written[kFrames][kStamps] = {};
-
-    GpuCtx*                    ctx[kCtx] = {};          // GpuDispatch / GpuStamp route by command list
-};
-
-// A secondary queue with its own allocator ring, fence + event (so another thread can wait without
-// sharing Gpu::fence_event), shader-visible descriptor heap and timestamp heap. Same slot/fence
-// discipline as Gpu; GpuDispatch(g, ctx.list, ...) lands in the ctx's descriptor region.
-struct GpuCtx
-{
-    ID3D12CommandQueue*        queue = nullptr;
-    ID3D12GraphicsCommandList* list = nullptr;
-    ID3D12CommandAllocator*    alloc[Gpu::kFrames] = {};
-    UINT64                     alloc_fence[Gpu::kFrames] = {};
-    int                        slot = 0;
-    ID3D12Fence*               fence = nullptr;
-    HANDLE                     event = nullptr;
-    UINT64                     fence_value = 0;
-    bool                       failed = false;
-    ID3D12DescriptorHeap*      desc_heap = nullptr;     // own heap, kFrames * kDescPerSlot
-    UINT                       desc_used = 0;
-    ID3D12QueryHeap*           ts_heap = nullptr;
-    ID3D12Resource*            ts_readback = nullptr;
-    UINT64                     ts_freq = 0;
-    bool                       ts_written[Gpu::kFrames][Gpu::kStamps] = {};
+    GpuCtx*                    ctx[kCtx] = {};          // GpuDispatch / GpuSrvTable route by command list
 };
 
 // ---- lifecycle -------------------------------------------------------------------------------
