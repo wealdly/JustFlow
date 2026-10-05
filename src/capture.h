@@ -1,14 +1,14 @@
-// Window capture: Windows.Graphics.Capture on a private D3D11 device (same adapter as the D3D12
-// device), frames copied into a shared NT-handle BGRA8 texture and handed to D3D12 through a shared
-// fence. No CPU wait on the frame: the caller does queue->Wait(CaptureFence, value).
+// Window capture (Windows.Graphics.Capture, or DXGI Desktop Duplication) on a private D3D11 device on the
+// D3D12 device's adapter. Frames are copied into shared NT-handle textures and handed to D3D12 through a
+// shared fence. No CPU wait on the frame: the caller does queue->Wait(CaptureFence, value).
 #pragma once
 #include "d3d.h"
 
 struct Capture;
 
-// Opens WGC on `target`. Fails if the window is not capturable. Logs sizes and formats.
+// Fails if the window is not capturable. Logs sizes and formats.
 // prefer_dda: DXGI Desktop Duplication on the window's monitor first (monitor refresh rate; the overlay
-// must be excluded from capture), falling back to Windows.Graphics.Capture (60 Hz ceiling).
+// must be excluded from capture), falling back to Windows.Graphics.Capture.
 Capture* CaptureOpen(Gpu& g, HWND target, bool show_cursor, bool show_border, bool prefer_dda);
 bool     CaptureIsDda(Capture* c);
 // The capture sees the whole monitor - our overlay too, unless it is excluded (DDA, or the full-desktop monitor item).
@@ -26,12 +26,12 @@ bool CaptureAcquire(Capture* c, DWORD wait_ms, UINT64& fence_value, LONGLONG& sy
 ID3D12Resource* CaptureTexture(Capture* c);
 ID3D12Fence*    CaptureFence(Capture* c);
 UINT            CaptureWidth(Capture* c);
+UINT            CaptureHeight(Capture* c);
 double          CaptureAccumMean(Capture* c);   // DDA: mean AccumulatedFrames per acquire since the last call (0 = n/a)
+UINT            CaptureForeign(Capture* c);     // DDA updates since the last call that did not touch our window (another app on the same monitor)
 // True when window capture can run uncapped here (GraphicsCaptureSession.MinUpdateInterval exists:
 // Windows 11 24H2+). Without it WGC is pinned near 60 Hz and Desktop Duplication is the better default.
 bool CaptureWgcUncapped();
-UINT CaptureForeign(Capture* c);   // DDA updates since the last call that did not touch our window (another app on the same monitor)
-UINT            CaptureHeight(Capture* c);
 // True once the captured item size differed from the open size for >= 250 ms (deadband). The
 // caller then closes and reopens. new_w/new_h carry the settled size.
 bool CaptureSizeChanged(Capture* c, UINT& new_w, UINT& new_h);

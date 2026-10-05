@@ -45,19 +45,17 @@ bool OverlayPresent(Overlay* o, ID3D12Resource* src, ID3D12Fence* after, UINT64 
 void OverlayGuard(Overlay* o, ID3D12CommandQueue* q);
 // CPU wait for both queues to go idle (before releasing anything a present copy may still read).
 void OverlayDrain(Overlay* o);
-// Blocks until the next vblank of the monitor under the overlay. False = no DXGI output matches
-// (display on another adapter): caller falls back to timer pacing.
-// Blocks until the next refresh. False = no usable wait (no DXGI output matches, or neither
-// WaitForVBlank nor its DwmFlush fallback actually waits): pace on a CPU timer instead.
+// Blocks until the next refresh of the monitor under the overlay. False = no usable wait (no DXGI output
+// matches, or neither WaitForVBlank nor its DwmFlush fallback actually waits): pace on a CPU timer instead.
 bool   OverlayWaitVBlank(Overlay* o);
 double OverlayVBlankMs(Overlay* o);   // refresh period of that monitor (1000/60 if unknown)
-bool   OverlayVBlankIsDwm(Overlay* o);
+bool   OverlayVBlankIsDwm(Overlay* o);   // the wait is DwmFlush for now (it wakes on desktop compositions, not on every refresh)
 // Our UI (HUD, toasts) over every presented frame. OverlayUiLayer: the layer to draw now (premultiplied RGBA8,
 // the overlay's size, ALL_SHADER_RESOURCE at rest; nullptr = the last drawing is not on screen yet, skip).
 // Draw it (CsText layer mode) after OverlayGuard on that queue, then OverlayUiCommit with its text boxes and
 // the fence value that completes the drawing; presents switch to it once that fence has passed.
 ID3D12Resource* OverlayUiLayer(Overlay* o);
-void OverlayUiCommit(Overlay* o, const RECT* boxes, int n, ID3D12Fence* f, UINT64 v);   // the wait is DwmFlush for now (it wakes on desktop compositions, not on every refresh)
+void OverlayUiCommit(Overlay* o, const RECT* boxes, int n, ID3D12Fence* f, UINT64 v);
 // Reposition over the target's DWMWA_EXTENDED_FRAME_BOUNDS, hide while the target is iconic,
 // re-assert topmost every `reassert_every` calls. Call once per frame (or per second when idle).
 void OverlayFollow(Overlay* o, int reassert_every);
@@ -71,9 +69,7 @@ bool OverlayHotkey(Overlay* o, int id);
 // Replace the registered hotkeys (unregister + register on the window thread, synchronous).
 // False = at least one RegisterHotKey failed (the others stay registered).
 bool OverlaySetHotkeys(Overlay* o, const HotkeyDef* keys, int nkeys);
-// QPC at the last Present. (The scan-out time went with GetFrameStatistics: it was a DXGI call
-// on every present, up to 180 a second, and nothing ever read the answer.)
-LONGLONG OverlayPresentQpc(Overlay* o);
+LONGLONG OverlayPresentQpc(Overlay* o);   // QPC at the last Present
 // Mean wall time of one OverlayPresent since the last call, split into: waiting for the previous
 // copy to retire, the Present() call itself, and the whole function. -1 = nothing presented.
 void OverlayPresentStats(Overlay* o, double& prev_ms, double& call_ms, double& total_ms);
