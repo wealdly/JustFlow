@@ -206,7 +206,6 @@ bool ConfigNeedsRestart(const Config& a, const Config& b)
 NrConfig ConfigToNr(const Config& c)
 {
     NrConfig n; n.work_w = c.work_w; n.work_h = c.work_h; n.passes = c.nr_passes;
-    n.block = (NrParamBlock)c.param_block;
     n.tuning = c.tuning;
     return n;
 }

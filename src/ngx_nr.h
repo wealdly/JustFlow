@@ -31,7 +31,6 @@ struct NrTuning
 struct NrConfig
 {
     UINT          work_w = 2560, work_h = 1440;   // model size; Color/Output/MVec are this size
-    NrParamBlock  block = NrBlockCapability;
     NrTuning      tuning;
     // Model passes per frame, 1..3 (OptiScaler's "Model passes"): pass k+1 refines pass k's output, each
     // with a feature - and a temporal history - of its own; local tone on the first pass only. The
