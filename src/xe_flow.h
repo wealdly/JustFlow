@@ -15,8 +15,8 @@
 
 struct XeFlow;
 
-// w x h: native frame size. factor: native pixels per L0 pixel (1..4). levels 0 = auto.
-XeFlow* XeFlowCreate(Gpu& g, UINT w, UINT h, UINT factor, int levels = 0);
+// w x h: native frame size. factor: native pixels per L0 pixel (1..4).
+XeFlow* XeFlowCreate(Gpu& g, UINT w, UINT h, UINT factor);
 void    XeFlowDestroy(XeFlow* f);
 // Luma pyramid of `frame` (w x h RGBA/BGRA, NPSR) into slot 0 or 1.
 void    XeFlowPyramid(XeFlow* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* frame, int slot);

@@ -1,7 +1,6 @@
 // xe_interp as a full-screen triangle into a render target: the swapchain's backbuffer. This driver
 // refuses DXGI_USAGE_UNORDERED_ACCESS on swapchains (CreateSwapChainForHwnd -> DXGI_ERROR_INVALID_CALL),
-// so the compute version could only write a staging texture that OverlayPresent then copied - a full
-// frame of extra traffic per present. A render target needs no copy.
+// so compute would need a staging texture and a full-frame copy per present.
 #define XE_INTERP_NO_CS
 #include "xe_interp.hlsl"
 

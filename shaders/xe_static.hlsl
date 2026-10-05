@@ -2,8 +2,8 @@
 //   e0 = luma disagreement of prev and cur at the SAME place  (the zero-motion hypothesis)
 //   ef = luma disagreement of prev at x + bwd(x) and cur at x (the flow's claim on the pair it came from)
 // each summed over a +-1 L0 px cross (+-2 native at factor 2: a text stroke). Static UI has e0 ~ 0 by
-// construction; moving content does not. Once per real frame instead of 10 samples per pixel per
-// present (which cost 1.3 ms of every 1.6 ms interpolation pass); xe_interp turns (e0, ef) into a weight.
+// construction; moving content does not. Once per real frame, not per pixel per present; xe_interp
+// turns (e0, ef) into a weight.
 Texture2D<float>    cur  : register(t0);
 Texture2D<float>    prev : register(t1);
 Texture2D<float2>   bwd  : register(t2);   // L0 grid, one vector per cell x cell block, L0 pixels

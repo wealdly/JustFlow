@@ -4,13 +4,13 @@
 #include "ps_xe_interp_gfx.h"
 #include "log.h"
 
-static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 static const D3D12_RESOURCE_STATES UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
 
 bool XeInterpInit(Gpu& g, XeInterp& x)
 {
     if (!GpuMakeCompute(g, g_cs_xe_interp, sizeof g_cs_xe_interp, 5, 1, 11, x.pso, L"xe_interp")) return false;
-    // Graphics: b0 = 9 root constants, t0..t3 one table, s0 linear clamp - the compute layout minus the UAV.
+    // Graphics: b0 = 11 root constants, t0..t4 one table, s0 linear clamp - the compute layout minus the UAV.
     D3D12_DESCRIPTOR_RANGE range = {}; range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; range.NumDescriptors = 5;
     D3D12_ROOT_PARAMETER params[2] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; params[0].Constants.Num32BitValues = 11;
@@ -44,11 +44,7 @@ bool XeInterpInit(Gpu& g, XeInterp& x)
 
 void XeInterpRelease(XeInterp& x)
 {
-    if (x.pso.pso) { x.pso.pso->Release(); x.pso.pso = nullptr; }
-    if (x.pso.root) { x.pso.root->Release(); x.pso.root = nullptr; }
-    if (x.gfx_pso) { x.gfx_pso->Release(); x.gfx_pso = nullptr; }
-    if (x.gfx_root) { x.gfx_root->Release(); x.gfx_root = nullptr; }
-    if (x.rtv_heap) { x.rtv_heap->Release(); x.rtv_heap = nullptr; }
+    REL(x.pso.pso); REL(x.pso.root); REL(x.gfx_pso); REL(x.gfx_root); REL(x.rtv_heap);
 }
 
 void XeInterpRecordRT(Gpu& g, ID3D12GraphicsCommandList* cl, const XeInterp& x,

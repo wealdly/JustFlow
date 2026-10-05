@@ -37,7 +37,16 @@ struct XeFlow
 
 #define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
 
-XeFlow* XeFlowCreate(Gpu& g, UINT w, UINT h, UINT factor, int levels)
+// One pass writing `dst` (NPSR at rest): barrier to UAV, dispatch, barrier back.
+static void Run(XeFlow* f, ID3D12GraphicsCommandList* cl, const ComputePso& p, const GpuView* srv, ID3D12Resource* dst, const void* c, UINT gx, UINT gy)
+{
+    const GpuView uav = { dst, DXGI_FORMAT_UNKNOWN };
+    GpuBarrier(cl, dst, NPSR, UAV);
+    GpuDispatch(*f->g, cl, p, srv, &uav, c, gx, gy);
+    GpuBarrier(cl, dst, UAV, NPSR);
+}
+
+XeFlow* XeFlowCreate(Gpu& g, UINT w, UINT h, UINT factor)
 {
     XeFlow* f = new XeFlow;
     f->g = &g; f->w = w; f->h = h; f->factor = std::clamp(factor, 1u, 4u);
@@ -45,7 +54,7 @@ XeFlow* XeFlowCreate(Gpu& g, UINT w, UINT h, UINT factor, int levels)
     int n = 1;
     // Down to ~32 px wide: the coarsest level is then a handful of blocks, and the search there
     // (+-4 px = +-4 * 2^(n-1) L0 px) is what lets a fast pan be found at all.
-    while (n < kMaxLevels && (levels <= 0 ? (f->lw[n - 1] + 1) / 2 >= 32 : n < levels))
+    while (n < kMaxLevels && (f->lw[n - 1] + 1) / 2 >= 32)
     {
         f->lw[n] = (f->lw[n - 1] + 1) / 2; f->lh[n] = (f->lh[n - 1] + 1) / 2; ++n;
     }
@@ -70,7 +79,7 @@ XeFlow* XeFlowCreate(Gpu& g, UINT w, UINT h, UINT factor, int levels)
         ok = ok && (f->tmp[k] = GpuMakeTex(g, f->gw[k], f->gh[k], DXGI_FORMAT_R16G16_FLOAT, uav, NPSR, L"xe_grid_raw"));
     }
     f->sw = (f->lw[0] + 3) / 4; f->sh = (f->lh[0] + 3) / 4;
-    for (int d = 0; ok && d < 2; ++d) ok = (f->subgrid[d] = GpuMakeTex(g, f->sw, f->sh, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"xe_subgrid")) != nullptr;
+    for (int d = 0; ok && d < 2; ++d) ok = (f->subgrid[d] = GpuMakeTex(g, f->sw, f->sh, DXGI_FORMAT_R16G16_FLOAT, uav, NPSR, L"xe_subgrid")) != nullptr;
     if (!ok) { Log("[xeflow] create failed"); XeFlowDestroy(f); return nullptr; }
     Log("[xeflow] %ux%u factor %u: L0 %ux%u, %d levels down to %ux%u, grid %ux%u, reach ~%u native px",
         w, h, f->factor, f->lw[0], f->lh[0], n, f->lw[n - 1], f->lh[n - 1], f->gw[0], f->gh[0], 4u * ((1u << n) - 1) * f->factor);
@@ -88,22 +97,15 @@ void XeFlowDestroy(XeFlow* f)
 
 void XeFlowPyramid(XeFlow* f, ID3D12GraphicsCommandList* cl, ID3D12Resource* frame, int slot)
 {
-    Gpu& g = *f->g;
     ID3D12Resource** pyr = f->pyr[slot & 1];
-    {
-        const UINT c[6] = { f->w, f->h, f->lw[0], f->lh[0], f->factor, f->factor };
-        const GpuView srv = { frame, DXGI_FORMAT_UNKNOWN }, dst = { pyr[0], DXGI_FORMAT_UNKNOWN };
-        GpuBarrier(cl, pyr[0], NPSR, UAV);
-        GpuDispatch(g, cl, f->gray, &srv, &dst, c, GpuGroups(f->lw[0], 8), GpuGroups(f->lh[0], 8));
-        GpuBarrier(cl, pyr[0], UAV, NPSR);
-    }
+    const UINT c0[6] = { f->w, f->h, f->lw[0], f->lh[0], f->factor, f->factor };
+    const GpuView src0 = { frame, DXGI_FORMAT_UNKNOWN };
+    Run(f, cl, f->gray, &src0, pyr[0], c0, GpuGroups(f->lw[0], 8), GpuGroups(f->lh[0], 8));
     for (int k = 1; k < f->levels; ++k)
     {
         const UINT c[4] = { f->lw[k - 1], f->lh[k - 1], f->lw[k], f->lh[k] };
-        const GpuView srv = { pyr[k - 1], DXGI_FORMAT_UNKNOWN }, dst = { pyr[k], DXGI_FORMAT_UNKNOWN };
-        GpuBarrier(cl, pyr[k], NPSR, UAV);
-        GpuDispatch(g, cl, f->down, &srv, &dst, c, GpuGroups(f->lw[k], 8), GpuGroups(f->lh[k], 8));
-        GpuBarrier(cl, pyr[k], UAV, NPSR);
+        const GpuView src = { pyr[k - 1], DXGI_FORMAT_UNKNOWN };
+        Run(f, cl, f->down, &src, pyr[k], c, GpuGroups(f->lw[k], 8), GpuGroups(f->lh[k], 8));
     }
 }
 
@@ -120,29 +122,15 @@ void XeFlowEstimate(XeFlow* f, ID3D12GraphicsCommandList* cl, int from, int to, 
         // Without a parent the slot is bound but never read: out[k] is NPSR and not the target.
         const GpuView srv[3] = { { f->pyr[from & 1][k], DXGI_FORMAT_UNKNOWN }, { f->pyr[to & 1][k], DXGI_FORMAT_UNKNOWN },
                                  { parent ? out[k + 1] : out[k], DXGI_FORMAT_UNKNOWN } };
-        const GpuView raw = { f->tmp[k], DXGI_FORMAT_UNKNOWN };
-        GpuBarrier(cl, f->tmp[k], NPSR, UAV);
-        GpuDispatch(g, cl, k < f->fine && parent ? f->flow_r2 : f->flow, srv, &raw, &c, f->gw[k], f->gh[k]);
-        GpuBarrier(cl, f->tmp[k], UAV, NPSR);
-
-        const UINT mc[2] = { f->gw[k], f->gh[k] };
-        const GpuView msrv = { f->tmp[k], DXGI_FORMAT_UNKNOWN }, mdst = { out[k], DXGI_FORMAT_UNKNOWN };
-        auto median = [&]
+        Run(f, cl, k < f->fine && parent ? f->flow_r2 : f->flow, srv, f->tmp[k], &c, f->gw[k], f->gh[k]);
+        // Median tmp[k] -> out[k]; then each propagation pass out[k] -> tmp[k] (neighbours' vectors tried) and the median again.
+        const UINT mc[2] = { f->gw[k], f->gh[k] }, rc[5] = { f->lw[k], f->lh[k], f->gw[k], f->gh[k], k == 0 ? 1u : 0u };
+        const GpuView msrv = { f->tmp[k], DXGI_FORMAT_UNKNOWN }, rs[3] = { srv[0], srv[1], { out[k], DXGI_FORMAT_UNKNOWN } };
+        for (int r = 0; ; ++r)
         {
-            GpuBarrier(cl, out[k], NPSR, UAV);
-            GpuDispatch(g, cl, f->median, &msrv, &mdst, mc, GpuGroups(f->gw[k], 8), GpuGroups(f->gh[k], 8));
-            GpuBarrier(cl, out[k], UAV, NPSR);
-        };
-        median();
-        // Propagation: out[k] -> tmp[k] (neighbours' vectors tried), then the median back into out[k].
-        for (int r = 0; r < f->refine; ++r)
-        {
-            const UINT rc[5] = { f->lw[k], f->lh[k], f->gw[k], f->gh[k], k == 0 ? 1u : 0u };
-            const GpuView rs[3] = { srv[0], srv[1], { out[k], DXGI_FORMAT_UNKNOWN } };
-            GpuBarrier(cl, f->tmp[k], NPSR, UAV);
-            GpuDispatch(g, cl, f->prop, rs, &raw, rc, f->gw[k], f->gh[k]);
-            GpuBarrier(cl, f->tmp[k], UAV, NPSR);
-            median();
+            Run(f, cl, f->median, &msrv, out[k], mc, GpuGroups(f->gw[k], 8), GpuGroups(f->gh[k], 8));
+            if (r >= f->refine) break;
+            Run(f, cl, f->prop, rs, f->tmp[k], rc, f->gw[k], f->gh[k]);
         }
         if (f->stamp_base >= 0) GpuStamp(g, cl, f->stamp_base + 2 * k + 1);
     }
@@ -151,10 +139,7 @@ void XeFlowEstimate(XeFlow* f, ID3D12GraphicsCommandList* cl, int from, int to, 
         // 4x4 sub-blocks re-pick among their 8x8 block's vector and its neighbours' (xe_subsel.hlsl)
         const UINT c[6] = { f->lw[0], f->lh[0], f->gw[0], f->gh[0], f->sw, f->sh };
         const GpuView srv[3] = { { f->pyr[from & 1][0], DXGI_FORMAT_UNKNOWN }, { f->pyr[to & 1][0], DXGI_FORMAT_UNKNOWN }, { out[0], DXGI_FORMAT_UNKNOWN } };
-        const GpuView uav = { f->subgrid[dir & 1], DXGI_FORMAT_UNKNOWN };
-        GpuBarrier(cl, f->subgrid[dir & 1], NPSR, UAV);
-        GpuDispatch(g, cl, f->sub, srv, &uav, c, GpuGroups(f->sw, 8), GpuGroups(f->sh, 8));
-        GpuBarrier(cl, f->subgrid[dir & 1], UAV, NPSR);
+        Run(f, cl, f->sub, srv, f->subgrid[dir & 1], c, GpuGroups(f->sw, 8), GpuGroups(f->sh, 8));
     }
 }
 
@@ -165,10 +150,7 @@ void XeFlowStaticMap(XeFlow* f, ID3D12GraphicsCommandList* cl, int cur, int prev
 {
     struct { UINT lw, lh, gw, gh; float cell; } c = { f->lw[0], f->lh[0], XeFlowGridW(f), XeFlowGridH(f), (float)XeFlowCell(f) };
     const GpuView srv[3] = { { f->pyr[cur & 1][0], DXGI_FORMAT_UNKNOWN }, { f->pyr[prev & 1][0], DXGI_FORMAT_UNKNOWN }, { XeFlowGrid(f, 1), DXGI_FORMAT_UNKNOWN } };
-    const GpuView uav = { dst, DXGI_FORMAT_UNKNOWN };
-    GpuBarrier(cl, dst, NPSR, UAV);
-    GpuDispatch(*f->g, cl, f->stat, srv, &uav, &c, GpuGroups(f->lw[0], 8), GpuGroups(f->lh[0], 8));
-    GpuBarrier(cl, dst, UAV, NPSR);
+    Run(f, cl, f->stat, srv, dst, &c, GpuGroups(f->lw[0], 8), GpuGroups(f->lh[0], 8));
 }
 void XeFlowSetStamps(XeFlow* f, int base) { f->stamp_base = base; }
 void XeFlowSetFine(XeFlow* f, int levels) { f->fine = std::clamp(levels, 0, kMaxLevels); }
