@@ -26,6 +26,7 @@ cbuffer C : register(b0)
     float reject;
     uint  strip_w, strip_h;   // addon mask strip, see compose.hlsl
 };
+#include "compose_common.hlsli"
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
@@ -56,23 +57,6 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         d = lerp(float3(dl, dl, dl), d, chroma);
         res = saturate(nat + d);
     }
-    {
-        // no vibrance here: the filter layer (sharpen.hlsl) grades after the sharpen, model or no model
-        const float2 p = float2(q);
-        const float f = max(feather, 1);
-        [loop] for (uint i = 0; i < min(nrects, 64u); ++i)
-        {
-            const float x0 = rects[uint2(i * 4 + 0, 0)], y0 = rects[uint2(i * 4 + 1, 0)];
-            const float x1 = rects[uint2(i * 4 + 2, 0)], y1 = rects[uint2(i * 4 + 3, 0)];
-            const float d = max(max(max(x0 - p.x, p.x - x1), max(y0 - p.y, p.y - y1)), 0);
-            res = lerp(res, nat, 1 - smoothstep(0, f, d));
-        }
-        if (wipe_mode == 1)
-        {
-            const float split = wipe_x * w;
-            if (abs(p.x - split) < 1.5) res = 1;
-            else if (p.x < split)      res = nat;
-        }
-    }
+    res = UiRectsAndWipe(res, nat, q);
     dst[id.xy] = float4(res, 1);
 }

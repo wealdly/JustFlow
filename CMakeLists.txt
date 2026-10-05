@@ -21,6 +21,8 @@ set(SHADERS swizzle gray downscale expand compose residual compose_residual text
 set(GFX_SHADERS xe_interp_gfx uiblend)
 set(SHADER_DEPS_swizzle ${CMAKE_SOURCE_DIR}/shaders/capture_in.hlsli)
 set(SHADER_DEPS_same ${CMAKE_SOURCE_DIR}/shaders/capture_in.hlsli)
+set(SHADER_DEPS_compose ${CMAKE_SOURCE_DIR}/shaders/compose_common.hlsli)
+set(SHADER_DEPS_compose_residual ${CMAKE_SOURCE_DIR}/shaders/compose_common.hlsli)
 set(SHADER_DEPS_xe_flow_r2 ${CMAKE_SOURCE_DIR}/shaders/xe_flow.hlsl)   # it #includes xe_flow.hlsl
 set(SHADER_DEPS_xe_interp_gfx ${CMAKE_SOURCE_DIR}/shaders/xe_interp.hlsl)
 set(SHADER_HEADERS)
