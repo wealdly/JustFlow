@@ -1,22 +1,16 @@
-// Phase 2: DLSS frame generation (nvngx_dlssg.dll, NGX feature 11) on the composed 4K frame.
-// Desktop path lifted from NeuralScreen's frame_generation.inl: identity camera, flat 0.5 depth,
-// a constant zero motion field (DLSS-G measures motion itself - see fg.cpp Evaluate).
-// A presenter thread owns OverlayPresent while an Fg
-// exists: it takes the oldest ready slot, evaluates DLSS-G (multiplier - 1) times on its own
-// D3D12 queue (a GpuCtx: the evaluates never queue behind NR / compose on Gpu::queue; the FG
-// queue waits GPU-side on the slot's render fence, the present queue on the evaluate fence),
-// then presents generated frames + the real frame through the overlay's present queue, paced
-// on the monitor's vblank (or a CPU timer). Any failure sets FgFailed; the caller destroys the
-// Fg and recreates it (a generation failure drops to passthrough).
+// Frame generation (DLSS-G, nvngx_dlssg.dll, NGX feature 11) on the composed output frame: identity
+// camera, flat 0.5 depth, a constant zero motion field (DLSS-G measures motion itself - see fg.cpp Evaluate).
+// A presenter thread owns OverlayPresent while an Fg exists: it takes the newest ready slot, evaluates
+// DLSS-G on its own D3D12 queue (a GpuCtx, so evaluates never queue behind NR / compose on Gpu::queue;
+// the FG queue waits GPU-side on the slot's render fence, the present queue on the evaluate fence),
+// then presents generated frames + the real frame through the overlay's present queue, paced on the
+// monitor's vblank (or a CPU timer). Any failure sets FgFailed; the caller destroys and recreates the Fg.
 //
-// The presenter is ALWAYS on (a DXGI Present of a composed layered 4K window costs ~10 ms of CPU;
-// on the main thread that capped capture at ~70 fps). multiplier 1 = passthrough: no NGX, no
-// evaluates, no gen/mv textures; the presenter CPU-waits each slot's render fence and presents the
-// real frame on the next vblank (pacing=vblank) or immediately (timer). It always takes the NEWEST
-// ready slot: older ready ones are dropped (counted in FgStatsOut::drops) - a display slower than
-// the capture never throttles the main thread, and the frames it skips would not have reached the
-// screen anyway. The slot ring and the latency stats are shared with
-// generation mode.
+// The presenter is ALWAYS on (a DXGI Present of a composed layered 4K window costs ~10 ms of CPU, which
+// capped capture at ~70 fps on the main thread). multiplier 1 = passthrough: no NGX, no evaluates; the
+// presenter CPU-waits each slot's render fence and presents the real frame on the next vblank (or at
+// once on the timer). Only the NEWEST ready slot is taken, older ready ones are dropped (FgStatsOut::drops):
+// a display slower than the capture never throttles the main thread.
 //
 // Pacing (vblank mode): output slot L = real interval / multiplier. Frame k of a slot is due at
 // anchor + k*L, anchor = max(now, previous real frame's target + L) - a continuous cadence when
@@ -27,18 +21,15 @@
 //
 // Contract:
 //   FgAcquire (main thread, BEFORE list 2 writes the frame): takes a slot and returns the texture
-//             the pipeline composes into, so the last 4K pass lands in the slot instead of being
-//             copied there afterwards. Orders the reuse GPU-side (the slot's last evaluate and its
+//             the pipeline composes into. Orders the reuse GPU-side (the slot's last evaluate and its
 //             last present) before returning. No free slot: the OLDEST READY one is taken on the
-//             spot - the presenter keeps only the newest, so that frame was going to be dropped
-//             anyway and waiting for it only stalls the capture. nullptr = no slot, no present.
+//             spot (the presenter would drop it anyway). nullptr = no slot, no present.
 //   FgRecord  (main thread): the acquired slot's UI rects.
 //   FgSubmit  (main thread, after GpuEnd): hands the recorded slot to the presenter with the fence
 //             value that completes the frame. reset = no interpolation against the previous frame.
 //             cap_qpc/acq_qpc (QPC ticks, 0 = unknown) feed the age/pipe latency stats.
-// UI rects: the composed frame has them restored by the compose pass, and each generated frame
-// gets the same pixels copied back out of s->real before it is presented - axis-aligned boxes,
-// so it is CopyTextureRegion per rect on the FG queue, no shader.
+// UI rects: each generated frame gets the real frame's pixels copied back inside them before it is
+// presented (CopyTextureRegion per rect on the FG queue, no shader).
 #pragma once
 #include "d3d.h"
 #include "present.h"
@@ -90,10 +81,9 @@ struct FgStatsOut
     UINT disabled = 0;                 // DLSS-G raised pOutputDisableInterpolation for the pair
     UINT paused = 0;                   // real frames presented while the governor had generation off
     UINT preempts = 0;                 // a newer slot arrived before the generated frame was due
-    // Sums, not means: FgStats is drained every frame and the caller aggregates over its own
-    // window. A mean here could not be added up, and silently read as -1.
+    // Sums, not means: FgStats is drained every frame and the caller aggregates over its own window.
     double vblank_wait_sum_ms = 0; UINT vblank_waits = 0;   // presenter blocked in OverlayWaitVBlank
-    double record_wait_sum_ms = 0; UINT record_waits = 0;   // MAIN thread in FgRecord, no free slot
+    double record_wait_sum_ms = 0; UINT record_waits = 0;   // MAIN thread in FgAcquire, no free slot
     std::vector<double> spacing_ms;    // present-to-present spacing of everything shown
     std::vector<double> age_ms;        // real frames: our present - capture timestamp
     std::vector<double> pipe_ms;       // real frames: our present - capture acquire
