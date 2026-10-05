@@ -33,10 +33,6 @@ static NVSDK_NGX_Result NVSDK_CONV FgEvalBridge(ID3D12GraphicsCommandList* cl, c
 #include "nvsdk_ngx_helpers_dlssg.h"
 #undef NVSDK_NGX_D3D12_EvaluateFeature_C
 
-static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-static const D3D12_RESOURCE_STATES UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-static const D3D12_RESOURCE_STATES CSRC = D3D12_RESOURCE_STATE_COPY_SOURCE;
-static const D3D12_RESOURCE_STATES CDST = D3D12_RESOURCE_STATE_COPY_DEST;
 static const int kSlots = 4, kMaxGen = 3;   // 4: engine=video holds three real frames while the pipeline writes a fourth
 
 // Rest states: real CSRC, gen[] CSRC, mv/depth NPSR, disable UAV. state: 0 free, 1 writing
@@ -666,7 +662,6 @@ static void VideoPresent(Fg* f)
 }
 
 // ---- lifecycle ---------------------------------------------------------------------------------------
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
 
 static bool CreateFeature(Fg* f, const char* how)
 {

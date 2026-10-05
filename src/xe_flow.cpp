@@ -10,8 +10,6 @@
 #include "cs_xe_refine.h"
 #include <algorithm>
 
-static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-static const D3D12_RESOURCE_STATES UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 static const int kMaxLevels = 8;
 static const UINT kBlock = 8;
 
@@ -34,8 +32,6 @@ struct XeFlow
     ID3D12Resource* tmp[kMaxLevels] = {};            // raw (pre-median) flow, NPSR
     ID3D12Resource* subgrid[2] = {};                 // R16G16F 4x4-block flow per direction (xe_subsel), NPSR
 };
-
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
 
 // One pass writing `dst` (NPSR at rest): barrier to UAV, dispatch, barrier back.
 static void Run(XeFlow* f, ID3D12GraphicsCommandList* cl, const ComputePso& p, const GpuView* srv, ID3D12Resource* dst, const void* c, UINT gx, UINT gy)

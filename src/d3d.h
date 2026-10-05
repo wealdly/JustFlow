@@ -7,6 +7,13 @@
 #include <dxgi1_6.h>
 #include <cstdint>
 
+#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
+// Barrier/creation shorthands: every module's state transitions read as one line.
+static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+static const D3D12_RESOURCE_STATES CSRC = D3D12_RESOURCE_STATE_COPY_SOURCE, CDST = D3D12_RESOURCE_STATE_COPY_DEST;
+static const D3D12_RESOURCE_STATES COMMON = D3D12_RESOURCE_STATE_COMMON, PRESENT = D3D12_RESOURCE_STATE_PRESENT;
+static const D3D12_RESOURCE_FLAGS FUAV = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
 // One queue's recording ring: a 3-deep allocator ring behind one fence + its own event (so another thread
 // can wait without sharing one), a shader-visible descriptor heap and a timestamp heap, both split into
 // kFrames slots. Gpu is the main queue's; a GpuCtx is a secondary queue's.

@@ -4,9 +4,6 @@
 #include "ps_xe_interp_gfx.h"
 #include "log.h"
 
-static const D3D12_RESOURCE_STATES UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
-
 bool XeInterpInit(Gpu& g, XeInterp& x)
 {
     if (!GpuMakeCompute(g, g_cs_xe_interp, sizeof g_cs_xe_interp, 5, 1, 11, x.pso, L"xe_interp")) return false;

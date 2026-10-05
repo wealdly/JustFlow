@@ -288,7 +288,6 @@ void CsSharpen(Gpu& g, Shaders* s, ID3D12GraphicsCommandList* cl, ID3D12Resource
 // ---------------------------------------------------------------------------------------------
 bool ComposeSelfTest(Gpu& g)
 {
-    const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     const D3D12_RESOURCE_FLAGS RW = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     const UINT w = 16, h = 16, ww = 8, wh = 8;
     Shaders* s = ShadersCreate(g);

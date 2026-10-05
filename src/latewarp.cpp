@@ -15,8 +15,6 @@ struct Latewarp
     unsigned long long frame_id = 0;
 };
 
-static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-
 static NVSDK_NGX_Result SafeEvaluate(ID3D12GraphicsCommandList* cl, NVSDK_NGX_Handle* h, NVSDK_NGX_Parameter* p, DWORD* code)
 {
     NVSDK_NGX_Result r = (NVSDK_NGX_Result)0x7FFFFFFF;

@@ -10,11 +10,6 @@
 #include <thread>
 #include <vector>
 
-static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-static const D3D12_RESOURCE_STATES CSRC = D3D12_RESOURCE_STATE_COPY_SOURCE;
-static const D3D12_RESOURCE_STATES CDST = D3D12_RESOURCE_STATE_COPY_DEST;
-static const D3D12_RESOURCE_STATES COMMON = D3D12_RESOURCE_STATE_COMMON;
-static const D3D12_RESOURCE_STATES PRESENT = D3D12_RESOURCE_STATE_PRESENT;
 static const int kFrames = 4, kPairs = 3;
 
 // Rest states: frame NPSR, pair grids NPSR, backbuffers PRESENT. Guarded by XeFg::mu: every field below except
@@ -60,8 +55,6 @@ struct XeFg
     ID3D12Resource* snap_rb = nullptr; D3D12_PLACED_SUBRESOURCE_FOOTPRINT snap_fp = {}; UINT64 snap_bytes = 0;
     bool snap_pending = false; UINT64 snap_fence = 0; float snap_t = 0;   // under mu
 };
-
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
 
 static bool Fail(XeFg* f, const char* why)
 {

@@ -62,8 +62,6 @@ struct Capture
     LONG  foreign = 0;             // desktop updates that did not touch our region (telemetry, reset on read)
 };
 
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
-
 static void CaptureFree(Capture* c)
 {
     c->arrived_rev.revoke();

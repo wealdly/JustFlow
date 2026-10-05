@@ -40,10 +40,6 @@
 #include <string>
 #include <vector>
 
-static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-static const D3D12_RESOURCE_STATES UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
-
 static std::wstring ExeDir()
 {
     wchar_t p[MAX_PATH]; GetModuleFileNameW(nullptr, p, MAX_PATH);

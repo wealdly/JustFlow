@@ -6,8 +6,6 @@
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
 
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
-
 double QpcToMs(LONGLONG qpc)
 {
     static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();

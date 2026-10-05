@@ -35,12 +35,7 @@
 
 #pragma comment(lib, "powrprof.lib")
 
-static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-static const D3D12_RESOURCE_STATES UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-static const D3D12_RESOURCE_STATES CSRC = D3D12_RESOURCE_STATE_COPY_SOURCE;
-static const D3D12_RESOURCE_STATES COMMON = D3D12_RESOURCE_STATE_COMMON;
 static const double kWindowMs = 1500, kEngageMs = 1500, kReleaseMs = 3000, kAwayMs = 10000;
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
 
 // ---- settings (justflow_xe.ini next to the exe) ------------------------------------------------------------
 struct Settings

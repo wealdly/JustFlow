@@ -109,12 +109,6 @@ void PipelineToast(Pipeline* p, const char* fmt, ...)
 }
 
 // ---- pipeline ---------------------------------------------------------------------------------------
-#define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
-static const D3D12_RESOURCE_STATES NPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-static const D3D12_RESOURCE_STATES UAV = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-static const D3D12_RESOURCE_STATES COMMON = D3D12_RESOURCE_STATE_COMMON;
-static const D3D12_RESOURCE_STATES CSRC = D3D12_RESOURCE_STATE_COPY_SOURCE, CDST = D3D12_RESOURCE_STATE_COPY_DEST;
-static const D3D12_RESOURCE_FLAGS FUAV = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
 // ---- addon UI mask strip (addon\JustFlow\JustFlow.lua): 130 cells of 4x4 px at the top-left ----------
 static const UINT kStripCells = 2 * 64 + 2, kStripW = kStripCells * 4, kStripH = 4;   // 520 x 4 px
