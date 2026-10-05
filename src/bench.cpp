@@ -103,7 +103,7 @@ int RunBench(int argc, char** argv)
         Log("[bench] latewarp test yaw %.3f pitch %.3f roll %.3f vfov %.1f -> %s", lw_a[0], lw_a[1], lw_a[2], lw_a[3], rc ? "FAILED" : "lw_out.png");
         LatewarpDestroy(l); if (in) in->Release(); if (out) out->Release(); GpuShutdown(g); return rc;
     }
-    if (cfg.selftest) { ComposeSelfTest(g); MouseSelfTest(); }
+    if (cfg.selftest) { ComposeSelfTest(g); MouseSelfTest(); WorkSelfTest(); }
     ResolveWork(cfg, dir);
     Pipeline* p = PipelineCreate(g, cfg, w, h, present, nullptr);
     if (!p) { GpuShutdown(g); return 1; }

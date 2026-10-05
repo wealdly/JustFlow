@@ -57,9 +57,10 @@ struct Setting
 const wchar_t* const kTabs[] = { L"Neural", L"Filters", L"Frame gen", L"Display", L"System", L"Hotkeys" };
 const int kTabCount = (int)(sizeof kTabs / sizeof *kTabs);
 
-// Render scale, as NR / upscaler tools state it: the model at capture / N. auto = nearest 1080 lines
+// Model resolution as a share of the screen (capture): a percentage, never "Nx" - "3x" read as upscaling
+// when it meant a third. auto = nearest 1080 lines
 // (2x on 4K). native and WxH in an ini still work (config.cpp) and show up as extra entries.
-const wchar_t* const kWork = L"auto|1x|1.5x|2x|3x";
+const wchar_t* const kWork = L"auto|100%|67%|50%|33%";
 // Optical flow input: read by the DLSS model and the warp engines only - DLSS-G measures motion itself.
 // Measured on an idle 5080 from a 4K capture: 0.55 / 1.05 / 1.49 / 3.61 ms.
 const wchar_t* const kFlow = L"640x360|960x540|1280x720|1920x1080";
@@ -68,8 +69,8 @@ const Setting kSettings[] = {
     // ---- 0 Neural layer: the switch, what runs under it, and how the model is tuned ------------
     { 0, L"nr", L"enabled",           L"Neural layer (F9, all profiles)", Bool, nullptr, L"0",
       L"Turns the DLSS neural-rendering model on or off, for every profile. It re-renders each frame with more detail and realistic lighting. Costs 4-12 ms of GPU per frame, which can lower the game's own frame rate." },
-    { 0, L"nr", L"work",              L"Render scale",       Enum,  kWork,   L"auto",
-      L"Render scale: the size the model works at, relative to the screen. 1x = full resolution (most detail, slowest - about 12 ms at 4K). 2x = half width and height (about 4 ms at 4K). 3x = a third (fastest, softest). auto = whichever is nearest 1080p. The result is always applied at full resolution." },
+    { 0, L"nr", L"work",              L"Model resolution",   Enum,  kWork,   L"auto",
+      L"The size the neural model works at, as a share of the screen. 100% = full resolution (most detail, slowest - about 12 ms at 4K). 50% = half width and height (about 4 ms at 4K). 33% = a third (fastest, softest). auto = whichever is nearest 1080p (50% on 4K). Its result is always applied to the full-resolution picture." },
     { 0, L"nr", L"passes",            L"Model passes",       Enum,  L"1|2|3", L"1",
       L"How many times the model runs on each frame, each pass refining the last one's result: a stronger, more detailed look. Costs that many times the model's GPU time (2 = double). 1 is what the model was made for; 2 gives a richer look; 3 is the most that still adds anything." },
     { 0, L"nr", L"model_every",       L"Model every Nth frame", Enum, L"1|2|3|4|6|8", L"1",
@@ -196,7 +197,7 @@ const PresetKey kPreset[] = {
     // Performance stays the small per-frame evaluate because it is the one that cannot hitch a game
     // sharing the GPU; a native evaluate is one ~12 ms block at 4K. The old 1440p / 1800p tiers were
     // non-integer ratios of 4K and lost to 1080p on cost AND fidelity (see WorkAuto in main.cpp).
-    { L"nr",  L"work",    { L"auto",      L"auto",      L"1x",        L"1x" } },
+    { L"nr",  L"work",    { L"auto",      L"auto",      L"100%",      L"100%" } },
     { L"nr",  L"model_every", { L"3",     L"1",         L"6",         L"3" } },
     { L"filters", L"sharpen", { L"0.4",   L"0.3",       L"0.2",       L"0.0" } },
     { L"ofa", L"input",   { L"640x360",   L"960x540",   L"960x540",   L"1280x720" } },
@@ -395,7 +396,7 @@ INT_PTR CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                 SendMessageW(tt, TTM_ADDTOOLW, 0, (LPARAM)&ti);
             };
             for (int i = 0; i < kCount; ++i) if (kSettings[i].tip) { add(ID_LBL0 + i, kSettings[i].tip); add(ID_CTL0 + i, kSettings[i].tip); }
-            static const wchar_t* const kPresetTip = L"Fills in the cost settings - render scale, model every Nth frame, sharpen, motion input - "
+            static const wchar_t* const kPresetTip = L"Fills in the cost settings - model resolution, model every Nth frame, sharpen, motion input - "
                 L"for a speed/quality balance. Nothing is saved until Apply or OK, and no layer is switched on.";
             add(ID_PRESET_LBL, kPresetTip); add(ID_PRESET, kPresetTip);
         }
@@ -581,7 +582,7 @@ INT_PTR CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         L"; Quality dials only: the layer switches (F9 neural, F6 filters, F8 frame generation) are\n"
         L"; app-wide, in justflow.ini.\n\n"
         L"[nr]\n; the DLSS neural-rendering model, 4-12 ms.\n"
-        L"; work = render scale: 1x (the capture), 1.5x, 2x, 3x smaller; auto = nearest 1080p (2x on 4K).\n"
+        L"; work = model resolution as a share of the screen: 100%, 67%, 50%, 33%; auto = nearest 1080p (50% on 4K).\n"
         L"work=auto\nchroma=0.25\n"
         L"; model_every=N runs the model on every Nth frame off the main path. Raise it (2-4) when the\n"
         L"; game presents faster than the model can follow - e.g. a game running its own frame generation.\n"

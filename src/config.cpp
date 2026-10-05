@@ -102,8 +102,11 @@ int ConfigLoad(const wchar_t* app, const wchar_t* profile, Config& c)
     if (swscanf_s(work.c_str(), L"%ux%u", &c.work_w, &c.work_h) != 2) { c.work_w = c.work_h = 0; }
     c.work_auto = !c.work_w || !c.work_h;
     c.nr_passes = std::clamp(I(L"nr", L"passes", c.nr_passes), 1, 3);
-    // render scale, as NR / upscaler tools state it: 1x = the capture itself, 2x = half each way, ...
-    c.work_scale = work == L"native" ? 1.0f : (work.size() > 1 && (work.back() == L'x' || work.back() == L'X')) ? (float)_wtof(work.c_str()) : 0.0f;
+    // model resolution as a share of the capture: 100% = the capture itself, 50% = half each way. Kept
+    // internally as the divisor; "Nx" (the divisor, from an earlier build) and "native" still read.
+    const wchar_t last = work.empty() ? 0 : work.back();
+    const float wv = (float)_wtof(work.c_str());
+    c.work_scale = work == L"native" ? 1.0f : (last == L'%' && wv > 0) ? 100.0f / wv : (last == L'x' || last == L'X') ? wv : 0.0f;
     c.param_block = I(L"nr", L"param_block", c.param_block);
     c.tuning.preset = I(L"nr", L"preset", c.tuning.preset);
     c.tuning.style = I(L"nr", L"style", c.tuning.style);

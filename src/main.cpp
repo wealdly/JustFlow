@@ -65,16 +65,39 @@ std::wstring ExeDir()
 static void WorkAuto(Config& c, UINT w, UINT h)
 {
     if (!c.work_auto || !w || !h) return;
-    float s = c.work_scale;   // render scale; auto picks one: the divisor 1..4 nearest 1080 lines
+    float s = c.work_scale;   // divisor of the capture (work=50% -> 2); auto picks one: 1..4, nearest 1080 lines
     // Any divisor, rounded: CsDownscale is an exact area filter over fractional footprints. Exact
     // divisors only gave a 3840x2159 window (Chrome unfocused) no candidate but 1 - the model at 4K.
-    for (UINT d = 1, best_d = ~0u; s < 1.0f && d <= 4; ++d)
+    // (the search must not test `s` itself: setting it on the first candidate ended the loop at 100% -
+    // auto ran the model at native 4K, 12 ms instead of 4, from 10a3c24 until this)
+    if (s < 1.0f)
     {
-        const UINT lines = (h + d / 2) / d, dist = lines > 1080 ? lines - 1080 : 1080 - lines;
-        if (lines >= 360 && dist < best_d) { best_d = dist; s = (float)d; }   // strict <: on a tie the larger size stays
+        UINT best = 1, best_d = ~0u;
+        for (UINT d = 1; d <= 4; ++d)
+        {
+            const UINT lines = (h + d / 2) / d, dist = lines > 1080 ? lines - 1080 : 1080 - lines;
+            if (lines >= 360 && dist < best_d) { best_d = dist; best = d; }   // strict <: on a tie the larger size stays
+        }
+        s = (float)best;
     }
     if (s < 1.0f) s = 1.0f;
     c.work_w = std::max(64u, (UINT)(w / s + 0.5f)); c.work_h = std::max(64u, (UINT)(h / s + 0.5f));
+}
+
+// The work-size rule, checked ([log] selftest=1, bench): auto lost its search once and ran 4K at 100%.
+bool WorkSelfTest()
+{
+    struct { const char* work; float scale; UINT w, h, ew, eh; } k[] = {
+        { "auto", 0, 3840, 2160, 1920, 1080 }, { "auto", 0, 3840, 2159, 1920, 1080 }, { "auto", 0, 2560, 1440, 2560, 1440 },
+        { "auto", 0, 1920, 1080, 1920, 1080 }, { "100%", 1, 3840, 2160, 3840, 2160 }, { "33%", 3.0303f, 3840, 2160, 1267, 713 } };
+    bool ok = true;
+    for (const auto& t : k)
+    {
+        Config c; c.work_auto = true; c.work_scale = t.scale; WorkAuto(c, t.w, t.h);
+        if (c.work_w != t.ew || c.work_h != t.eh) { ok = false; Log("[nr] work self-test FAIL: %s of %ux%u -> %ux%u, want %ux%u", t.work, t.w, t.h, c.work_w, c.work_h, t.ew, t.eh); }
+    }
+    if (ok) Log("[nr] work self-test PASS");
+    return ok;
 }
 
 void ResolveWork(Config& c, const std::wstring& dir)
@@ -342,7 +365,7 @@ Pipeline* PipelineCreate(Gpu& g, const Config& cfg, UINT w, UINT h, bool with_ov
     Pipeline* p = new Pipeline();
     p->g = &g; p->cfg = cfg; p->w = w; p->h = h; p->target = target;
     WorkAuto(p->cfg, w, h);
-    if (p->cfg.work_auto) Log("[nr] model %ux%u (render scale of the %ux%u capture)", p->cfg.work_w, p->cfg.work_h, w, h);
+    if (p->cfg.work_auto) Log("[nr] model %ux%u (model resolution, of the %ux%u capture)", p->cfg.work_w, p->cfg.work_h, w, h);
     // CsGray needs an integer block: round the block, derive the gray size from it.
     const UINT bx = std::max(1u, (UINT)std::lround((double)w / cfg.ofa_w)), by = std::max(1u, (UINT)std::lround((double)h / cfg.ofa_h));
     p->gw = w / bx; p->gh = h / by;

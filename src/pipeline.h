@@ -142,6 +142,7 @@ struct Pipeline
 std::wstring ExeDir();
 // param_block from justflow.spike.ini; the work size is WorkAuto's (main.cpp), resolved once the capture size is known.
 void ResolveWork(Config& c, const std::wstring& dir);
+bool WorkSelfTest();   // the work-size rule against known answers (selftest)
 // Profiles: profiles\*.ini next to the exe, `names` = the sorted stems. `ini` (--ini) wins when non-empty
 // (index = its stem's slot in names, -1 if none); else justflow.ini [app] profile=<name> when it is not "auto";
 // otherwise the first profile whose [capture] window exists right now, else "wow", else the first.
